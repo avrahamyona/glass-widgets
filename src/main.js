@@ -123,7 +123,7 @@ ipcMain.handle('cal:events',async()=>{const c=loadCreds();if(!c)return {connecte
 const bat={pods:null,podsAt:0,iphone:null};
 function startScan(){
   if(process.platform!=='win32')return;
-  const p=spawn('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'lib','ble-scan.ps1')],{windowsHide:true});
+  const p=spawn('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',psFile('ble-scan.ps1')],{windowsHide:true});
   p.stdout.on('data',d=>String(d).split(/\r?\n/).forEach(l=>{const m=l.match(/^AP ([0-9A-F]+) (-?\d+)/);if(!m)return;
     const r=parseAirPods(Buffer.from(m[1],'hex'));if(r&&(+m[2]>-75)){bat.pods=r;bat.podsAt=Date.now()}}));
   p.on('exit',()=>setTimeout(startScan,15000));
@@ -141,11 +141,14 @@ ipcMain.handle('bat:get',()=>({pods:bat.pods&&Date.now()-bat.podsAt<10*60e3?bat.
 
 // ---- now playing via Windows media session (SMTC)
 let media={none:true},mediaAt=0;const cmdFile=()=>path.join(app.getPath('temp'),'glasswidgets-media-cmd.txt');
+// powershell cannot read files inside app.asar, so write the script to a temp folder first
+function psFile(name){const d=path.join(app.getPath('temp'),'glasswidgets-ps');fs.mkdirSync(d,{recursive:true});const f=path.join(d,name);fs.writeFileSync(f,'\ufeff'+fs.readFileSync(path.join(__dirname,'lib',name),'utf8'));return f}
 function startMedia(){
   if(process.platform!=='win32')return;
-  const p=spawn('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'lib','media.ps1'),'-CmdFile',cmdFile()],{windowsHide:true});
+  const p=spawn('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',psFile('media.ps1'),'-CmdFile',cmdFile()],{windowsHide:true});
+  let errBuf='';p.stderr.setEncoding('utf8');p.stderr.on('data',d=>{errBuf=(errBuf+d).slice(-300);media={none:true,err:errBuf.trim()};mediaAt=Date.now()});p.on('error',e=>{media={none:true,err:'powershell: '+e.message};mediaAt=Date.now()});
   let buf='';p.stdout.setEncoding('utf8');
-  p.stdout.on('data',d=>{buf+=d;let i;while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i).trim();buf=buf.slice(i+1);try{media=JSON.parse(l);mediaAt=Date.now()}catch{}}});
+  p.stdout.on('data',d=>{buf+=d;let i;while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i).trim();buf=buf.slice(i+1);try{const o=JSON.parse(l.replace(/^\ufeff/,''));media=o.err?{none:true,err:o.err}:o;mediaAt=Date.now()}catch{}}});
   p.on('exit',()=>setTimeout(startMedia,10000));app.on('quit',()=>p.kill());
 }
 ipcMain.handle('media:get',()=>({...media,age:Date.now()-mediaAt}));
