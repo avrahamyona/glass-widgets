@@ -1,0 +1,23 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{padding:14px 15px;display:flex;flex-direction:column}
+.row{margin-bottom:6px}.k{font-size:11px;font-weight:600;color:var(--text2);display:flex;align-items:center;gap:4px}
+.v{font-size:25px;font-weight:300;letter-spacing:-.8px;line-height:1.1}.v small{font-size:12px;font-weight:600;color:var(--text2);margin-left:2px;letter-spacing:0}
+svg{width:100%;height:46px;margin-top:auto}
+</style>
+<body><div class=widget>
+<div class=row><div class=k><span style="color:#30d158">▼</span> הורדה</div><div class=v id=d>0<small>KB/s</small></div></div>
+<div class=row><div class=k><span style="color:#0a84ff">▲</span> העלאה</div><div class=v id=u>0<small>KB/s</small></div></div>
+<svg id=g viewBox="0 0 170 46" preserveAspectRatio=none></svg></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const H={d:Array(40).fill(0),u:Array(40).fill(0)};
+const fmt=b=>b>=1048576?[(b/1048576).toFixed(1),'MB/s']:[Math.round(b/1024),'KB/s'];
+function line(a,max,c){const p=a.map((v,i)=>`${i*170/39},${44-(v/max)*40}`).join(' ');return `<polygon points="0,46 ${p} 170,46" fill="${c}" opacity=".18"/><polyline points="${p}" fill="none" stroke="${c}" stroke-width="1.8" stroke-linejoin="round"/>`}
+function render(s){H.d.push(s.down);H.d.shift();H.u.push(s.up);H.u.shift();
+ const [dv,du]=fmt(s.down),[uv,uu]=fmt(s.up);d.innerHTML=dv+'<small>'+du+'</small>';u.innerHTML=uv+'<small>'+uu+'</small>';
+ const max=Math.max(51200,...H.d,...H.u);g.innerHTML=line(H.d,max,'#30d158')+line(H.u,max,'#0a84ff')}
+if(q.get('demo')){for(let i=0;i<40;i++)render({down:200e3+Math.abs(Math.sin(i/4))*2.2e6+(i>30?3e6:0),up:60e3+Math.abs(Math.cos(i/5))*4e5});}
+else setInterval(()=>api.net().then(render),1000);
+</script>
