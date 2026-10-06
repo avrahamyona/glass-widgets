@@ -136,11 +136,12 @@ ipcMain.handle('media:cmd',(_,c)=>{if(['toggle','next','prev','play','pause'].in
 const lock=app.requestSingleInstanceLock();if(!lock)app.quit();
 app.on('second-instance',()=>openSettings());
 app.whenReady().then(()=>{
+  if(!lock)return;
   startMedia();startScan();const batTok=startBatteryServer();
   clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);
   const en=rd('enabled.json',null);
   Object.keys(WIDGETS).forEach(id=>{if(!en||en[id]!==false)open(id)});
-  if(!en)openSettings();
+  openSettings(); // every launch opens the management window
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
   tray.setToolTip('GlassWidgets');
   tray.on('click',openSettings);
