@@ -1,0 +1,40 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{padding:12px 14px;display:flex;flex-direction:column}
+.tabs{display:flex;gap:2px;background:rgba(128,128,128,.16);border-radius:9px;padding:2px;margin-bottom:10px}
+.tabs button{flex:1;border:0;background:none;color:var(--text2);font:600 10px var(--font);padding:5px 0;border-radius:7px;cursor:pointer}
+.tabs button.on{background:var(--glass);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.18)}
+[data-theme=dark] .tabs button.on{background:#3a3a3c}
+.r{display:flex;gap:6px;align-items:center;margin-bottom:8px}
+input,select{border:0;outline:0;background:rgba(128,128,128,.15);color:var(--text);font:500 13px var(--font);border-radius:8px;padding:6px 8px;min-width:0}
+input{direction:ltr;width:96px;font-size:16px;font-weight:500}select{flex:1}
+.res{direction:ltr;text-align:right;font-size:28px;font-weight:300;letter-spacing:-1px;margin-top:auto;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.res small{font-size:12px;font-weight:600;color:var(--text2);margin-left:4px;letter-spacing:0}
+</style>
+<body><div class=widget><div class="tabs nd" id=tabs></div>
+<div class="r nd"><input id=a type=number value=1 step=any><select id=f></select></div>
+<div class="r nd"><span style="font-size:16px;color:var(--text2)">=</span><select id=t></select></div>
+<div class=res id=res></div></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const CATS={
+ 'אורך':{m:1,km:1000,cm:.01,mm:.001,mi:1609.344,yd:.9144,ft:.3048,in:.0254},
+ 'משקל':{kg:1,g:.001,lb:.45359237,oz:.028349523},
+ 'טמפ׳':{'°C':1,'°F':1,K:1},
+ 'מטבע':{ILS:1,USD:1,EUR:1,GBP:1}};
+let cat='אורך',rates={ILS:1};
+const conv={'טמפ׳':(v,f,t)=>{let c=f==='°C'?v:f==='°F'?(v-32)*5/9:v-273.15;return t==='°C'?c:t==='°F'?c*9/5+32:c+273.15},
+ 'מטבע':(v,f,t)=>v/rates[f]*rates[t]};
+const std=(v,f,t)=>v*CATS[cat][f]/CATS[cat][t];
+function fill(sel,def){sel.innerHTML=Object.keys(CATS[cat]).map(k=>`<option>${k}</option>`).join('');sel.value=def}
+const defs={'אורך':['km','mi'],'משקל':['kg','lb'],'טמפ׳':['°C','°F'],'מטבע':['USD','ILS']};
+function tab(c){cat=c;tabs.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.textContent===c));fill(f,defs[c][0]);fill(t,defs[c][1]);calc();if(c==='מטבע'&&!q.get('demo'))loadRates()}
+function calc(){const v=parseFloat(a.value);if(isNaN(v)){res.textContent='';return}
+ const r=(conv[cat]||std)(v,f.value,t.value);if(r===undefined||isNaN(r)){res.textContent='…';return}
+ res.innerHTML=(Math.abs(r)>=1000?r.toLocaleString('en-US',{maximumFractionDigits:2}):+r.toPrecision(5))+'<small>'+t.value+'</small>'}
+async function loadRates(){try{const j=await(await fetch('https://api.frankfurter.dev/v1/latest?base=ILS&symbols=USD,EUR,GBP')).json();rates={ILS:1,...j.rates};calc()}catch{res.textContent='אין חיבור'}}
+Object.keys(CATS).forEach(c=>{const b=document.createElement('button');b.textContent=c;b.onclick=()=>tab(c);tabs.appendChild(b)});
+[a,f,t].forEach(e=>e.addEventListener('input',calc));
+if(q.get('demo')==='money'){rates={ILS:1,USD:.268,EUR:.247,GBP:.213};a.value=100;tab('מטבע');rates={ILS:1,USD:.268,EUR:.247,GBP:.213};calc()}else{a.value=q.get('demo')?26:1;tab('אורך');if(q.get('demo')){a.value=26;calc()}}
+</script>
