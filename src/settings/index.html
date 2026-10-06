@@ -24,6 +24,10 @@ button.b{border:0;background:#0a84ff;color:#fff;border-radius:8px;padding:7px 14
 <body>
 <h1>GlassWidgets</h1><div class=sub>בחר אילו ווידג׳טים יופיעו ואיך הם ייראו. סגירת החלון הזה לא סוגרת את הווידג׳טים.</div>
 <h2>ווידג׳טים</h2><div class=card id=list></div>
+<h2>מעקב השקעות</h2><div class=card id=inv>
+ <div class=row id=invList style="display:block;padding:4px 14px"></div>
+ <div class=row><input class=t id=symIn dir=ltr placeholder="סימול, למשל AAPL או TA35.TA"><input class=t id=qtyIn dir=ltr placeholder="כמות (לא חובה)" style="max-width:130px"><button class=b id=symGo>הוסף</button><div class=res id=symMsg style="color:#8e8e93"></div></div>
+</div>
 <h2>כללי</h2><div class=card>
  <div class=row><div class=n>מראה<div class=d>בהיר, כהה, או לפי ווינדוס</div></div><div class=seg id=theme></div></div>
  <div class=row><div class=n>תמיד מעל חלונות אחרים</div><div class=sw id=onTop></div></div>
@@ -36,7 +40,7 @@ const STYLES={
  clock:[['analog','מחוגים'],['digital','דיגיטלי']],
  sysmon:[['rings','טבעות'],['bars','פסים']],
  notes:[['yellow','צהוב'],['blue','כחול'],['green','ירוק'],['pink','ורוד']]};
-const DESC={clock:'שעון ישראל',weather:'מזג אוויר עכשיו',notes:'פתקים שנשמרים',sysmon:'מעבד, זיכרון, דיסק',clipboard:'30 ההעתקות האחרונות',calendar:'לוח השנה של iCloud',units:'אורך, משקל, טמפרטורה, מטבע',network:'מהירות הורדה והעלאה',battery:'AirPods ואייפון',nowplaying:'המוזיקה שמתנגנת עכשיו'};
+const DESC={clock:'שעון ישראל',weather:'מזג אוויר עכשיו',notes:'פתקים שנשמרים',sysmon:'מעבד, זיכרון, דיסק',clipboard:'30 ההעתקות האחרונות',calendar:'לוח השנה של iCloud',units:'אורך, משקל, טמפרטורה, מטבע',network:'מהירות הורדה והעלאה',battery:'AirPods ואייפון',nowplaying:'המוזיקה שמתנגנת עכשיו',invest:'מניות, קרנות ומדדים בזמן כמעט אמיתי'};
 let S=null;
 const seg=(el,opts,val,cb)=>{el.innerHTML='';opts.forEach(([v,l])=>{const b=document.createElement('button');b.textContent=l;if(v===val)b.className='on';b.onclick=()=>cb(v);el.appendChild(b)})};
 async function load(){const r=await api.setGet();S=r.settings;
@@ -50,14 +54,24 @@ async function load(){const r=await api.setGet();S=r.settings;
  seg(document.getElementById('theme'),[['auto','אוטומטי'],['light','בהיר'],['dark','כהה']],S.theme,async v=>{S=await api.setSave({theme:v});load()});
  for(const k of ['onTop','autostart']){const el=document.getElementById(k);const on=k==='onTop'?S.onTop:r.autostart;el.className='sw'+(on?' on':'');
   el.onclick=async()=>{const n=!el.classList.contains('on');await api.setSave({[k]:n});el.classList.toggle('on',n)}}
- cityName.textContent=(S.city&&S.city.name)||'פתח תקווה';foot.textContent='גרסה '+r.version;}
+ cityName.textContent=(S.city&&S.city.name)||'פתח תקווה';foot.textContent='גרסה '+r.version;drawInv();}
+function drawInv(){invList.innerHTML='';const pf=S.portfolio||[];if(!pf.length)invList.innerHTML='<div style="padding:10px 0;color:#8e8e93;font-size:13px">הרשימה ריקה</div>';
+ pf.forEach((p,i)=>{const d=document.createElement('div');d.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 0;'+(i?'border-top:.5px solid rgba(128,128,128,.28)':'');
+  d.innerHTML=`<b style="flex:1;direction:ltr;text-align:right">${p.sym}</b><input class=t dir=ltr style="max-width:90px;flex:none" value="${p.qty||''}" placeholder="כמות"><button class=b style="background:#ff453a">הסר</button>`;
+  d.querySelector('input').onchange=async e=>{const pf2=[...S.portfolio];pf2[i]={...pf2[i],qty:+e.target.value||0};S=await api.setSave({portfolio:pf2})};
+  d.querySelector('button').onclick=async()=>{S=await api.setSave({portfolio:S.portfolio.filter((_,j)=>j!==i)});drawInv()};invList.appendChild(d)})}
+symGo.onclick=async()=>{const s0=symIn.value.trim().toUpperCase();if(!s0)return;symMsg.textContent='בודק…';const r=await api.invCheck(s0);
+ if(!r.ok){symMsg.textContent='הסימול לא נמצא ('+r.error+')';return}
+ if((S.portfolio||[]).some(p=>p.sym===s0)){symMsg.textContent='כבר ברשימה';return}
+ S=await api.setSave({portfolio:[...(S.portfolio||[]),{sym:s0,qty:+qtyIn.value||0}]});symIn.value='';qtyIn.value='';symMsg.textContent='נוסף: '+r.name;drawInv()};
+symIn.addEventListener('keydown',e=>{if(e.key==='Enter')symGo.click()});
 cityGo.onclick=async()=>{const q=cityIn.value.trim();if(!q)return;cityRes.innerHTML='';
  try{const rs=await api.geocode(q);if(!rs.length){cityRes.innerHTML='<div style="color:#8e8e93;cursor:default">לא נמצאה עיר</div>';return}
   rs.forEach(c=>{const d=document.createElement('div');d.textContent=[c.name,c.admin1,c.country].filter(Boolean).join(', ');d.onclick=async()=>{await api.setSave({city:{name:c.name,lat:c.latitude,lon:c.longitude}});cityRes.innerHTML='';cityIn.value='';load()};cityRes.appendChild(d)})}
  catch{cityRes.innerHTML='<div style="color:#8e8e93;cursor:default">אין חיבור</div>'}};
 cityIn.addEventListener('keydown',e=>{if(e.key==='Enter')cityGo.click()});
-if(new URLSearchParams(location.search).get('demo')){S={theme:'auto',onTop:false,styles:{clock:'digital',sysmon:'rings',notes:'blue'}};
- const names={clock:'שעון',weather:'מזג אוויר',notes:'פתקים',sysmon:'ניטור מערכת',clipboard:'היסטוריית העתקות',calendar:'לוח שנה',units:'ממיר יחידות',network:'רשת',battery:'סוללה',nowplaying:'מנגן עכשיו'};
- window.api={setGet:async()=>({settings:S,widgets:Object.keys(names).map((id,i)=>({id,label:names[id],on:i!==3&&i!==8})),autostart:true,version:'0.2.0'}),setToggle:async()=>{},setSave:async p=>{S={...S,...p,styles:{...S.styles,...(p.styles||{})}};return S},geocode:async()=>[]}}
+if(new URLSearchParams(location.search).get('demo')){S={portfolio:[{sym:'AAPL',qty:10},{sym:'TA35.TA',qty:5},{sym:'VOO',qty:0}],theme:'auto',onTop:false,styles:{clock:'digital',sysmon:'rings',notes:'blue'}};
+ const names={clock:'שעון',weather:'מזג אוויר',notes:'פתקים',sysmon:'ניטור מערכת',clipboard:'היסטוריית העתקות',calendar:'לוח שנה',units:'ממיר יחידות',network:'רשת',battery:'סוללה',nowplaying:'מנגן עכשיו',invest:'מעקב השקעות'};
+ window.api={invCheck:async()=>({ok:true,name:'x'}),setGet:async()=>({settings:S,widgets:Object.keys(names).map((id,i)=>({id,label:names[id],on:i!==3&&i!==8})),autostart:true,version:'0.2.0'}),setToggle:async()=>{},setSave:async p=>{S={...S,...p,styles:{...S.styles,...(p.styles||{})}};return S},geocode:async()=>[]}}
 load();
 </script>
