@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api',{
   media:()=>ipcRenderer.invoke('media:get'),mediaCmd:c=>ipcRenderer.invoke('media:cmd',c),
   setGet:()=>ipcRenderer.invoke('set:get'),setToggle:(i,o)=>ipcRenderer.invoke('set:toggle',i,o),setSave:p=>ipcRenderer.invoke('set:save',p),
   geocode:async n=>{const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=he&name='+encodeURIComponent(n));return (await r.json()).results||[]},
+  invGet:()=>ipcRenderer.invoke('inv:get'),invCheck:s=>ipcRenderer.invoke('inv:check',s),
   bat:()=>ipcRenderer.invoke('bat:get'),
   config:()=>ipcRenderer.invoke('cfg:get')
 });
