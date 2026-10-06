@@ -1,0 +1,34 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{direction:ltr;display:flex;justify-content:space-around;align-items:center;padding:0 8px}
+.it{text-align:center;width:84px}
+.ring{position:relative;width:62px;height:62px;margin:0 auto}
+.ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.ring .ic{position:absolute;inset:0;display:grid;place-items:center}
+.ic svg{width:24px;height:24px;transform:none;fill:var(--text)}
+.p{font-size:15px;font-weight:600;margin-top:7px;letter-spacing:-.3px}.p small{font-size:10px;color:#30d158;margin-left:2px}
+.l{font-size:10.5px;color:var(--text2);font-weight:500;margin-top:1px}
+.note{position:absolute;bottom:20px;left:0;right:0;text-align:center;font-size:9.5px;color:var(--text2);padding:0 16px}
+</style>
+<body><div class=widget id=w></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const R=27,C=2*Math.PI*R;
+const ICONS={
+ bud:'<svg viewBox="0 0 24 24"><path d="M9 2.5a4.5 4.5 0 0 0-4.5 4.5c0 2 1 3.4 2.6 4.3L7 20a1.8 1.8 0 0 0 3.6 0l.3-8.2C13 11 14 9.3 14 7.5A5 5 0 0 0 9 2.5z"/></svg>',
+ case:'<svg viewBox="0 0 24 24"><path d="M6 5h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3zm0 5v1h12v-1z" fill-rule=evenodd /></svg>',
+ phone:'<svg viewBox="0 0 24 24"><path d="M8 2h8a2.5 2.5 0 0 1 2.5 2.5v15A2.5 2.5 0 0 1 16 22H8a2.5 2.5 0 0 1-2.5-2.5v-15A2.5 2.5 0 0 1 8 2zm4 17.2a1 1 0 1 0 0 .01z"/></svg>'};
+const defs=[['l','שמאל','bud','#30d158'],['r','ימין','bud','#30d158'],['c','מארז','case','#30d158'],['i','אייפון','phone','#30d158']];
+const w=document.getElementById('w'),E={};
+for(const[k,l,ic,col]of defs){const d=document.createElement('div');d.className='it';
+ d.innerHTML=`<div class=ring><svg viewBox="0 0 62 62"><circle cx=31 cy=31 r=${R} fill=none stroke="rgba(128,128,128,.22)" stroke-width=5.5 /><circle class=a cx=31 cy=31 r=${R} fill=none stroke="${col}" stroke-width=5.5 stroke-linecap=round stroke-dasharray="${C}" stroke-dashoffset="${C}" style="transition:stroke-dashoffset .8s"/></svg><div class=ic>${ICONS[ic]}</div></div><div class=p>—</div><div class=l>${l}</div>`;
+ w.appendChild(d);E[k]={a:d.querySelector('.a'),p:d.querySelector('.p'),l:d.querySelector('.l'),d}}
+function set(k,v,chg,sub){const e=E[k];if(v==null){e.a.style.strokeDashoffset=C;e.p.textContent='—';e.d.style.opacity=.55;if(sub)e.l.textContent=sub;return}
+ e.d.style.opacity=1;e.a.style.stroke=v<=20?'#ff453a':'#30d158';e.a.style.strokeDashoffset=C*(1-v/100);e.p.innerHTML=v+'%'+(chg?'<small>⚡</small>':'');if(sub)e.l.textContent=sub}
+function render(s){const p=s.pods;
+ set('l',p&&p.left,p&&p.leftCharging);set('r',p&&p.right,p&&p.rightCharging);set('c',p&&p.case,p&&p.caseCharging);
+ set('i',s.iphone&&s.iphone.level,s.iphone&&s.iphone.charging);}
+if(q.get('demo'))render({pods:{model:'AirPods Pro',left:90,right:100,case:60,leftCharging:false,rightCharging:false,caseCharging:true},iphone:{level:78,charging:false}});
+else{const t=()=>api.bat().then(render);t();setInterval(t,5000)}
+</script>
