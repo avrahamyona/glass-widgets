@@ -6,6 +6,9 @@ fs.mkdirSync(fontDir,{recursive:true});
 const pkg=path.join(root,'node_modules','@fontsource-variable','inter');
 fs.copyFileSync(path.join(pkg,'files','inter-latin-opsz-normal.woff2'),path.join(fontDir,'Inter-Variable.woff2'));
 fs.copyFileSync(path.join(pkg,'LICENSE'),path.join(fontDir,'Inter-OFL-LICENSE.txt'));
+const hb=path.join(root,'node_modules','@fontsource-variable','heebo');
+fs.copyFileSync(path.join(hb,'files','heebo-hebrew-wght-normal.woff2'),path.join(fontDir,'Heebo-Hebrew.woff2'));
+fs.copyFileSync(path.join(hb,'LICENSE'),path.join(fontDir,'Heebo-OFL-LICENSE.txt'));
 for(const n of ['icon','tray']){
   const src=path.join(root,'build',n+'.png.b64');
   fs.writeFileSync(path.join(root,'build',n+'.png'),Buffer.from(fs.readFileSync(src,'utf8').trim(),'base64'));
