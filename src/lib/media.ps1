@@ -1,8 +1,10 @@
 # Persistent helper: prints one JSON line per second describing the current Windows media session,
 # and executes commands written to the file given as -CmdFile (play, pause, toggle, next, prev).
 param([string]$CmdFile)
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+function Fail($m){ [Console]::WriteLine((@{err="$m"} | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+try {
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
 function Await($op, $type) { $t = $asTask.MakeGenericMethod($type).Invoke($null, @($op)); [void]$t.Wait(-1); $t.Result }
@@ -11,8 +13,10 @@ function Await($op, $type) { $t = $asTask.MakeGenericMethod($type).Invoke($null,
 [void][Windows.Storage.Streams.DataReader,Windows.Storage.Streams,ContentType=WindowsRuntime]
 [void][Windows.Storage.Streams.IRandomAccessStreamWithContentType,Windows.Storage.Streams,ContentType=WindowsRuntime]
 $mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])
+} catch { Fail("init: " + $_.Exception.Message); exit 1 }
 $lastKey = ''; $art = ''
 while ($true) {
+ try {
   if ($CmdFile -and (Test-Path $CmdFile)) {
     $cmd = (Get-Content $CmdFile -Raw).Trim(); Remove-Item $CmdFile -Force
     $cs = $mgr.GetCurrentSession()
@@ -54,4 +58,5 @@ while ($true) {
   }
   [Console]::Out.Flush()
   Start-Sleep -Milliseconds 700
+ } catch { Fail("loop: " + $_.Exception.Message) }
 }
