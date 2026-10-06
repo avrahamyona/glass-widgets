@@ -1,0 +1,42 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{padding:14px 15px;display:flex;flex-direction:column}
+.dow{font-size:12px;font-weight:700;color:#ff3b30;letter-spacing:.2px;}
+.day{font-size:38px;font-weight:300;line-height:1;letter-spacing:-1px;margin:1px 0 7px}
+.ev{display:flex;gap:6px;margin-bottom:6px;align-items:stretch}.ev i{width:3px;border-radius:2px;background:#ff3b30;flex:none}
+.ev b{display:block;font-size:11.5px;font-weight:600;line-height:1.2;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:135px}
+.ev span{font-size:10.5px;color:var(--text2);font-weight:500}
+.more{font-size:10.5px;color:var(--text2);font-weight:500}
+.none{font-size:12px;color:var(--text2);margin-top:6px}
+.form{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.form input{border:0;border-radius:8px;background:rgba(128,128,128,.15);color:var(--text);font:500 11.5px var(--font);padding:7px 9px;outline:0}
+.form button{border:0;border-radius:8px;background:#0a84ff;color:#fff;font:600 12px var(--font);padding:7px;cursor:pointer}
+.err{color:#ff453a;font-size:10.5px;font-weight:500}
+.hint{font-size:10px;color:var(--text2);line-height:1.3}
+</style>
+<body><div class=widget><div class=dow id=dow></div><div class=day id=day></div><div id=body class=nd></div></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const now=new Date(q.get('demo')?'2026-10-06T10:07:00+03:00':Date.now());
+dow.textContent=now.toLocaleDateString('he-IL',{weekday:'long'});day.textContent=now.getDate();
+const COL=['#ff3b30','#af52de','#0a84ff','#34c759','#ff9500'];
+const tm=t=>new Date(t).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Jerusalem'});
+function showEvents(evs){
+  const today=new Date(now);today.setHours(0,0,0,0);const end=+today+864e5;
+  const t=evs.filter(e=>e.start<end&&(e.end||e.start)>=+today).filter(e=>e.allDay||(e.end||e.start)>=+now);
+  body.innerHTML='';if(!t.length){body.innerHTML='<div class=none>אין עוד אירועים היום</div>';return}
+  t.slice(0,2).forEach((e,i)=>{const d=document.createElement('div');d.className='ev';d.innerHTML=`<i style="background:${COL[i%5]}"></i><div><b dir=auto></b><span>${e.allDay?'כל היום':'<bdi>'+tm(e.start)+' – '+tm(e.end||e.start)+'</bdi>'}</span></div>`;d.querySelector('b').textContent=e.title||'(ללא כותרת)';body.appendChild(d)});
+  if(t.length>2){const m=document.createElement('div');m.className='more';m.textContent='עוד '+(t.length-2)+(t.length>3?' אירועים':' אירוע');body.appendChild(m)}
+}
+function showForm(err){
+  day.style.display='none';dow.textContent='לוח שנה iCloud';dow.style.color='var(--text2)';body.innerHTML='<div class=form><input id=u placeholder="Apple ID" dir=ltr autocomplete=off><input id=p type=password placeholder="סיסמה ייעודית" dir=ltr><button id=go>התחבר ל-iCloud</button><div class=err id=er></div></div>';
+  if(err)er.textContent=err;
+  go.onclick=async()=>{go.textContent='מתחבר…';const r=await api.calConnect(u.value.trim(),p.value.trim());if(r.ok)load();else{go.textContent='התחבר ל-iCloud';er.textContent=r.error}}}
+async function load(){const s=await api.calStatus();if(!s.connected)return showForm();const r=await api.calEvents();
+  showEvents(r.events||[]);
+  if(r.authError){const a=document.createElement('div');a.className='err';a.style.cursor='pointer';a.textContent='הסיסמה נדחתה. לחץ להתחברות מחדש';a.onclick=()=>{api.calDisconnect().then(()=>showForm())};body.appendChild(a)}}
+if(q.get('demo')==='form')showForm();
+else if(q.get('demo'))showEvents([{title:'Dentist, Dr Levi',start:+new Date('2026-10-06T13:00:00+03:00'),end:+new Date('2026-10-06T14:00:00+03:00')},{title:'Call with Dana',start:+new Date('2026-10-06T16:30:00+03:00'),end:+new Date('2026-10-06T17:00:00+03:00')},{title:'Dinner',start:+new Date('2026-10-06T20:00:00+03:00'),end:+new Date('2026-10-06T21:30:00+03:00')}]);
+else{load();setInterval(load,10*60e3)}
+</script>
