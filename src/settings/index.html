@@ -1,0 +1,63 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../shared/theme.css">
+<style>
+html,body{overflow:auto;user-select:none}
+body{background:#f2f2f7;color:#000;padding:22px 20px 30px;font-size:14px}
+@media(prefers-color-scheme:dark){body{background:#000;color:#fff}.card{background:#1c1c1e!important}.seg{background:#2c2c2e!important}.seg button.on{background:#636366!important;color:#fff!important}input.t{background:#2c2c2e!important;color:#fff!important}}
+h1{font-size:26px;font-weight:700;margin-bottom:4px}.sub{color:#8e8e93;font-size:13px;margin-bottom:18px}
+h2{font-size:12px;font-weight:600;color:#8e8e93;margin:20px 12px 6px}
+.card{background:#fff;border-radius:12px;overflow:hidden}
+.row{padding:11px 14px;display:flex;align-items:center;gap:12px;min-height:46px;flex-wrap:wrap}
+.row+.row{border-top:.5px solid rgba(128,128,128,.28)}
+.row .n{flex:1;min-width:120px;font-weight:500}.row .d{font-size:12px;color:#8e8e93;font-weight:400;margin-top:1px}
+.sw{position:relative;width:46px;height:28px;border-radius:14px;background:#d1d1d6;cursor:pointer;flex:none;transition:.2s}
+.sw::after{content:"";position:absolute;top:2px;right:2px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:.2s}
+.sw.on{background:#34c759}.sw.on::after{right:20px}
+.seg{display:flex;background:#e9e9ee;border-radius:9px;padding:2px;gap:2px}
+.seg button{border:0;background:none;font:500 12px var(--font);color:#000;padding:5px 12px;border-radius:7px;cursor:pointer}
+.seg button.on{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.18);font-weight:600}
+.sty{width:100%;display:flex;align-items:center;gap:10px;font-size:12px;color:#8e8e93;padding-top:2px}
+input.t{border:0;background:#e9e9ee;border-radius:8px;padding:7px 10px;font:500 13px var(--font);outline:0;flex:1;min-width:120px;color:#000}
+button.b{border:0;background:#0a84ff;color:#fff;border-radius:8px;padding:7px 14px;font:600 12.5px var(--font);cursor:pointer}
+.res{width:100%;display:flex;flex-direction:column}.res div{padding:8px 4px;color:#0a84ff;cursor:pointer;font-size:13px}
+.foot{text-align:center;color:#8e8e93;font-size:11px;margin-top:22px;line-height:1.6}
+</style>
+<body>
+<h1>GlassWidgets</h1><div class=sub>בחר אילו ווידג׳טים יופיעו ואיך הם ייראו. סגירת החלון הזה לא סוגרת את הווידג׳טים.</div>
+<h2>ווידג׳טים</h2><div class=card id=list></div>
+<h2>כללי</h2><div class=card>
+ <div class=row><div class=n>מראה<div class=d>בהיר, כהה, או לפי ווינדוס</div></div><div class=seg id=theme></div></div>
+ <div class=row><div class=n>תמיד מעל חלונות אחרים</div><div class=sw id=onTop></div></div>
+ <div class=row><div class=n>הפעל עם ווינדוס</div><div class=sw id=autostart></div></div>
+ <div class=row><div class=n>עיר למזג האוויר<div class=d id=cityName></div></div><input class=t id=cityIn placeholder="הקלד שם עיר"><button class=b id=cityGo>חפש</button><div class=res id=cityRes></div></div>
+</div>
+<div class=foot id=foot></div>
+<script>
+const STYLES={
+ clock:[['analog','מחוגים'],['digital','דיגיטלי']],
+ sysmon:[['rings','טבעות'],['bars','פסים']],
+ notes:[['yellow','צהוב'],['blue','כחול'],['green','ירוק'],['pink','ורוד']]};
+const DESC={clock:'שעון ישראל',weather:'מזג אוויר עכשיו',notes:'פתקים שנשמרים',sysmon:'מעבד, זיכרון, דיסק',clipboard:'30 ההעתקות האחרונות',calendar:'לוח השנה של iCloud',units:'אורך, משקל, טמפרטורה, מטבע',network:'מהירות הורדה והעלאה',battery:'AirPods ואייפון',nowplaying:'המוזיקה שמתנגנת עכשיו'};
+let S=null;
+const seg=(el,opts,val,cb)=>{el.innerHTML='';opts.forEach(([v,l])=>{const b=document.createElement('button');b.textContent=l;if(v===val)b.className='on';b.onclick=()=>cb(v);el.appendChild(b)})};
+async function load(){const r=await api.setGet();S=r.settings;
+ const list=document.getElementById('list');list.innerHTML='';
+ r.widgets.forEach(w=>{const row=document.createElement('div');row.className='row';
+  row.innerHTML=`<div class=n>${w.label}<div class=d>${DESC[w.id]||''}</div></div><div class="sw ${w.on?'on':''}"></div>`;
+  row.querySelector('.sw').onclick=async e=>{const on=!e.target.classList.contains('on');await api.setToggle(w.id,on);e.target.classList.toggle('on',on)};
+  if(STYLES[w.id]){const s=document.createElement('div');s.className='sty';s.innerHTML='<span>סגנון</span><div class=seg></div>';row.appendChild(s);
+   seg(s.querySelector('.seg'),STYLES[w.id],S.styles[w.id],async v=>{S=await api.setSave({styles:{[w.id]:v}});load()})}
+  list.appendChild(row)});
+ seg(document.getElementById('theme'),[['auto','אוטומטי'],['light','בהיר'],['dark','כהה']],S.theme,async v=>{S=await api.setSave({theme:v});load()});
+ for(const k of ['onTop','autostart']){const el=document.getElementById(k);const on=k==='onTop'?S.onTop:r.autostart;el.className='sw'+(on?' on':'');
+  el.onclick=async()=>{const n=!el.classList.contains('on');await api.setSave({[k]:n});el.classList.toggle('on',n)}}
+ cityName.textContent=(S.city&&S.city.name)||'פתח תקווה';foot.textContent='גרסה '+r.version;}
+cityGo.onclick=async()=>{const q=cityIn.value.trim();if(!q)return;cityRes.innerHTML='';
+ try{const rs=await api.geocode(q);if(!rs.length){cityRes.innerHTML='<div style="color:#8e8e93;cursor:default">לא נמצאה עיר</div>';return}
+  rs.forEach(c=>{const d=document.createElement('div');d.textContent=[c.name,c.admin1,c.country].filter(Boolean).join(', ');d.onclick=async()=>{await api.setSave({city:{name:c.name,lat:c.latitude,lon:c.longitude}});cityRes.innerHTML='';cityIn.value='';load()};cityRes.appendChild(d)})}
+ catch{cityRes.innerHTML='<div style="color:#8e8e93;cursor:default">אין חיבור</div>'}};
+cityIn.addEventListener('keydown',e=>{if(e.key==='Enter')cityGo.click()});
+if(new URLSearchParams(location.search).get('demo')){S={theme:'auto',onTop:false,styles:{clock:'digital',sysmon:'rings',notes:'blue'}};
+ const names={clock:'שעון',weather:'מזג אוויר',notes:'פתקים',sysmon:'ניטור מערכת',clipboard:'היסטוריית העתקות',calendar:'לוח שנה',units:'ממיר יחידות',network:'רשת',battery:'סוללה',nowplaying:'מנגן עכשיו'};
+ window.api={setGet:async()=>({settings:S,widgets:Object.keys(names).map((id,i)=>({id,label:names[id],on:i!==3&&i!==8})),autostart:true,version:'0.2.0'}),setToggle:async()=>{},setSave:async p=>{S={...S,...p,styles:{...S.styles,...(p.styles||{})}};return S},geocode:async()=>[]}}
+load();
+</script>
