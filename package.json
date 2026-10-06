@@ -1,0 +1,30 @@
+{
+  "name": "glasswidgets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rounded-card desktop widgets for Windows",
+  "main": "src/main.js",
+  "scripts": {
+    "prepare": "node scripts/prepare.js",
+    "start": "electron .",
+    "dist": "electron-builder --win portable --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.0.0",
+    "@fontsource-variable/inter": "^5.0.0"
+  },
+  "build": {
+    "appId": "app.glasswidgets",
+    "files": [
+      "src/**/*",
+      "build/tray.png"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "build/icon.png"
+    },
+    "icon": "build/icon.png",
+    "productName": "GlassWidgets"
+  }
+}
