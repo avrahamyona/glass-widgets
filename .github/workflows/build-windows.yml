@@ -1,5 +1,5 @@
 name: Build Windows
-on: { workflow_dispatch: {}, push: { branches: [main], paths-ignore: ['README.md'] } }
+on: { workflow_dispatch: {} }
 permissions: { contents: write }
 jobs:
   win:
