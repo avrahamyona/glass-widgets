@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{display:flex;justify-content:space-around;align-items:center;padding:0 10px}
+.it{text-align:center;width:84px}
+.ring{position:relative;width:76px;height:76px;margin:0 auto}
+.ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.ring b{position:absolute;inset:0;display:flex;justify-content:center;align-items:center;font-size:19px;font-weight:600;letter-spacing:-.5px}
+.ring b small{font-size:10px;font-weight:600;margin-left:1px;margin-top:4px}
+.l{font-size:12px;font-weight:600;margin-top:8px}.s{font-size:10.5px;color:var(--text2);font-weight:500;margin-top:1px}
+</style>
+<body><div class=widget id=w></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const R=32,C=2*Math.PI*R;
+const defs=[['cpu','CPU','#ff453a'],['mem','Memory','#30d158'],['disk','Disk','#0a84ff'],['up','Uptime','#ff9f0a']];
+const w=document.getElementById('w');
+const els={};
+for(const[k,l,col]of defs){const d=document.createElement('div');d.className='it';
+ d.innerHTML=`<div class=ring><svg viewBox="0 0 76 76"><circle cx=38 cy=38 r=${R} fill=none stroke="rgba(128,128,128,.2)" stroke-width=7 /><circle class=a cx=38 cy=38 r=${R} fill=none stroke="${col}" stroke-width=7 stroke-linecap=round stroke-dasharray="${C}" stroke-dashoffset="${C}" style="transition:stroke-dashoffset .8s ease"/></svg><b></b></div><div class=l>${l}</div><div class=s></div>`;
+ w.appendChild(d);els[k]={a:d.querySelector('.a'),b:d.querySelector('b'),s:d.querySelector('.s')}}
+const gb=x=>(x/1073741824).toFixed(1)+' GB';
+function set(k,p,txt,sub,unit='%'){els[k].a.style.strokeDashoffset=C*(1-Math.min(1,p/100));els[k].b.innerHTML=txt+(unit?`<small>${unit}</small>`:'');els[k].s.textContent=sub}
+function render(s){set('cpu',s.cpu,s.cpu,'');
+ const mp=Math.round(100*s.mem.used/s.mem.total);set('mem',mp,mp,gb(s.mem.used)+' / '+gb(s.mem.total));
+ if(s.disk){const u=s.disk.total-s.disk.free,dp=Math.round(100*u/s.disk.total);set('disk',dp,dp,gb(s.disk.free)+' free')}
+ const h=Math.floor(s.uptime/3600),d=Math.floor(h/24);set('up',Math.min(100,h%24/24*100),d?d+'d':h,d?(h%24)+'h':'hours','');}
+if(q.get('demo'))render({cpu:23,mem:{used:9.4*1073741824,total:16*1073741824},disk:{total:512e9,free:231e9},uptime:3*86400+5*3600});
+else{const tick=()=>api.stats().then(render);tick();setInterval(tick,2000)}
+</script>
