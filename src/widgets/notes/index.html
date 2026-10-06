@@ -1,15 +1,15 @@
-<!doctype html><meta charset=utf-8><link rel=stylesheet href="../../shared/theme.css">
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
 <style>
 .widget{display:flex;flex-direction:column;background:var(--glass)}
 .bar{height:32px;background:linear-gradient(180deg,#ffd60a,#ffc800);flex:none;padding:8px 14px;font-size:12px;font-weight:700;color:rgba(0,0,0,.65)}
 textarea{flex:1;border:0;outline:0;resize:none;background:transparent;color:var(--text);font:500 13.5px/1.4 var(--font);padding:10px 14px}
 textarea::placeholder{color:var(--text2)}
 </style>
-<body><div class=widget><div class=bar>Notes</div><div class=nd style="display:flex;flex:1"><textarea id=n dir=auto placeholder="Write a note…"></textarea></div></div>
+<body><script>const NC={yellow:['#ffd60a','#ffc800'],blue:['#64d2ff','#32ade6'],green:['#30d158','#28b84c'],pink:['#ff6482','#ff375f']};const nc=NC[new URLSearchParams(location.search).get('style')]||NC.yellow;document.write('<style>.bar{background:linear-gradient(180deg,'+nc[0]+','+nc[1]+')!important}</style>')</script><div class=widget><div class=bar>פתקים</div><div class=nd style="display:flex;flex:1"><textarea id=n dir=auto placeholder="כתוב פתק…"></textarea></div></div>
 <script>
 const q=new URLSearchParams(location.search);
 document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
 const n=document.getElementById('n');
-if(q.get('demo'))n.value='Buy milk\nCall dentist\nWidgets project: weather, notes, clipboard';
+if(q.get('demo'))n.value='לקנות חלב\nלהתקשר לרופא שיניים\nפרויקט הווידג׳טים';
 else if(window.api){api.notesGet().then(t=>n.value=t);let h;n.addEventListener('input',()=>{clearTimeout(h);h=setTimeout(()=>api.notesSave(n.value),400)})}
 </script>
