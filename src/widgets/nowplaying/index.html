@@ -1,0 +1,44 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{display:flex;gap:14px;padding:14px;align-items:stretch}
+.art{width:142px;height:142px;border-radius:12px;flex:none;background:linear-gradient(135deg,#ff5e7e,#ff9f0a);display:grid;place-items:center;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.art img{width:100%;height:100%;object-fit:cover;display:none}.art svg{width:44px;height:44px;fill:rgba(255,255,255,.9)}
+.info{flex:1;min-width:0;display:flex;flex-direction:column}
+.app{font-size:10.5px;font-weight:600;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.t{font-size:15px;font-weight:600;margin-top:6px;line-height:1.2;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.a{font-size:12.5px;color:var(--text2);font-weight:500;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{margin-top:auto;height:4px;border-radius:2px;background:rgba(128,128,128,.25);overflow:hidden;direction:ltr}
+.bar i{display:block;height:100%;width:0;background:var(--text2);border-radius:2px}
+.tm{display:flex;justify-content:space-between;direction:ltr;font-size:9.5px;color:var(--text2);margin-top:3px;font-variant-numeric:tabular-nums}
+.ctl{display:flex;justify-content:center;gap:18px;direction:ltr;margin-top:4px}
+.ctl button{border:0;background:none;color:var(--text);cursor:pointer;padding:2px;display:grid;place-items:center}
+.ctl button:active{opacity:.5}.ctl svg{width:22px;height:22px;fill:currentColor}.ctl .pp svg{width:28px;height:28px}
+.empty{margin:auto;color:var(--text2);font-size:13px;text-align:center;line-height:1.5}
+</style>
+<body><div class=widget id=w>
+<div class=art><img id=img><svg id=ph viewBox="0 0 24 24"><path d="M9 3v12.3A3.5 3.5 0 1 0 11 18.5V8h7V3z"/></svg></div>
+<div class=info><div class=app id=app>&nbsp;</div><div class=t id=t dir=auto>אין מדיה מתנגנת</div><div class=a id=a dir=auto></div>
+<div class=bar><i id=fill></i></div><div class=tm><span id=p>0:00</span><span id=d>0:00</span></div>
+<div class="ctl nd"><button id=prev><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
+<button class=pp id=pp><svg id=ppi viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+<button id=next><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6zM16 6v12h2V6z"/></svg></button></div></div></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const PLAY='M8 5v14l11-7z',PAUSE='M7 5h3.5v14H7zm6.5 0H17v14h-3.5z';
+const fmt=s=>{s=Math.max(0,Math.floor(s||0));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+const APPS={spotify:'Spotify',chrome:'Chrome',msedge:'Edge',firefox:'Firefox'};
+const appName=id=>{id=(id||'').toLowerCase();for(const k in APPS)if(id.includes(k))return APPS[k];return (id.split(/[!.\\]/).filter(Boolean)[0]||'').replace(/\.exe$/,'')};
+let st=null,at=0;
+function render(m){st=m;at=Date.now();
+  if(!m||m.none){t.textContent='אין מדיה מתנגנת';a.textContent='';app.innerHTML='&nbsp;';img.style.display='none';ph.style.display='';fill.style.width=0;p.textContent='0:00';d.textContent='0:00';ppi.firstElementChild.setAttribute('d',PLAY);return}
+  t.textContent=m.title||'—';a.textContent=m.artist||m.album||'';app.textContent=appName(m.app);
+  if(m.art){img.src=m.art;img.style.display='block';ph.style.display='none'}else{img.style.display='none';ph.style.display=''}
+  ppi.firstElementChild.setAttribute('d',m.playing?PAUSE:PLAY)}
+function tick(){if(!st||st.none)return;const pos=st.pos+(st.playing?(Date.now()-at)/1000:0);const pc=st.dur>0?Math.min(100,pos/st.dur*100):0;
+  fill.style.width=pc+'%';p.textContent=fmt(pos);d.textContent=fmt(st.dur)}
+setInterval(tick,500);
+if(q.get('demo')){render({title:'שיר לדוגמה - Demo Track',artist:'אמן לדוגמה',app:'Spotify.exe',playing:true,pos:84,dur:215,art:''});tick()}
+else{prev.onclick=()=>api.mediaCmd('prev');next.onclick=()=>api.mediaCmd('next');pp.onclick=()=>api.mediaCmd('toggle');
+ const poll=()=>api.media().then(render);poll();setInterval(poll,1000)}
+</script>
