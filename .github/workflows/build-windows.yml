@@ -1,0 +1,21 @@
+name: Build Windows
+on: { workflow_dispatch: {}, push: { branches: [main], paths-ignore: ['README.md'] } }
+permissions: { contents: write }
+jobs:
+  win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install --no-audit --no-fund
+      - run: npm run dist
+      - uses: actions/upload-artifact@v4
+        with: { name: GlassWidgets-win, path: dist/*.exe }
+      - name: Release
+        shell: bash
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          V=$(node -p "require('./package.json').version")
+          TAG="v$V-build.${{ github.run_number }}"
+          gh release create "$TAG" dist/*.exe --title "GlassWidgets $TAG" --notes "Portable Windows build (unsigned)."
