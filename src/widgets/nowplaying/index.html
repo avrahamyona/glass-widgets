@@ -31,7 +31,7 @@ const APPS={spotify:'Spotify',chrome:'Chrome',msedge:'Edge',firefox:'Firefox'};
 const appName=id=>{id=(id||'').toLowerCase();for(const k in APPS)if(id.includes(k))return APPS[k];return (id.split(/[!.\\]/).filter(Boolean)[0]||'').replace(/\.exe$/,'')};
 let st=null,at=0;
 function render(m){st=m;at=Date.now();
-  if(!m||m.none){t.textContent='אין מדיה מתנגנת';a.textContent='';app.innerHTML='&nbsp;';img.style.display='none';ph.style.display='';fill.style.width=0;p.textContent='0:00';d.textContent='0:00';ppi.firstElementChild.setAttribute('d',PLAY);return}
+  if(!m||m.none){t.textContent=m&&m.err?'שגיאת מדיה':'אין מדיה מתנגנת';a.textContent=m&&m.err?m.err.slice(0,140):'';app.innerHTML='&nbsp;';img.style.display='none';ph.style.display='';fill.style.width=0;p.textContent='0:00';d.textContent='0:00';ppi.firstElementChild.setAttribute('d',PLAY);return}
   t.textContent=m.title||'—';a.textContent=m.artist||m.album||'';app.textContent=appName(m.app);
   if(m.art){img.src=m.art;img.style.display='block';ph.style.display='none'}else{img.style.display='none';ph.style.display=''}
   ppi.firstElementChild.setAttribute('d',m.playing?PAUSE:PLAY)}
