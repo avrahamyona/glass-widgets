@@ -15,7 +15,8 @@ const WIDGETS={
   units:{label:'ממיר יחידות',w:260,h:200,x:780,y:280},
   network:{label:'רשת',w:200,h:200,x:1060,y:60},
   battery:{label:'סוללה',w:400,h:200,x:60,y:500},
-  nowplaying:{label:'מנגן עכשיו',w:400,h:200,x:480,y:500}
+  nowplaying:{label:'מנגן עכשיו',w:400,h:200,x:480,y:500},
+  invest:{label:'מעקב השקעות',w:260,h:360,x:780,y:500}
 };
 const U=()=>app.getPath('userData');
 const rd=(f,d)=>{try{return JSON.parse(fs.readFileSync(path.join(U(),f)))}catch{return d}};
@@ -60,7 +61,7 @@ ipcMain.handle('cfg:get',()=>{const c=getSet().city;return c?{...CITY,...c}:CITY
 
 
 // ---- settings (theme, per-widget style, general)
-const DEF={theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null};
+const DEF={theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
 const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,styles:{...DEF.styles,...(s.styles||{})}}};
 function wq(id){const s=getSet(),q={};if(s.theme!=='auto')q.theme=s.theme;if(s.styles[id])q.style=s.styles[id];return q}
 function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widgets',id,'index.html'),{query:wq(id)})}
@@ -79,20 +80,36 @@ ipcMain.handle('set:get',()=>{const en=rd('enabled.json',{});return {settings:ge
 ipcMain.handle('set:toggle',(_,id,on)=>{if(!WIDGETS[id])return;if(on&&!wins[id])open(id);else if(!on&&wins[id])toggle(id);return !!wins[id]});
 ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
   const themeChanged=next.theme!==cur.theme;
-  for(const id of Object.keys(wins)){if(themeChanged||(patch.styles&&patch.styles[id]!==undefined&&patch.styles[id]!==cur.styles[id])||(id==='weather'&&patch.city!==undefined))reload(id)}
+  for(const id of Object.keys(wins)){if(themeChanged||(patch.styles&&patch.styles[id]!==undefined&&patch.styles[id]!==cur.styles[id])||(id==='weather'&&patch.city!==undefined)||(id==='invest'&&patch.portfolio!==undefined))reload(id)}
   if(patch.onTop!==undefined)Object.values(wins).forEach(w=>w.setAlwaysOnTop(!!next.onTop,'screen-saver'));
   if(patch.autostart!==undefined)app.setLoginItemSettings({openAtLogin:!!patch.autostart});
   return next});
+// ---- investments (Yahoo chart endpoint, no key)
+async function quote(sym){
+  const r=await fetch('https://query1.finance.yahoo.com/v8/finance/chart/'+encodeURIComponent(sym)+'?interval=1d&range=5d',{headers:{'User-Agent':'Mozilla/5.0'}});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  const j=await r.json(),res=j.chart&&j.chart.result&&j.chart.result[0];if(!res)throw new Error('not found');
+  const mt=res.meta,cl=((res.indicators&&res.indicators.quote&&res.indicators.quote[0].close)||[]).filter(x=>x!=null);
+  const price=mt.regularMarketPrice;let prev=cl.length>=2?cl[cl.length-2]:mt.chartPreviousClose;
+  if(cl.length>=2&&Math.abs(cl[cl.length-1]-price)>price*0.2)prev=cl[cl.length-1];
+  let pct=prev?((price-prev)/prev)*100:(mt.regularMarketChangePercent||0);
+  return {sym,name:mt.shortName||mt.longName||sym,price,pct,cur:mt.currency||''};
+}
+ipcMain.handle('inv:get',async()=>{
+  const list=getSet().portfolio||[];
+  const out=await Promise.all(list.map(async p=>{try{return {...(await quote(p.sym)),qty:+p.qty||0}}catch(e){return {sym:p.sym,qty:+p.qty||0,error:e.message}}}));
+  return out});
+ipcMain.handle('inv:check',async(_,sym)=>{try{const q=await quote(String(sym).trim());return {ok:true,name:q.name}}catch(e){return {ok:false,error:e.message}}});
 // ---- network
 ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
 const credFile='cal.bin';
 function loadCreds(){try{const b=fs.readFileSync(path.join(U(),credFile));return JSON.parse(safeStorage.isEncryptionAvailable()?safeStorage.decryptString(b):b.toString())}catch{return null}}
 ipcMain.handle('cal:status',()=>({connected:!!loadCreds()}));
-ipcMain.handle('cal:connect',async(_,user,pw)=>{
-  try{await caldav.fetchEvents(user,pw,new Date(),new Date(Date.now()+864e5));
+ipcMain.handle('cal:connect',async(_,user,pw)=>{user=String(user).trim();pw=String(pw).replace(/\s+/g,'');
+  try{await caldav.fetchEvents(user,String(pw).replace(/\s+/g,''),new Date(),new Date(Date.now()+864e5));
     const j=JSON.stringify({user,pw});fs.writeFileSync(path.join(U(),credFile),safeStorage.isEncryptionAvailable()?safeStorage.encryptString(j):Buffer.from(j));return {ok:true}}
-  catch(e){return {ok:false,error:e.message==='AUTH'?'Apple ID או סיסמה ייעודית שגויים':e.message}}});
+  catch(e){return {ok:false,error:caldav.explain(e)}}});
 ipcMain.handle('cal:disconnect',()=>{try{fs.unlinkSync(path.join(U(),credFile))}catch{}});
 ipcMain.handle('cal:events',async()=>{const c=loadCreds();if(!c)return {connected:false,events:[]};
   const cache=rd('calcache.json',{events:[]});
@@ -100,7 +117,7 @@ ipcMain.handle('cal:events',async()=>{const c=loadCreds();if(!c)return {connecte
   for(let i=0;i<3;i++){ // retry network blips; never drop the saved login on a transient error
     try{const ev=await caldav.fetchEvents(c.user,c.pw,from,to);const out=ev.map(e=>({...e,start:+e.start,end:e.end?+e.end:null}));
       wr('calcache.json',{events:out,at:Date.now()});return {connected:true,events:out}}
-    catch(e){if(e.message==='AUTH')return {connected:true,events:cache.events,authError:true};await new Promise(r=>setTimeout(r,2000*(i+1)))}}
+    catch(e){if(e.kind==='AUTH')return {connected:true,events:cache.events,authError:true};await new Promise(r=>setTimeout(r,2000*(i+1)))}}
   return {connected:true,events:cache.events,stale:true};});
 // ---- battery: AirPods via BLE advert scan, iPhone via a Shortcut that POSTs to a local URL
 const bat={pods:null,podsAt:0,iphone:null};
