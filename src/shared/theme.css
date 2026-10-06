@@ -1,7 +1,8 @@
 @font-face{font-family:"Inter";src:url("fonts/Inter-Variable.woff2") format("woff2");font-weight:100 900;font-style:normal}
 /* design tokens: rounded cards, hairline border, soft shadow */
+@font-face{font-family:"Heebo";src:url("fonts/Heebo-Hebrew.woff2") format("woff2");font-weight:100 900;unicode-range:U+0590-05FF,U+200C-2010,U+20AA,U+25CC,U+FB1D-FB4F}
 :root{
-  --font:"Inter","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif; /* Inter has no Hebrew: Hebrew falls back to Segoe UI */
+  --font:"Inter","Heebo","Segoe UI",system-ui,sans-serif; /* Inter for Latin, Heebo (OFL) for Hebrew */
   --radius:22px;
   /* near-solid cards */
   --glass:rgba(255,255,255,.94);
