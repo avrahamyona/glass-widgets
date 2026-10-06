@@ -1,0 +1,40 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{padding:13px 14px;display:flex;flex-direction:column}
+.hd{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px}
+.hd b{font-size:12px;font-weight:700;color:#0a84ff}.hd span{font-size:10px;color:var(--text2)}
+.list{flex:1;overflow:hidden;display:flex;flex-direction:column}
+.r{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:.5px solid rgba(128,128,128,.28)}
+.r:first-child{border-top:0}
+.nm{flex:1;min-width:0}.nm b{display:block;font-size:13px;font-weight:600;direction:ltr;text-align:right}
+.nm small{display:block;font-size:10px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr{text-align:left;direction:ltr}.pr b{display:block;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.ch{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}.up{color:#30d158}.dn{color:#ff453a}
+.tot{border-top:.5px solid rgba(128,128,128,.4);padding-top:7px;margin-top:3px}
+.tot div{margin-bottom:4px;display:flex;justify-content:space-between;align-items:baseline;direction:rtl;font-size:11px;color:var(--text2)}
+.tot b{font-size:16px;font-weight:600;color:var(--text);direction:ltr;font-variant-numeric:tabular-nums}
+.em{margin:auto;color:var(--text2);font-size:12px;text-align:center}
+</style>
+<body><div class=widget><div class=hd><b>מעקב השקעות</b><span id=at></span></div><div class=list id=l></div><div class=tot id=t></div></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const SYM={USD:'$',ILS:'₪',EUR:'€',GBP:'£',GBp:'p'};
+const n=(v,d=2)=>v.toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const sg=p=>(p>=0?'+':'')+n(p)+'%';
+function render(a){
+ l.innerHTML='';t.innerHTML='';
+ if(!a.length){l.innerHTML='<div class=em>הרשימה ריקה<br>הוסף מניות בחלון ההגדרות</div>';return}
+ const tot={};
+ a.slice(0,7).forEach(x=>{const r=document.createElement('div');r.className='r';
+  if(x.error){r.innerHTML=`<div class=nm><b>${x.sym}</b><small>לא נמצא</small></div>`}
+  else{const c=SYM[x.cur]||x.cur+' ';r.innerHTML=`<div class=nm><b>${x.sym}</b><small>${x.qty?x.qty+' יח׳ · ':''}${x.name}</small></div><div class=pr><b>${c}${n(x.price)}</b><span class="ch ${x.pct>=0?'up':'dn'}">${x.pct>=0?'▲':'▼'} ${sg(x.pct)}</span></div>`;
+   if(x.qty){const t0=tot[x.cur]||(tot[x.cur]={v:0,d:0});t0.v+=x.qty*x.price;t0.d+=x.qty*(x.price-x.price/(1+x.pct/100))}}
+  l.appendChild(r)});
+ for(const[cur,o]of Object.entries(tot)){const d=document.createElement('div');const c=SYM[cur]||cur+' ';
+  d.innerHTML=`<span>שווי כולל<br><span class="ch ${o.d>=0?'up':'dn'}" style="direction:ltr;display:inline-block">${o.d>=0?'+':'−'}${c}${n(Math.abs(o.d))}</span></span><b>${c}${n(o.v)}</b>`;t.appendChild(d)}
+ at.textContent=new Date().toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}
+async function load(){try{render(await api.invGet())}catch{}}
+if(q.get('demo')){render([{sym:'AAPL',name:'Apple Inc.',price:333.63,pct:0.22,cur:'USD',qty:10},{sym:'^GSPC',name:'S&P 500',price:6812.4,pct:-0.41,cur:'USD',qty:0},{sym:'TA35.TA',name:'Tel Aviv 35',price:2985.1,pct:1.12,cur:'ILS',qty:5},{sym:'VOO',name:'Vanguard S&P 500 ETF',price:612.9,pct:0.35,cur:'USD',qty:3}])}
+else{load();setInterval(load,60000)}
+</script>
