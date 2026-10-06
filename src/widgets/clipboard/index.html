@@ -1,0 +1,21 @@
+<!doctype html><meta charset=utf-8><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{display:flex;flex-direction:column;padding:14px 0 6px}
+.top{display:flex;justify-content:space-between;padding:0 14px 8px;align-items:center}
+.top button{border:0;background:none;color:#0a84ff;font:600 12px var(--font);cursor:pointer}
+.list{flex:1;overflow-y:auto;padding:0 8px}
+.item{padding:8px 8px;font-size:12.5px;font-weight:500;line-height:1.3;cursor:pointer;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.item:hover{background:rgba(128,128,128,.14)}.item.ok{background:rgba(48,209,88,.25)}
+.item+.item{border-top:.5px solid rgba(128,128,128,.2)}
+.empty{color:var(--text2);text-align:center;margin-top:70px;font-size:12.5px}
+</style>
+<body><div class=widget><div class=top><span class=hdr>CLIPBOARD</span><span class=nd><button id=cl>Clear</button></span></div><div class="list nd" id=l></div></div>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const l=document.getElementById('l');
+function render(a){l.innerHTML='';if(!a.length){l.innerHTML='<div class=empty>Copy something<br>and it shows up here</div>';return}
+ a.forEach(t=>{const d=document.createElement('div');d.className='item';d.dir='auto';d.textContent=t;d.onclick=()=>{window.api&&api.clipCopy(t);d.classList.add('ok');setTimeout(()=>d.classList.remove('ok'),500)};l.appendChild(d)})}
+if(q.get('demo'))render(['https://github.com/rsms/inter','Meeting moved to 15:30, bring the report','npm run dist','050-123-4567','תודה רבה, נדבר מחר','SELECT * FROM users WHERE id = 42;']);
+else{api.clipList().then(render);api.onClip(render);document.getElementById('cl').onclick=()=>api.clipClear()}
+</script>
