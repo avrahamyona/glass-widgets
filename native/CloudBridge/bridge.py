@@ -5,6 +5,10 @@ import base64, json, logging, os, shutil, sys, tempfile, time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
+# Frozen Windows helpers can inherit legacy console encodings.
+for stream in (sys.stdin, sys.stdout, sys.stderr):
+    if stream is not None and hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="strict")
 logging.disable(logging.CRITICAL)
 from pyicloud import PyiCloudService
 
@@ -33,7 +37,7 @@ def restore(bundle):
 def emit(request_id, value):
     value['id'] = request_id
     value['_session'] = saved()
-    print(json.dumps(value, ensure_ascii=False), flush=True)
+    print(json.dumps(value, ensure_ascii=True), flush=True)
 
 def state():
     if api is None:
@@ -111,11 +115,14 @@ def fetch_data():
 try:
     for line in sys.stdin:
         request = {}
+        stage = 'decode_request'
         try:
             request = json.loads(line)
             action = request.get('action')
+            stage = str(action) if action in ['login','resume','code','request_code','refresh','status'] else 'request'
             if action == 'login':
                 username = str(request.get('user', '')).strip()
+                stage = 'apple_login'
                 api = PyiCloudService(username, request.get('password'), cookie_directory=folder, accept_terms=False, pause_2fa=False)
                 code_requested = False
                 delivery_error = None
@@ -148,6 +155,6 @@ try:
                 emit(request.get('id'), {'connected': False, 'error': 'Unsupported read-only action'})
         except Exception as e:
             # Exception text may contain URLs/tokens. Return only type and generic guidance.
-            emit(request.get('id'), {'connected': False, 'state': 'error', 'error': type(e).__name__ + ': ההתחברות או הקריאה נכשלה. נסה כניסה מחדש, או פתח את האתר הרשמי.'})
+            emit(request.get('id'), {'connected': False, 'state': 'error', 'diagnostic': {'stage': stage, 'frame': __import__('traceback').extract_tb(e.__traceback__)[-1].name, 'line': __import__('traceback').extract_tb(e.__traceback__)[-1].lineno, 'encoding': e.encoding if isinstance(e, UnicodeError) and hasattr(e, 'encoding') else None}, 'error': type(e).__name__ + ': ההתחברות או הקריאה נכשלה. נסה כניסה מחדש, או פתח את האתר הרשמי.'})
 finally:
     shutil.rmtree(folder, ignore_errors=True)
