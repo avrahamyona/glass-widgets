@@ -32,3 +32,5 @@ function render(s){const p=s.pods;
 if(q.get('demo'))render({pods:{model:'AirPods Pro',left:90,right:100,case:60,leftCharging:false,rightCharging:false,caseCharging:true},iphone:{level:78,charging:false}});
 else{const t=()=>api.bat().then(render);t();setInterval(t,5000)}
 </script>
+
+<script src="../../shared/widget.js"></script>
