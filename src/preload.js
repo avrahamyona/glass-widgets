@@ -1,7 +1,7 @@
 const {contextBridge,ipcRenderer}=require('electron');
 contextBridge.exposeInMainWorld('api',{
   cloudOpen:s=>ipcRenderer.invoke('cloud:open',s),cloudChrome:s=>ipcRenderer.invoke('cloud:chrome',s),cloudStatus:()=>ipcRenderer.invoke('cloud:status'),cloudLogout:()=>ipcRenderer.invoke('cloud:logout'),settingsOpen:()=>ipcRenderer.invoke('settings:open'),
-  icloudStatus:()=>ipcRenderer.invoke('icloud:status'),icloudLogin:(u,p)=>ipcRenderer.invoke('icloud:login',u,p),icloudCode:c=>ipcRenderer.invoke('icloud:code',c),icloudRefresh:()=>ipcRenderer.invoke('icloud:refresh'),icloudData:()=>ipcRenderer.invoke('icloud:data'),icloudForget:()=>ipcRenderer.invoke('icloud:forget'),
+  widgetsShow:()=>ipcRenderer.invoke('widgets:show'),icloudStatus:()=>ipcRenderer.invoke('icloud:status'),icloudLogin:(u,p)=>ipcRenderer.invoke('icloud:login',u,p),icloudRequestCode:()=>ipcRenderer.invoke('icloud:request-code'),icloudCode:(c,m)=>ipcRenderer.invoke('icloud:code',c,m),icloudRefresh:()=>ipcRenderer.invoke('icloud:refresh'),icloudData:()=>ipcRenderer.invoke('icloud:data'),icloudForget:()=>ipcRenderer.invoke('icloud:forget'),
   stats:()=>ipcRenderer.invoke('sys:stats'),
   notesGet:()=>ipcRenderer.invoke('notes:get'),
   notesSave:t=>ipcRenderer.invoke('notes:save',t),
