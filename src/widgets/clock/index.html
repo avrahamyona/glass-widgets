@@ -1,9 +1,11 @@
 <!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
-<style>.widget{display:grid;place-items:center;padding:14px}svg{width:100%;height:100%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.18))}.dg-on svg{display:none}.dg-on #dg{display:flex!important;flex-direction:column;align-items:center;justify-content:center;direction:ltr;text-align:center}.dd{font-size:12px;font-weight:600;color:#ff3b30;direction:rtl}.tt{font-size:50px;font-weight:300;letter-spacing:-2px;line-height:1.05;font-variant-numeric:tabular-nums}.ds{font-size:11px;color:var(--text2);font-weight:500;margin-top:3px;direction:rtl}</style>
-<body><div class=widget><svg id=c></svg><div id=dg style="display:none"><div class=dd id=dd></div><div class=tt id=tt></div><div class=ds id=ds></div></div></div>
+<style>.widget{display:grid;place-items:center;padding:14px}svg{width:100%;height:100%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.18))}.dg-on svg{display:none}.dg-on #dg{display:flex!important;flex-direction:column;align-items:center;justify-content:center;direction:ltr;text-align:center}.tlink{position:absolute;left:8px;bottom:7px;border:0;border-radius:50%;width:22px;height:22px;background:rgba(128,128,128,.12);font:400 13px var(--font);color:var(--text2);cursor:pointer;z-index:5;-webkit-app-region:no-drag}
+.dd{font-size:12px;font-weight:600;color:#ff3b30;direction:rtl}.tt{font-size:50px;font-weight:300;letter-spacing:-2px;line-height:1.05;font-variant-numeric:tabular-nums}.ds{font-size:11px;color:var(--text2);font-weight:500;margin-top:3px;direction:rtl}</style>
+<body><div class=widget><button class="tlink nd" id=timerBtn title="פתח טיימר">⏱</button><svg id=c></svg><div id=dg style="display:none"><div class=dd id=dd></div><div class=tt id=tt></div><div class=ds id=ds></div></div></div>
 <script src="clock.js"></script>
 <script>
 const q=new URLSearchParams(location.search);
+if(window.api)timerBtn.onclick=()=>api.instanceAdd('timer');else timerBtn.style.display='none';
 const theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
 document.documentElement.dataset.theme=theme;if(q.get('bg'))document.body.style.background='radial-gradient(300px 200px at 20% 10%,#f5a3c7,transparent 60%),linear-gradient(135deg,#7b5cff,#ff7eb3)';
 function inTZ(tz){const p=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:tz,hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));const n=new Date();n.setHours(+p.hour%24,+p.minute,+p.second,n.getMilliseconds());return n}
