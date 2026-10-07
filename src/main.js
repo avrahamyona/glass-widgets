@@ -17,13 +17,14 @@ const WIDGETS={
   battery:{label:'סוללה',w:400,h:200,x:60,y:500},
   nowplaying:{label:'מנגן עכשיו',w:400,h:200,x:480,y:500},
   reminders:{label:'תזכורות',w:200,h:200,x:1000,y:500},
-  invest:{label:'מעקב השקעות',w:260,h:360,x:780,y:500}
+  invest:{label:'מעקב השקעות',w:260,h:360,x:780,y:500},
+  timer:{label:'טיימר',w:200,h:200,x:340,y:280}
 };
 const U=()=>app.getPath('userData');
 const rd=(f,d)=>{try{return JSON.parse(fs.readFileSync(path.join(U(),f)))}catch{return d}};
 const wr=(f,v)=>fs.writeFileSync(path.join(U(),f),JSON.stringify(v));
 const wins={};
-function instances(){const saved=rd('instances.json',null);if(Array.isArray(saved))return saved.filter(x=>x&&typeof x.id==='string'&&/^[a-z0-9-]+$/.test(x.id)&&WIDGETS[x.type]);const migrated=Object.keys(WIDGETS).map(type=>({id:type,type}));wr('instances.json',migrated);return migrated}
+function instances(){const saved=rd('instances.json',null);if(Array.isArray(saved))return saved.filter(x=>x&&typeof x.id==='string'&&/^[a-z0-9-]+$/.test(x.id)&&WIDGETS[x.type]);const migrated=Object.keys(WIDGETS).filter(t=>t!=='timer').map(type=>({id:type,type}));wr('instances.json',migrated);return migrated}
 function instance(id){return instances().find(x=>x.id===id)}
 function instanceConfig(id){const it=instance(id);if(!it)return {size:WIDGETS[id]?.w>WIDGETS[id]?.h?'rectangle':'square',style:getSet().styles[id],timezone:'Asia/Jerusalem',city:getSet().city,portfolio:getSet().portfolio};const s=getSet(),local=s.instanceConfigs?.[id]||{};return {size:s.sizes[id]||((WIDGETS[it.type].w>WIDGETS[it.type].h)?'rectangle':'square'),style:s.styles[id]||s.styles[it.type],timezone:'Asia/Jerusalem',onTop:s.onTop,city:s.city,portfolio:s.portfolio,...local}}
 function callerInstance(event){try{const u=new URL(event.sender.getURL()),id=u.searchParams.get('instance');return instance(id)?id:null}catch{return null}}
@@ -198,7 +199,9 @@ ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(t
 const ICLOUD={notes:'https://www.icloud.com/notes/',calendar:'https://www.icloud.com/calendar/',reminders:'https://www.icloud.com/reminders/',home:'https://www.icloud.com/'};
 let cloudWin=null;
 function allowedCloud(url){try{const u=new URL(url);return u.protocol==='https:'&&(/(^|\.)icloud\.com$/.test(u.hostname)||/(^|\.)apple\.com$/.test(u.hostname))}catch{return false}}
+async function shareCloudCookies(){try{const r=await cloudRequest('cookies');if(!r.cookies?.length)return 0;const ses=session.fromPartition('persist:icloud');let n=0;for(const c of r.cookies){try{await ses.cookies.set({url:'https://'+String(c.domain).replace(/^\./,'')+(c.path||'/'),name:String(c.name),value:String(c.value),domain:String(c.domain),path:c.path||'/',secure:!!c.secure,httpOnly:true,...(c.expires?{expirationDate:c.expires}:{})});n++}catch{}}return n}catch{return 0}}
 function openCloud(section){const url=ICLOUD[section]||ICLOUD.home;
+ if(cloudData.connected)shareCloudCookies();
  if(!cloudWin){cloudWin=new BrowserWindow({width:1100,height:800,title:'iCloud',autoHideMenuBar:true,webPreferences:{partition:'persist:icloud',contextIsolation:true,nodeIntegration:false,sandbox:true}});
  cloudWin.webContents.setWindowOpenHandler(({url})=>{if(allowedCloud(url)){cloudWin.loadURL(url);return {action:'deny'}}return {action:'deny'}});
  cloudWin.webContents.on('will-navigate',(event,url)=>{if(!allowedCloud(url))event.preventDefault()});cloudWin.on('closed',()=>cloudWin=null)}
@@ -210,6 +213,7 @@ ipcMain.handle('cloud:chrome',(_,section)=>{const url=ICLOUD[section];if(!url)re
  if(process.platform==='win32'){const roots=[process.env.PROGRAMFILES,process.env['PROGRAMFILES(X86)'],process.env.LOCALAPPDATA].filter(Boolean);const exe=roots.map(r=>path.join(r,'Google','Chrome','Application','chrome.exe')).find(f=>fs.existsSync(f));if(exe){const p=spawn(exe,[url],{detached:true,stdio:'ignore'});p.unref();return {ok:true}}}
  shell.openExternal(url);return {ok:true,fallback:true}});
 ipcMain.handle('settings:open',()=>openSettings());
+ipcMain.handle('sys:beep',()=>{try{shell.beep();return {ok:true}}catch{return {ok:false}}});
 ipcMain.handle('widgets:show',()=>{for(const w of Object.values(wins)){if(!w.isDestroyed()){w.show();w.moveTop()}}return {ok:true,count:Object.keys(wins).length}});
 app.on('before-quit',()=>{quitting=true;saveLayout();stopCloud();if(mediaProcess)mediaProcess.kill()});
 // Experimental, manual-refresh-only local iCloud data adapter.
@@ -224,16 +228,16 @@ function ensureCloud(){
  if(process.env.GLASSWIDGETS_CLOUD_PYTHON){exe=process.env.GLASSWIDGETS_CLOUD_PYTHON;args=[path.join(__dirname,'..','native','CloudBridge','bridge.py')]}else exe=app.isPackaged?path.join(process.resourcesPath,'cloud','CloudBridge','CloudBridge.exe'):path.join(__dirname,'..','native','CloudBridge','publish','CloudBridge','CloudBridge.exe');
  if(!fs.existsSync(exe))return false;
  cloudTemp=fs.mkdtempSync(path.join(app.getPath('temp'),'glasswidgets-cloud-'));
- const current=spawn(exe,args,{windowsHide:true,stdio:['pipe','pipe','pipe'],env:{...process.env,PYTHONIOENCODING:'utf-8',PYTHONUTF8:'1',GLASSWIDGETS_CLOUD_TEMP:cloudTemp}});cloudProcess=current;let buf='';current.stdout.setEncoding('utf8');current.stdout.on('data',d=>{buf+=d;let i;while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);try{const o=JSON.parse(line),pending=cloudPending.get(o.id);if(o._session?.user)encryptedWrite('cloud-session.bin',o._session);delete o._session;delete o.id;if(pending){clearTimeout(pending.timer);cloudPending.delete(pending.id);pending.resolve(o)}}catch{}}});
+ const current=spawn(exe,args,{windowsHide:true,stdio:['pipe','pipe','pipe'],env:{...process.env,PYTHONIOENCODING:'utf-8',PYTHONUTF8:'1',GLASSWIDGETS_CLOUD_TEMP:cloudTemp}});cloudProcess=current;let buf='';current.stdout.setEncoding('utf8');current.stdout.on('data',d=>{buf+=d;let i;while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);try{const o=JSON.parse(line),pending=cloudPending.get(o.id);if(o._session?.user){try{encryptedWrite('cloud-session.bin',o._session)}catch{}}delete o._session;delete o.id;if(pending){clearTimeout(pending.timer);cloudPending.delete(pending.id);pending.resolve(o)}}catch{}}});
  current.on('error',()=>{if(cloudProcess===current)stopCloud()});current.on('exit',()=>{if(cloudProcess===current)stopCloud()});current.stderr.on('data',()=>{});return true;
 }
 function cloudRequest(action,data={}){if(!ensureCloud())return Promise.resolve({connected:false,state:'unavailable',error:'רכיב iCloud חסר. התקן את הגרסה המלאה'});return new Promise(resolve=>{const id=++cloudSeq;const timer=setTimeout(()=>{cloudPending.delete(id);resolve({connected:false,state:'error',error:'iCloud לא ענה בזמן. לא בוצעו שינויים'});stopCloud()},120000);cloudPending.set(id,{id,resolve,timer});cloudProcess.stdin.write(JSON.stringify({id,action,...data})+'\n')})}
 async function cloudResume(){if(!cloudProcess){const saved=encryptedRead('cloud-session.bin');if(saved){const r=await cloudRequest('resume',{session:saved});cloudData={...cloudData,...r};return r}}return cloudRequest('status')}
-async function refreshCloud(){if(cloudRefreshing)return {...cloudData,busy:true};if(Date.now()-cloudLastRefresh<60000)return {...cloudData,cooldown:true};cloudRefreshing=true;cloudLastRefresh=Date.now();try{const s=await cloudResume();if(!s.connected){cloudData={...cloudData,...s};return cloudData}const r=await cloudRequest('refresh');cloudData={...cloudData,...r};if(r.connected){const old=encryptedRead('cloud-cache.bin')||{};cloudData.notes=r.errors?.notes?(old.notes||[]):r.notes;cloudData.reminders=r.errors?.reminders?(old.reminders||[]):r.reminders;cloudData.calendar=r.errors?.calendar?(old.calendar||[]):r.calendar;encryptedWrite('cloud-cache.bin',cloudData)}return cloudData}finally{cloudRefreshing=false}}
+async function refreshCloud(){if(cloudRefreshing)return {...cloudData,busy:true};if(Date.now()-cloudLastRefresh<60000)return {...cloudData,cooldown:true};cloudRefreshing=true;cloudLastRefresh=Date.now();try{const s=await cloudResume();if(!s.connected){cloudData={...cloudData,...s};return cloudData}const r=await cloudRequest('refresh');cloudData={...cloudData,...r};if(r.connected){shareCloudCookies();const old=encryptedRead('cloud-cache.bin')||{};cloudData.notes=r.errors?.notes?(old.notes||[]):r.notes;cloudData.reminders=r.errors?.reminders?(old.reminders||[]):r.reminders;cloudData.calendar=r.errors?.calendar?(old.calendar||[]):r.calendar;encryptedWrite('cloud-cache.bin',cloudData)}return cloudData}finally{cloudRefreshing=false}}
 ipcMain.handle('icloud:status',()=>({saved:!!encryptedRead('cloud-session.bin'),state:cloudData.state||'signed_out',connected:cloudData.connected,at:cloudData.at||null,calendar:!!loadCreds(),errors:cloudData.errors||{},counts:{notes:cloudData.notes?.length||0,reminders:cloudData.reminders?.length||0,calendar:cloudData.calendar?.length||0}}));
-ipcMain.handle('icloud:login',async(_,user,password)=>{stopCloud();cloudData={connected:false,notes:[],reminders:[]};cloudLastRefresh=0;const r=await cloudRequest('login',{user:String(user).trim(),password:String(password)});cloudData={...cloudData,...r};return r});
+ipcMain.handle('icloud:login',async(_,user,password)=>{stopCloud();cloudData={connected:false,notes:[],reminders:[]};cloudLastRefresh=0;const r=await cloudRequest('login',{user:String(user).trim(),password:String(password)});cloudData={...cloudData,...r};if(r.connected)shareCloudCookies();return r});
 ipcMain.handle('icloud:request-code',async()=>{const r=await cloudRequest('request_code');cloudData={...cloudData,...r};return r});
-ipcMain.handle('icloud:code',async(_,code,manual)=>{const r=await cloudRequest('code',{code:String(code).trim(),manual:!!manual});cloudData={...cloudData,...r};return r});
+ipcMain.handle('icloud:code',async(_,code,manual)=>{const clean=String(code).normalize('NFKC').replace(/[^0-9]/g,'');const r=await cloudRequest('code',{code:clean,manual:!!manual});cloudData={...cloudData,...r};if(r.connected)shareCloudCookies();return r});
 ipcMain.handle('icloud:refresh',()=>refreshCloud());
 ipcMain.handle('icloud:data',()=>({...cloudData,stale:!cloudData.connected||!cloudData.at||Date.now()-cloudData.at>3600000}));
 ipcMain.handle('icloud:forget',()=>{stopCloud();for(const f of ['cloud-session.bin','cloud-cache.bin']){try{fs.unlinkSync(path.join(U(),f))}catch{}}cloudData={connected:false,notes:[],reminders:[]};return {ok:true}});
