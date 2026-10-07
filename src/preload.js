@@ -16,5 +16,6 @@ contextBridge.exposeInMainWorld('api',{
   geocode:async n=>{const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=he&name='+encodeURIComponent(n));return (await r.json()).results||[]},
   invSearch:q=>ipcRenderer.invoke('inv:search',q),invGet:()=>ipcRenderer.invoke('inv:get'),invCheck:s=>ipcRenderer.invoke('inv:check',s),
   bat:()=>ipcRenderer.invoke('bat:get'),
-  config:()=>ipcRenderer.invoke('cfg:get')
+  config:()=>ipcRenderer.invoke('cfg:get'),
+  theme:()=>ipcRenderer.invoke('theme:get'),invOpen:s=>ipcRenderer.invoke('inv:open',s),feedbackSend:t=>ipcRenderer.invoke('feedback:send',t),updateCheck:()=>ipcRenderer.invoke('update:check'),updateState:()=>ipcRenderer.invoke('update:state'),updateInstall:()=>ipcRenderer.invoke('update:install')
 });
