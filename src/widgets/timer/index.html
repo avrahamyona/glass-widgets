@@ -1,0 +1,61 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+.widget{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px}
+.xbtn{position:absolute;left:8px;top:7px;border:0;border-radius:50%;width:22px;height:22px;background:rgba(128,128,128,.12);font:600 13px var(--font);color:var(--text2);cursor:pointer;z-index:5}
+.tbtn{position:absolute;right:8px;top:7px;border:0;border-radius:7px;width:24px;height:24px;background:rgba(128,128,128,.12);font:600 14px var(--font);color:var(--text2);cursor:pointer;z-index:5}
+.tbtn.on{background:var(--accent);color:#fff}
+.ttl{font-size:13px;font-weight:600;color:var(--text2);margin-bottom:10px}
+.times{display:flex;gap:6px;direction:ltr;margin-bottom:12px}
+.tcol{display:flex;flex-direction:column;align-items:center;gap:3px}
+.tcol input{width:44px;height:38px;border:0;border-radius:10px;background:rgba(128,128,128,.12);color:var(--text);font:300 22px var(--font);text-align:center;outline:none;font-variant-numeric:tabular-nums}
+.tcol label{font-size:10px;color:var(--text2)}
+.go{border:0;border-radius:12px;padding:8px 26px;background:var(--accent);color:#fff;font:600 14px var(--font);cursor:pointer}
+svg{width:118px;height:118px}
+.rm{font:300 30px var(--font);font-variant-numeric:tabular-nums;letter-spacing:-1px}
+.ctl{display:flex;gap:8px;margin-top:10px}
+.ctl button{border:0;border-radius:10px;padding:6px 14px;background:rgba(128,128,128,.15);color:var(--text);font:500 12px var(--font);cursor:pointer}
+.done .rm{color:#ff3b30}
+@keyframes pulse{50%{opacity:.35}}
+.done svg{animation:pulse 1s infinite}
+</style>
+<body><div class=widget id=wd>
+<button class="xbtn nd" id=xbtn title="סגור">✕</button>
+<button class="tbtn nd" id=topBtn title="הצמד מעל חלונות">▢</button>
+<div id=setup>
+ <div class=ttl>טיימר</div>
+ <div class=times>
+  <div class=tcol><input id=h inputmode=numeric maxlength=2 value=0><label>שעות</label></div>
+  <div class=tcol><input id=m inputmode=numeric maxlength=2 value=5><label>דקות</label></div>
+  <div class=tcol><input id=s inputmode=numeric maxlength=2 value=0><label>שניות</label></div>
+ </div>
+ <button class="go nd" id=start>הפעל</button>
+</div>
+<div id=run style="display:none;flex-direction:column;align-items:center;position:relative">
+ <svg viewBox="0 0 200 200"><circle id=cir cx=100 cy=100 r=86 fill="var(--accent)" opacity=.85 /></svg>
+ <div class=rm id=rm style="position:absolute;top:59px;left:50%;transform:translate(-50%,-50%)">00:00</div>
+ <div class="ctl nd"><button id=pause>עצור</button><button id=cancel>ביטול</button></div>
+</div>
+</div>
+<script src="../../shared/widget.js"></script>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+if(q.get('bg'))document.body.style.background='radial-gradient(300px 200px at 20% 10%,#f5a3c7,transparent 60%),linear-gradient(135deg,#7b5cff,#ff7eb3)';
+const $=i=>document.getElementById(i);
+let total=0,left=0,iv=null,paused=false,deadline=0;
+async function kill(){try{await api.instanceRemove((await api.instanceSelf())?.id)}catch{}window.close()}
+xbtn.onclick=kill;
+cancel.onclick=kill;
+if(window.api)api.instanceSelf().then(c=>{if(c&&c.onTop)topBtn.classList.add('on')});
+topBtn.onclick=async()=>{const on=!topBtn.classList.contains('on');topBtn.classList.toggle('on',on);try{await api.instanceSelfSave({onTop:on})}catch{}};
+for(const el of [h,m,s])el.addEventListener('input',()=>{el.value=el.value.replace(/\D/g,'').slice(0,2)});
+function fmt(ms){const t=Math.max(0,Math.ceil(ms/1000)),hh=Math.floor(t/3600),mm=Math.floor(t%3600/60),ss=t%60;return hh?hh+':'+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0'):String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
+function draw(){const frac=total?left/total:0;const r=20+66*frac;cir.setAttribute('r',r.toFixed(1));rm.textContent=fmt(left)}
+function tick(){if(paused)return;left=deadline-Date.now();if(left<=0){left=0;draw();finish();return}draw()}
+function finish(){clearInterval(iv);iv=null;wd.classList.add('done');rm.textContent=fmt(0);pause.style.display='none';if(window.api){api.beep();let n=1;const t=setInterval(()=>{api.beep();if(++n>=3)clearInterval(t)},700)}}
+start.onclick=()=>{total=((+h.value||0)*3600+(+m.value||0)*60+(+s.value||0))*1000;if(total<1000){m.focus();return}
+ setup.style.display='none';xbtn.style.display='none';run.style.display='flex';
+ deadline=Date.now()+total;left=total;draw();iv=setInterval(tick,200)};
+pause.onclick=()=>{if(!iv&&!paused)return;paused=!paused;if(paused){pause.textContent='המשך'}else{deadline=Date.now()+left;pause.textContent='עצור'}};
+const demo=q.get('demo');if(demo){total=left=+demo*1000||30000;start.onclick()}
+</script>
