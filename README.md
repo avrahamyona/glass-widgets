@@ -2,6 +2,12 @@
 
 Original desktop cards for Windows 10 (1809+) and Windows 11. Hebrew RTL UI, Inter and Heebo fonts under SIL OFL. No Apple logos or bundled Apple artwork. Not affiliated with Apple.
 
+## 0.3.1
+
+- One regular Apple Account data login for Notes, Reminders and Calendar (experimental and read-only). CalDAV is an optional separate advanced login. Chrome and official web app cookies remain separate.
+- Full MFA flow instead of paused authentication. Explicit code request with delivery status, a user-requested retry with a 60-second cooldown, and a checkbox for codes generated on a trusted device. A request accepted by Apple is not proof of delivery. Security-key and unavailable delivery routes are reported instead of guessed.
+- Show widgets now brings enabled cards above other windows without changing the always-on-top preference.
+
 ## 0.3.0
 
 - Square and rectangle choices for every card, saved per widget.
@@ -9,8 +15,8 @@ Original desktop cards for Windows 10 (1809+) and Windows 11. Hebrew RTL UI, Int
 - Original dark Stocks-style watchlist with price, daily change and recent-price sparkline. Square shows the first symbol; rectangle shows the first two. Prices come from Yahoo and may be delayed. This is not Apple's Stocks data or iCloud watchlist sync. Portfolio quantities remain saved in settings.
 - Compiled .NET 8 Windows media bridge instead of the PowerShell media reader. Sends media commands via standard input, reports rejected commands, retries artwork when the player publishes it late, selects active media sessions. Controls and covers depend on what the source player exposes to Windows. Efi Music is not supported. No invented artwork.
 - Central settings access to official iCloud web apps, using a persistent isolated browser session. Remote pages have no app preload or Node access.
-- Experimental local read-only Notes and modern Reminders data adapter, using a pinned MIT-licensed pyicloud dependency. Manual refresh only with a 60-second cooldown. Requires a separate regular Apple web credential and, when requested, a one-time device code. No create/edit/delete operations. Session state and cached data are encrypted by Windows. Live account support is unverified. Prior local notes remain in notes.json; they are not uploaded or deleted.
-- Calendar uses a separate app-specific password, encrypted by Windows. XML and iCalendar parsing handle namespaces and calendar time zones. Better error reporting and timeouts. Root-cause of the reported user's login failure remains unconfirmed without a live successful account test.
+- Experimental local read-only Notes, modern Reminders and Calendar data adapter, using a pinned MIT-licensed pyicloud dependency. Manual refresh only with a 60-second cooldown. Requires a separate regular Apple web credential and, when requested, a one-time device code. No create/edit/delete operations. Session state and cached data are encrypted by Windows. Live account support is unverified. Prior local notes remain in notes.json; they are not uploaded or deleted.
+- Optional advanced CalDAV uses a separate app-specific password, encrypted by Windows. XML and iCalendar parsing handle namespaces and calendar time zones. Better error reporting and timeouts. Root-cause of the reported user's login failure remains unconfirmed without a live successful account test.
 - Top-left links on Notes, Calendar and Reminders open the correct iCloud section in Chrome when installed (default browser fallback otherwise). Chrome must have its own iCloud login; app cookies are never exported into Chrome.
 
 ## Install or upgrade
@@ -19,9 +25,9 @@ Quit GlassWidgets using its tray menu > Exit before installing the new setup. In
 
 ## iCloud
 
-Use the experimental Notes/Reminders login in Settings to read into the custom cards. The ordinary Apple password is used for login but is not saved. Saved session state can expire; sign in again when requested. For a supported fallback, use Settings > iCloud > Open and sign in for the official web apps. Sign in on Apple's own page and choose its option to stay signed in when offered. Session files persist locally, but Apple may require login or trusted-device verification again. Advanced Data Protection can require enabling web access on the Apple device. This app does not bypass that setting.
+Use the experimental single-account data login in Settings to read into the custom cards. The ordinary Apple password is used for login but is not saved. Saved session state can expire; sign in again when requested. For a supported fallback, use Settings > iCloud > Open and sign in for the official web apps. Sign in on Apple's own page and choose its option to stay signed in when offered. Session files persist locally, but Apple may require login or trusted-device verification again. Advanced Data Protection can require enabling web access on the Apple device. This app does not bypass that setting.
 
-For events displayed in the Calendar card, enter Apple Account email and a generated app-specific password in the separate Calendar section. Do not enter the ordinary Apple Account password there. The experimental data login, official website login, and CalDAV credential have separate honest status. A web login alone does not authorize CalDAV. Chrome also keeps its own login. Passwords are encrypted locally, never sent to a project server or committed to GitHub.
+Calendar uses the same experimental data session. Optional Advanced CalDAV is separate and requires an app-specific password, not the ordinary password. The experimental data login, official website login, and CalDAV credential have separate honest status. A web login alone does not authorize CalDAV. Chrome also keeps its own login. Passwords are encrypted locally, never sent to a project server or committed to GitHub.
 
 ## Battery
 
@@ -35,4 +41,4 @@ MIT for original code. Bundled fonts: SIL OFL. See dependencies for their licens
 
 ## Experimental iCloud limits
 
-The private Notes/Reminders APIs are not supported or guaranteed by Apple. Apple may change or block them. Personal use is not a legal guarantee; review Apple's iCloud terms before using the experimental adapter. It does not accept new service terms automatically, bypass device approval, read locked-note content by force, or change security settings. No promise of full content coverage or write-back.
+The private Notes/Reminders/Calendar APIs are not supported or guaranteed by Apple. Apple may change or block them. Personal use is not a legal guarantee; review Apple's iCloud terms before using the experimental adapter. It does not accept new service terms automatically, bypass device approval, read locked-note content by force, or change security settings. No promise of full content coverage or write-back.
