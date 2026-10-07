@@ -1,0 +1,87 @@
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../../shared/theme.css">
+<style>
+/* regular card mode */
+.widget{display:flex;flex-direction:column;padding:12px 14px}
+.chdr{font-size:12px;font-weight:600;color:var(--text2);padding-bottom:6px}
+.log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:2px}
+.bub{max-width:85%;padding:7px 11px;border-radius:15px;font-size:12.5px;line-height:1.35;white-space:pre-wrap;word-break:break-word}
+.bub.out{align-self:flex-start;background:#0a84ff;color:#fff;border-bottom-left-radius:5px}
+.bub.in{align-self:flex-end;background:rgba(128,128,128,.18);color:var(--text);border-bottom-right-radius:5px}
+.meta{font-size:9.5px;color:var(--text2);align-self:flex-start;margin-top:-4px}
+.meta.fail{color:#ff453a}
+.hint{font-size:10px;color:var(--text2);text-align:center;padding:3px}
+.composer{display:flex;gap:6px;padding-top:8px}
+.composer input{flex:1;border:0;border-radius:11px;background:rgba(128,128,128,.14);color:var(--text);font:400 12.5px var(--font);padding:8px 11px;outline:0}
+.composer button{border:0;border-radius:11px;background:#0a84ff;color:#fff;font:600 12.5px var(--font);padding:8px 14px;cursor:pointer}
+.composer button:disabled{opacity:.5;cursor:default}
+/* dynamic island mode */
+body.island{background:transparent}
+body.island .widget{position:static;inset:auto;background:transparent;backdrop-filter:none;box-shadow:none;padding:0;overflow:visible}
+#pill{position:absolute;top:0;left:50%;transform:translateX(-50%);min-width:150px;max-width:360px;border-radius:28px;background:rgba(12,12,14,.92);box-shadow:0 4px 18px rgba(0,0,0,.35),0 0 0 .5px rgba(255,255,255,.08) inset;color:#fff;overflow:hidden;transition:width .28s cubic-bezier(.32,.72,.35,1),min-width .28s cubic-bezier(.32,.72,.35,1),max-height .32s cubic-bezier(.32,.72,.35,1),border-radius .3s;max-height:56px;cursor:pointer;backdrop-filter:blur(30px) saturate(160%)}
+#pillHead{display:flex;align-items:center;gap:8px;height:56px;padding:0 18px;white-space:nowrap}
+#pillHead .av{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;font-size:13px}
+#pillHead .who{font:600 13px var(--font)}
+#pillHead .st{font:400 10.5px var(--font);color:rgba(235,235,245,.55)}
+#pillBody{display:none;padding:0 14px 12px}
+#pill.open{max-height:330px;border-radius:24px;cursor:default}
+#pill.open #pillBody{display:block}
+#pill .log{max-height:200px}
+#pill .bub{font-size:12px}
+#pill .composer input{background:rgba(255,255,255,.12);color:#fff}
+#pill .hint{color:rgba(235,235,245,.45)}
+#pill .meta{color:rgba(235,235,245,.45)}
+</style>
+<body><div class=widget>
+<div id=pill><div id=pillHead class=nd><span class=av>ח</span><span class=who>חיים</span><span class=st id=pillSt></span></div><div id=pillBody></div></div>
+<div id=card style="display:none;flex:1;flex-direction:column;min-height:0">
+ <div class=chdr>חיים</div>
+ <div class=log id=log></div>
+ <div class=hint id=hint style="display:none">תשובות מגיעות עד ~5 דקות · המסך הזה שומר את השיחה במחשב בלבד</div>
+ <div class="composer nd"><input id=txt maxlength=2000 placeholder="כתוב לחיים…"><button id=send>שלח</button></div>
+</div>
+</div>
+<script src="../../shared/widget.js"></script>
+<script>
+const q=new URLSearchParams(location.search);
+document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+const island=q.get('size')==='island';
+const $=i=>document.getElementById(i);
+let H={messages:[],seenHint:false,lastReceived:0};
+let awaiting=false,pollTimer=null;
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function statusText(m){return m.dir==='in'?'':({waiting:'נשלח · מחכה לתשובה',replied:'נענה',sent:'נשלח',failed:'לא נשלח · אין חיבור'}[m.status]||'')}
+function bubble(m){const d=document.createElement('div');d.className='bub '+m.dir;d.dir='auto';d.textContent=m.text;const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=statusText(m);if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'');mt.textContent=t;wrap.append(mt)}return wrap}
+function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;pillSt.textContent=awaiting?'מחכה לתשובה…':''}
+async function save(){try{await api.chatSave(H)}catch{}}
+async function poll(){if(!window.api)return;const r=await api.chatPoll(H.lastReceived||'');
+ if(!r.ok){if(!island)pillSt.textContent='';return}
+ let changed=false;for(const m of r.messages||[]){if(H.messages.some(x=>x.id===m.id))continue;
+  H.messages.push({id:m.id,dir:'in',text:m.text,at:m.at,received_at:m.received_at,status:'sent',in_reply_to:m.in_reply_to});
+  if(m.in_reply_to){const o=H.messages.find(x=>x.id===m.in_reply_to);if(o&&o.status==='waiting')o.status='replied'}
+  H.lastReceived=Math.max(H.lastReceived||0,m.received_at||0);changed=true}
+ if(H.messages.some(m=>m.dir==='out'&&m.status==='waiting'))awaiting=true;else awaiting=false;
+ if(changed){await save();render(log);if(island)newReply()}}
+async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
+ const r=await api.chatSend(t);
+ if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'waiting'};H.messages.push(m);awaiting=true;txt.value='';
+  if(!H.seenHint){H.seenHint=true;hint.style.display=''}
+  await save();render(log)}
+ else{H.messages.push({id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'});await save();render(log)}
+ send.disabled=false;txt.disabled=false;txt.focus();setTimeout(poll,3000)}
+function newReply(){if(!island)return;openPill('reply')}
+/* island behavior */
+let pillMode='closed';
+function openPill(mode){pillMode=mode;pill.classList.add('open');render(pillBodyLog());api.chatPassthrough(false)}
+function closePill(){pillMode='closed';pill.classList.remove('open');api.chatPassthrough(true)}
+function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';const lg=document.createElement('div');lg.className='log';lg.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('input').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);pillBody.append(lg,comp)}return l}
+async function islandSend(comp){const inp=comp.querySelector('input');const t=inp.value.trim();if(!t)return;inp.value='';txt.value=t;await doSend();render(pillBodyLog())}
+if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
+ pillHead.onclick=()=>{pillMode==='closed'?openPill('input'):closePill()};
+ pill.addEventListener('mouseleave',()=>{if(pillMode==='closed')api.chatPassthrough(true)});
+ document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode==='closed')api.chatPassthrough(true)});
+ pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
+}else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;}
+(async()=>{if(!window.api)return;H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+ window.__poll=poll;awaiting=H.messages.some(m=>m.dir==='out'&&m.status==='waiting');
+ render(island?pillBodyLog():log);await poll();pollTimer=setInterval(poll,25000)})();
+</script>
