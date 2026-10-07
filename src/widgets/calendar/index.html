@@ -19,24 +19,23 @@
 const q=new URLSearchParams(location.search);
 document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
 const now=new Date(q.get('demo')?'2026-10-06T10:07:00+03:00':Date.now());
-dow.textContent=now.toLocaleDateString('he-IL',{weekday:'long'});day.textContent=now.getDate();
+dow.textContent=now.toLocaleDateString('he-IL',{weekday:'long',timeZone:'Asia/Jerusalem'});day.textContent=now.toLocaleDateString('he-IL',{day:'numeric',timeZone:'Asia/Jerusalem'});
 const COL=['#ff3b30','#af52de','#0a84ff','#34c759','#ff9500'];
 const tm=t=>new Date(t).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Jerusalem'});
 function showEvents(evs){
-  const today=new Date(now);today.setHours(0,0,0,0);const end=+today+864e5;
-  const t=evs.filter(e=>e.start<end&&(e.end||e.start)>=+today).filter(e=>e.allDay||(e.end||e.start)>=+now);
+  const dateKey=d=>new Date(d).toLocaleDateString('en-CA',{timeZone:'Asia/Jerusalem'});const key=dateKey(now);
+  const t=evs.filter(e=>dateKey(e.start)<=key&&dateKey((e.end||e.start)-(e.allDay?1:0))>=key).filter(e=>e.allDay||(e.end||e.start)>=+now);
   body.innerHTML='';if(!t.length){body.innerHTML='<div class=none>אין עוד אירועים היום</div>';return}
   t.slice(0,2).forEach((e,i)=>{const d=document.createElement('div');d.className='ev';d.innerHTML=`<i style="background:${COL[i%5]}"></i><div><b dir=auto></b><span>${e.allDay?'כל היום':'<bdi>'+tm(e.start)+' – '+tm(e.end||e.start)+'</bdi>'}</span></div>`;d.querySelector('b').textContent=e.title||'(ללא כותרת)';body.appendChild(d)});
   if(t.length>2){const m=document.createElement('div');m.className='more';m.textContent='עוד '+(t.length-2)+(t.length>3?' אירועים':' אירוע');body.appendChild(m)}
 }
-function showForm(err){
-  day.style.display='none';dow.textContent='לוח שנה iCloud';dow.style.color='var(--text2)';body.innerHTML='<div class=form><input id=u placeholder="Apple ID" dir=ltr autocomplete=off><input id=p type=password placeholder="סיסמה ייעודית" dir=ltr><button id=go>התחבר ל-iCloud</button><div class=err id=er></div></div>';
-  if(err)er.textContent=err;
-  go.onclick=async()=>{go.textContent='מתחבר…';const r=await api.calConnect(u.value.trim(),p.value.trim());if(r.ok)load();else{go.textContent='התחבר ל-iCloud';er.textContent=r.error}}}
+function showForm(err){day.style.display='none';dow.textContent='לוח שנה iCloud';body.innerHTML='<div class=hint style="margin:12px 0">חבר את לוח השנה בהגדרות האפליקציה עם סיסמה ייעודית של Apple.</div><button class=nd onclick="api.settingsOpen()" style="border:0;border-radius:8px;background:#0a84ff;color:white;padding:8px;cursor:pointer">פתח הגדרות</button>';if(err){const e=document.createElement('div');e.className='err';e.textContent=err;body.append(e)}}
 async function load(){const s=await api.calStatus();if(!s.connected)return showForm();const r=await api.calEvents();
-  showEvents(r.events||[]);
-  if(r.authError){const a=document.createElement('div');a.className='err';a.style.cursor='pointer';a.textContent='הסיסמה נדחתה. לחץ להתחברות מחדש';a.onclick=()=>{api.calDisconnect().then(()=>showForm())};body.appendChild(a)}}
+  day.style.display='';dow.style.color='#ff3b30';showEvents(r.events||[]);if(r.stale){const e=document.createElement('div');e.className='hint';e.textContent='אין חיבור כרגע · מידע שמור';body.append(e)}
+  if(r.authError){const a=document.createElement('div');a.className='err';a.style.cursor='pointer';a.textContent=(r.error||'הסיסמה נדחתה')+' · לחץ להגדרות';a.onclick=()=>{api.settingsOpen()};body.appendChild(a)}}
 if(q.get('demo')==='form')showForm();
 else if(q.get('demo'))showEvents([{title:'Dentist, Dr Levi',start:+new Date('2026-10-06T13:00:00+03:00'),end:+new Date('2026-10-06T14:00:00+03:00')},{title:'Call with Dana',start:+new Date('2026-10-06T16:30:00+03:00'),end:+new Date('2026-10-06T17:00:00+03:00')},{title:'Dinner',start:+new Date('2026-10-06T20:00:00+03:00'),end:+new Date('2026-10-06T21:30:00+03:00')}]);
 else{load();setInterval(load,10*60e3)}
 </script>
+
+<script src="../../shared/widget.js"></script>
