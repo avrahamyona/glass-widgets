@@ -1,6 +1,6 @@
 {
   "name": "glasswidgets",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "description": "Rounded-card desktop widgets for Windows",
   "main": "src/main.js",
@@ -10,10 +10,10 @@
     "dist": "electron-builder --win nsis --publish never"
   },
   "devDependencies": {
-    "electron": "^33.4.11",
-    "electron-builder": "^25.0.0",
+    "@fontsource-variable/heebo": "^5.0.0",
     "@fontsource-variable/inter": "^5.0.0",
-    "@fontsource-variable/heebo": "^5.0.0"
+    "electron": "^33.4.11",
+    "electron-builder": "^25.0.0"
   },
   "build": {
     "appId": "app.glasswidgets",
@@ -26,7 +26,36 @@
       "icon": "build/icon.png"
     },
     "icon": "build/icon.png",
-    "nsis": {"artifactName": "GlassWidgets-Setup-${version}.exe", "oneClick": true, "perMachine": false, "runAfterFinish": true, "createDesktopShortcut": true, "createStartMenuShortcut": true, "shortcutName": "GlassWidgets", "deleteAppDataOnUninstall": false},
-    "productName": "GlassWidgets"
+    "nsis": {
+      "artifactName": "GlassWidgets-Setup-${version}.exe",
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GlassWidgets",
+      "deleteAppDataOnUninstall": false
+    },
+    "productName": "GlassWidgets",
+    "extraResources": [
+      {
+        "from": "native/MediaBridge/publish",
+        "to": "media",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "native/CloudBridge/publish",
+        "to": "cloud",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.2",
+    "ical.js": "^2.2.1"
   }
 }
