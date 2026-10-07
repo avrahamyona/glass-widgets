@@ -1,7 +1,7 @@
 const {contextBridge,ipcRenderer}=require('electron');
 contextBridge.exposeInMainWorld('api',{
   cloudOpen:s=>ipcRenderer.invoke('cloud:open',s),cloudChrome:s=>ipcRenderer.invoke('cloud:chrome',s),cloudStatus:()=>ipcRenderer.invoke('cloud:status'),cloudLogout:()=>ipcRenderer.invoke('cloud:logout'),settingsOpen:()=>ipcRenderer.invoke('settings:open'),
-  widgetsShow:()=>ipcRenderer.invoke('widgets:show'),icloudStatus:()=>ipcRenderer.invoke('icloud:status'),icloudLogin:(u,p)=>ipcRenderer.invoke('icloud:login',u,p),icloudRequestCode:()=>ipcRenderer.invoke('icloud:request-code'),icloudCode:(c,m)=>ipcRenderer.invoke('icloud:code',c,m),icloudRefresh:()=>ipcRenderer.invoke('icloud:refresh'),icloudData:()=>ipcRenderer.invoke('icloud:data'),icloudForget:()=>ipcRenderer.invoke('icloud:forget'),
+  instanceAdd:(t,i)=>ipcRenderer.invoke('instance:add',t,i),instanceRemove:i=>ipcRenderer.invoke('instance:remove',i),instanceSave:(i,p)=>ipcRenderer.invoke('instance:save',i,p),instanceSelf:()=>ipcRenderer.invoke('instance:self'),instanceSelfSave:p=>ipcRenderer.invoke('instance:self-save',p),widgetsShow:()=>ipcRenderer.invoke('widgets:show'),icloudStatus:()=>ipcRenderer.invoke('icloud:status'),icloudLogin:(u,p)=>ipcRenderer.invoke('icloud:login',u,p),icloudRequestCode:()=>ipcRenderer.invoke('icloud:request-code'),icloudCode:(c,m)=>ipcRenderer.invoke('icloud:code',c,m),icloudRefresh:()=>ipcRenderer.invoke('icloud:refresh'),icloudData:()=>ipcRenderer.invoke('icloud:data'),icloudForget:()=>ipcRenderer.invoke('icloud:forget'),
   stats:()=>ipcRenderer.invoke('sys:stats'),
   notesGet:()=>ipcRenderer.invoke('notes:get'),
   notesSave:t=>ipcRenderer.invoke('notes:save',t),
@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('api',{
   media:()=>ipcRenderer.invoke('media:get'),mediaCmd:c=>ipcRenderer.invoke('media:cmd',c),
   setGet:()=>ipcRenderer.invoke('set:get'),setToggle:(i,o)=>ipcRenderer.invoke('set:toggle',i,o),setSave:p=>ipcRenderer.invoke('set:save',p),
   geocode:async n=>{const r=await fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=he&name='+encodeURIComponent(n));return (await r.json()).results||[]},
-  invGet:()=>ipcRenderer.invoke('inv:get'),invCheck:s=>ipcRenderer.invoke('inv:check',s),
+  invSearch:q=>ipcRenderer.invoke('inv:search',q),invGet:()=>ipcRenderer.invoke('inv:get'),invCheck:s=>ipcRenderer.invoke('inv:check',s),
   bat:()=>ipcRenderer.invoke('bat:get'),
   config:()=>ipcRenderer.invoke('cfg:get')
 });
