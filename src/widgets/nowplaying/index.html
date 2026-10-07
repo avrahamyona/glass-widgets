@@ -12,7 +12,7 @@
 .tm{display:flex;justify-content:space-between;direction:ltr;font-size:9.5px;color:var(--text2);margin-top:3px;font-variant-numeric:tabular-nums}
 .ctl{display:flex;justify-content:center;gap:18px;direction:ltr;margin-top:4px}
 .ctl button{border:0;background:none;color:var(--text);cursor:pointer;padding:2px;display:grid;place-items:center}
-.ctl button:active{opacity:.5}.ctl svg{width:22px;height:22px;fill:currentColor}.ctl .pp svg{width:28px;height:28px}
+.ctl button:disabled{opacity:.3;cursor:default}.ctl button:active{opacity:.5}.ctl svg{width:22px;height:22px;fill:currentColor}.ctl .pp svg{width:28px;height:28px}
 .empty{margin:auto;color:var(--text2);font-size:13px;text-align:center;line-height:1.5}
 </style>
 <body><div class=widget id=w>
@@ -30,15 +30,17 @@ const fmt=s=>{s=Math.max(0,Math.floor(s||0));return Math.floor(s/60)+':'+String(
 const APPS={spotify:'Spotify',chrome:'Chrome',msedge:'Edge',firefox:'Firefox'};
 const appName=id=>{id=(id||'').toLowerCase();for(const k in APPS)if(id.includes(k))return APPS[k];return (id.split(/[!.\\]/).filter(Boolean)[0]||'').replace(/\.exe$/,'')};
 let st=null,at=0;
-function render(m){st=m;at=Date.now();
+function render(m){st=m;at=Date.now();prev.disabled=!m||m.none||m.canPrev===false;next.disabled=!m||m.none||m.canNext===false;pp.disabled=!m||m.none||m.canToggle===false;
   if(!m||m.none){t.textContent=m&&m.err?'שגיאת מדיה':'אין מדיה מתנגנת';a.textContent=m&&m.err?m.err.slice(0,140):'';app.innerHTML='&nbsp;';img.style.display='none';ph.style.display='';fill.style.width=0;p.textContent='0:00';d.textContent='0:00';ppi.firstElementChild.setAttribute('d',PLAY);return}
-  t.textContent=m.title||'—';a.textContent=m.artist||m.album||'';app.textContent=appName(m.app);
+  t.textContent=m.title||'—';a.textContent=m.artist||m.album||'';app.textContent=m.commandError||appName(m.app);
   if(m.art){img.src=m.art;img.style.display='block';ph.style.display='none'}else{img.style.display='none';ph.style.display=''}
   ppi.firstElementChild.setAttribute('d',m.playing?PAUSE:PLAY)}
 function tick(){if(!st||st.none)return;const pos=st.pos+(st.playing?(Date.now()-at)/1000:0);const pc=st.dur>0?Math.min(100,pos/st.dur*100):0;
   fill.style.width=pc+'%';p.textContent=fmt(pos);d.textContent=fmt(st.dur)}
 setInterval(tick,500);
 if(q.get('demo')){render({title:'שיר לדוגמה - Demo Track',artist:'אמן לדוגמה',app:'Spotify.exe',playing:true,pos:84,dur:215,art:''});tick()}
-else{prev.onclick=()=>api.mediaCmd('prev');next.onclick=()=>api.mediaCmd('next');pp.onclick=()=>api.mediaCmd('toggle');
+else{async function command(c){const r=await api.mediaCmd(c);if(r&&!r.ok)app.textContent=r.error||'הפעולה לא זמינה'}prev.onclick=()=>command('prev');next.onclick=()=>command('next');pp.onclick=()=>command('toggle');
  const poll=()=>api.media().then(render);poll();setInterval(poll,1000)}
 </script>
+
+<script src="../../shared/widget.js"></script>
