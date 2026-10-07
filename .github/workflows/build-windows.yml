@@ -44,15 +44,12 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.3.7
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.3.8
 
-          **New: Chat widget**
-          - A Dynamic Island-style chat with Chaim, right from your desktop
-          - Tap the pill to open the chat, type, and send - replies arrive in the island
-          - Click anywhere outside the island (or switch windows) to collapse it back to the pill
-          - New reply while collapsed: a small green dot appears next to חיים - tap to read
-          - Smooth capsule open/close animation
-          - Connects through the Avi Music server; nothing is stored locally
-
-          **Under the hood**
-          - Chat key is injected at build time - never stored in the repository"
+          **Chat widget polish**
+          - The island now always opens at the top-center of the screen
+          - Enter sends your message (Shift+Enter for a new line)
+          - Click any chat bubble to copy it
+          - Status labels in the pill: \"מחכה לתשובה...\" after you send, \"יש תשובה\" when a reply arrives - then back to clean
+          - A reply can no longer get lost behind a broken sync marker
+          - Gentle \"אין חיבור\" note if the server can't be reached, clearing when back online"
