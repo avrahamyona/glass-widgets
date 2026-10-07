@@ -29,3 +29,5 @@ function render(s){set('cpu',s.cpu,s.cpu,'');
 if(q.get('demo'))render({cpu:23,mem:{used:9.4*1073741824,total:16*1073741824},disk:{total:512e9,free:231e9},uptime:3*86400+5*3600});
 else{const tick=()=>api.stats().then(render);tick();setInterval(tick,2000)}
 </script>
+
+<script src="../../shared/widget.js"></script>
