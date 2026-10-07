@@ -112,13 +112,13 @@ ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
 const credFile='cal.bin';
 function loadCreds(){try{const b=fs.readFileSync(path.join(U(),credFile));return JSON.parse(safeStorage.isEncryptionAvailable()?safeStorage.decryptString(b):null)}catch{return null}}
-ipcMain.handle('cal:status',()=>({connected:!!loadCreds()}));
+ipcMain.handle('cal:status',()=>({connected:cloudData.connected||!!loadCreds()||!!cloudData.calendar?.length}));
 ipcMain.handle('cal:connect',async(_,user,pw)=>{user=String(user).trim();pw=String(pw).replace(/\s+/g,'');
   try{await caldav.fetchEvents(user,String(pw).replace(/\s+/g,''),new Date(),new Date(Date.now()+864e5));
     if(!safeStorage.isEncryptionAvailable())throw new Error('Windows לא מאפשר שמירת סיסמה מוצפנת');const j=JSON.stringify({user,pw});fs.writeFileSync(path.join(U(),credFile),safeStorage.encryptString(j));return {ok:true}}
   catch(e){return {ok:false,error:caldav.explain(e)}}});
 ipcMain.handle('cal:disconnect',()=>{try{fs.unlinkSync(path.join(U(),credFile))}catch{}});
-ipcMain.handle('cal:events',async()=>{const c=loadCreds();if(!c)return {connected:false,events:[]};
+ipcMain.handle('cal:events',async()=>{if(cloudData.connected||cloudData.calendar?.length)return {connected:true,events:cloudData.calendar||[],stale:!cloudData.connected||Date.now()-(cloudData.at||0)>3600000,error:cloudData.errors?.calendar,manual:true};const c=loadCreds();if(!c)return {connected:false,events:[]};
   const cache=rd('calcache.json',{events:[]});
   const from=new Date(Date.now()-864e5);const to=new Date(+from+7*864e5);
   for(let i=0;i<3;i++){ // retry network blips; never drop the saved login on a transient error
@@ -176,6 +176,7 @@ ipcMain.handle('cloud:chrome',(_,section)=>{const url=ICLOUD[section];if(!url)re
  if(process.platform==='win32'){const roots=[process.env.PROGRAMFILES,process.env['PROGRAMFILES(X86)'],process.env.LOCALAPPDATA].filter(Boolean);const exe=roots.map(r=>path.join(r,'Google','Chrome','Application','chrome.exe')).find(f=>fs.existsSync(f));if(exe){const p=spawn(exe,[url],{detached:true,stdio:'ignore'});p.unref();return {ok:true}}}
  shell.openExternal(url);return {ok:true,fallback:true}});
 ipcMain.handle('settings:open',()=>openSettings());
+ipcMain.handle('widgets:show',()=>{for(const w of Object.values(wins)){if(!w.isDestroyed()){w.show();w.moveTop()}}return {ok:true,count:Object.keys(wins).length}});
 app.on('before-quit',()=>{quitting=true;saveLayout();stopCloud();if(mediaProcess)mediaProcess.kill()});
 // Experimental, manual-refresh-only local iCloud data adapter.
 let cloudTemp=null;
@@ -194,10 +195,11 @@ function ensureCloud(){
 }
 function cloudRequest(action,data={}){if(!ensureCloud())return Promise.resolve({connected:false,state:'unavailable',error:'רכיב iCloud חסר. התקן את הגרסה המלאה'});return new Promise(resolve=>{const id=++cloudSeq;const timer=setTimeout(()=>{cloudPending.delete(id);resolve({connected:false,state:'error',error:'iCloud לא ענה בזמן. לא בוצעו שינויים'});stopCloud()},120000);cloudPending.set(id,{id,resolve,timer});cloudProcess.stdin.write(JSON.stringify({id,action,...data})+'\n')})}
 async function cloudResume(){if(!cloudProcess){const saved=encryptedRead('cloud-session.bin');if(saved){const r=await cloudRequest('resume',{session:saved});cloudData={...cloudData,...r};return r}}return cloudRequest('status')}
-async function refreshCloud(){if(cloudRefreshing)return {...cloudData,busy:true};if(Date.now()-cloudLastRefresh<60000)return {...cloudData,cooldown:true};cloudRefreshing=true;cloudLastRefresh=Date.now();try{const s=await cloudResume();if(!s.connected){cloudData={...cloudData,...s};return cloudData}const r=await cloudRequest('refresh');cloudData={...cloudData,...r};if(r.connected){const old=encryptedRead('cloud-cache.bin')||{};cloudData.notes=r.errors?.notes?(old.notes||[]):r.notes;cloudData.reminders=r.errors?.reminders?(old.reminders||[]):r.reminders;encryptedWrite('cloud-cache.bin',cloudData)}return cloudData}finally{cloudRefreshing=false}}
-ipcMain.handle('icloud:status',()=>({saved:!!encryptedRead('cloud-session.bin'),state:cloudData.state||'signed_out',connected:cloudData.connected,at:cloudData.at||null,calendar:!!loadCreds()}));
+async function refreshCloud(){if(cloudRefreshing)return {...cloudData,busy:true};if(Date.now()-cloudLastRefresh<60000)return {...cloudData,cooldown:true};cloudRefreshing=true;cloudLastRefresh=Date.now();try{const s=await cloudResume();if(!s.connected){cloudData={...cloudData,...s};return cloudData}const r=await cloudRequest('refresh');cloudData={...cloudData,...r};if(r.connected){const old=encryptedRead('cloud-cache.bin')||{};cloudData.notes=r.errors?.notes?(old.notes||[]):r.notes;cloudData.reminders=r.errors?.reminders?(old.reminders||[]):r.reminders;cloudData.calendar=r.errors?.calendar?(old.calendar||[]):r.calendar;encryptedWrite('cloud-cache.bin',cloudData)}return cloudData}finally{cloudRefreshing=false}}
+ipcMain.handle('icloud:status',()=>({saved:!!encryptedRead('cloud-session.bin'),state:cloudData.state||'signed_out',connected:cloudData.connected,at:cloudData.at||null,calendar:!!loadCreds(),errors:cloudData.errors||{},counts:{notes:cloudData.notes?.length||0,reminders:cloudData.reminders?.length||0,calendar:cloudData.calendar?.length||0}}));
 ipcMain.handle('icloud:login',async(_,user,password)=>{stopCloud();cloudData={connected:false,notes:[],reminders:[]};cloudLastRefresh=0;const r=await cloudRequest('login',{user:String(user).trim(),password:String(password)});cloudData={...cloudData,...r};return r});
-ipcMain.handle('icloud:code',async(_,code)=>{const r=await cloudRequest('code',{code:String(code).trim()});cloudData={...cloudData,...r};return r});
+ipcMain.handle('icloud:request-code',async()=>{const r=await cloudRequest('request_code');cloudData={...cloudData,...r};return r});
+ipcMain.handle('icloud:code',async(_,code,manual)=>{const r=await cloudRequest('code',{code:String(code).trim(),manual:!!manual});cloudData={...cloudData,...r};return r});
 ipcMain.handle('icloud:refresh',()=>refreshCloud());
 ipcMain.handle('icloud:data',()=>({...cloudData,stale:!cloudData.connected||!cloudData.at||Date.now()-cloudData.at>3600000}));
 ipcMain.handle('icloud:forget',()=>{stopCloud();for(const f of ['cloud-session.bin','cloud-cache.bin']){try{fs.unlinkSync(path.join(U(),f))}catch{}}cloudData={connected:false,notes:[],reminders:[]};return {ok:true}});
