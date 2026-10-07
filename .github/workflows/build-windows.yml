@@ -20,6 +20,10 @@ jobs:
         run: |
           '{"id":1,"action":"status"}' | & native/CloudBridge/publish/CloudBridge/CloudBridge.exe
           if ($LASTEXITCODE -ne 0) { throw 'Cloud helper failed' }
+          $env:PYTHONIOENCODING = 'cp1252'
+          $output = '{"id":2,"action":"code"}' | & native/CloudBridge/publish/CloudBridge/CloudBridge.exe
+          $parsed = $output | ConvertFrom-Json
+          if ($parsed.error -notmatch '[\u0590-\u05FF]' -or $output -match '[^\x00-\x7F]') { throw 'Unicode transport failed' }
       - run: npm install --no-audit --no-fund
       - run: npm run dist
       - uses: actions/upload-artifact@v4
