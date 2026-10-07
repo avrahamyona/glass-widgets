@@ -38,10 +38,14 @@ button.b{border:0;background:#0a84ff;color:#fff;border-radius:8px;padding:7px 14
  <div class=row><input class=t id=symIn dir=auto placeholder="חפש שם חברה או סימול, למשל Apple או AAPL" autocomplete=off aria-label="חפש מניה"><button class=b id=symGo>חפש</button><div class=d id=symMsg style="width:100%;user-select:text" aria-live=polite></div><div id=stockResults style="width:100%"></div></div>
 </div>
 <h2>כללי</h2><div class=card>
- <div class=row><div class=n>מראה<div class=d>בהיר, כהה, או לפי ווינדוס</div></div><div class=seg id=theme></div></div>
+ <div class=row><div class=n>מראה<div class=d>אוטומטי: בהיר ביום, כהה בערב לפי שקיעה מקומית. אפשר גם לקבוע ידנית</div></div><div class=seg id=theme></div></div>
  <div class=row><div class=n>תמיד מעל חלונות אחרים</div><div class=sw id=onTop></div></div>
  <div class=row><div class=n>הפעל עם ווינדוס</div><div class=sw id=autostart></div></div>
  <div class=row><div class=n>עיר למזג האוויר<div class=d id=cityName></div></div><input class=t id=cityIn placeholder="הקלד שם עיר"><button class=b id=cityGo>חפש</button><div class=res id=cityRes></div></div>
+</div>
+<h2>עדכונים ומשוב</h2><div class=card>
+ <div class=row><div class=n>עדכון גרסה<div class=d>בדיקה מול הגרסה הרשמית. אם יש עדכון - הוא יורד ויותקן מהאפליקציה עצמה</div></div><button class=b id=updGo>חיפוש עדכונים</button><button class=b id=updInstall style="display:none;background:#34c759">התקן והפעל מחדש</button><div class=d id=updMsg style="width:100%;user-select:text" aria-live=polite></div></div>
+ <div class=row style="display:block"><div class=n style="margin-bottom:6px">דיווח / בקשות<div class=d>כתוב תיקון או בקשה - זה מגיע ישירות אלינו לביצוע</div></div><textarea class=t id=fbText rows=3 style="width:100%;resize:vertical;font-family:var(--font)" placeholder="למשל: הווידג׳ט של מזג האוויר לא מתעדכן, או: אשמח לווידג׳ט של..."></textarea><div style="display:flex;gap:8px;margin-top:8px;align-items:center"><button class=b id=fbGo>שלח דיווח</button><span class=d id=fbMsg aria-live=polite></span></div></div>
 </div>
 <div class=foot id=foot></div>
 <script>
@@ -66,7 +70,7 @@ async function load(){const r=await api.setGet();S=r.settings;widgetInstances=r.
   if(type==='clock'){const tz=document.createElement('select');tz.className='t';tz.dir='ltr';const zones=['Asia/Jerusalem','America/Chicago','America/New_York','America/Los_Angeles','Europe/London','Europe/Paris','Asia/Tokyo','Australia/Sydney','UTC'];if(w.timezone&&!zones.includes(w.timezone))zones.push(w.timezone);for(const z of zones){const o=document.createElement('option');o.value=z;o.textContent=z;tz.append(o)}tz.value=w.timezone||'Asia/Jerusalem';tz.setAttribute('aria-label','אזור זמן של '+w.label);tz.onchange=async()=>{await api.instanceSave(w.id,{timezone:tz.value});await load()};row.append(tz)}
   if(type==='weather'){const input=document.createElement('input');input.className='t';input.placeholder='עיר לכרטיס הזה';input.value=w.city?.name||'';const search=document.createElement('button');search.className='b';search.textContent='חפש עיר';const results=document.createElement('div');results.className='res';search.onclick=async()=>{results.replaceChildren();try{const cs=await api.geocode(input.value.trim());for(const c of cs){const b=document.createElement('button');b.className='b';b.textContent=[c.name,c.admin1,c.country].filter(Boolean).join(', ');b.onclick=async()=>{await api.instanceSave(w.id,{city:{name:c.name,lat:c.latitude,lon:c.longitude}});load()};results.append(b)}}catch{results.textContent='אין חיבור'}};row.append(input,search,results)}
   list.appendChild(row)});
- seg(document.getElementById('theme'),[['auto','אוטומטי'],['light','בהיר'],['dark','כהה']],S.theme,async v=>{S=await api.setSave({theme:v});load()});
+ seg(document.getElementById('theme'),[['auto','אוטומטי לפי שעה'],['system','לפי ווינדוס'],['light','בהיר'],['dark','כהה']],S.theme,async v=>{S=await api.setSave({theme:v});load()});
  for(const k of ['onTop','autostart']){const el=document.getElementById(k);const on=k==='onTop'?S.onTop:r.autostart;el.className='sw'+(on?' on':'');
   el.onclick=async()=>{const n=!el.classList.contains('on');await api.setSave({[k]:n});el.classList.toggle('on',n)}}
  cityName.textContent=(S.city&&S.city.name)||'פתח תקווה';foot.textContent='גרסה '+r.version;drawInv();}
@@ -105,5 +109,10 @@ calSign.onclick=async()=>{calSign.disabled=true;calMsg.textContent='בודק ה�
 stockTarget.onchange=()=>{stockTargetId=stockTarget.value;drawInv();drawStockResults(lastStockItems)};
 addInstance.onclick=async()=>{const r=await api.instanceAdd(addType.value);if(r.error)sizeMsg.textContent=r.error;else await load()};
 showWidgets.onclick=()=>api.widgetsShow();
+let updTimer=null;
+async function pollUpd(){const u=await api.updateState();updMsg.textContent=u.state==='checking'?'בודק אם יש עדכון…':u.state==='downloading'?'מוריד עדכון '+(u.version||'')+' · '+u.percent+'%':u.state==='none'?'אין עדכון זמין - אתה בגרסה העדכנית':u.state==='ready'?'העדכון '+(u.version||'')+' מוכן להתקנה':u.error||'';updInstall.style.display=u.state==='ready'?'':'none';if(u.state==='checking'||u.state==='downloading')updTimer=setTimeout(pollUpd,1000)}
+updGo.onclick=async()=>{updGo.disabled=true;updMsg.textContent='בודק אם יש עדכון…';try{const u=await api.updateCheck();if(u.state==='unavailable'){updMsg.textContent=u.error;updGo.disabled=false;return}pollUpd()}finally{updGo.disabled=false}};
+updInstall.onclick=async()=>{updMsg.textContent='מתקין ומפעיל מחדש…';try{await api.updateInstall()}catch{updMsg.textContent='ההתקנה לא החלה. סגור ופתח את האפליקציה ידנית'}};
+fbGo.onclick=async()=>{const t=fbText.value.trim();if(t.length<2){fbMsg.textContent='כתוב כמה מילים לפני השליחה';return}fbGo.disabled=true;fbMsg.textContent='שולח…';try{const r=await api.feedbackSend(t);fbMsg.textContent=r.ok?'נשלח, תודה! הדיווח אצלנו לביצוע':(r.error||'השליחה נכשלה');if(r.ok)fbText.value=''}catch{fbMsg.textContent='אין חיבור כרגע. הדיווח לא נשלח'}finally{fbGo.disabled=false}};
 load();
  </script>
