@@ -34,4 +34,4 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "Windows installer (unsigned). 0.3.5: fix iCloud verification-code rejection (strip invisible characters, automatic retry via the trusted-device verifier, clearer errors); signing into iCloud in settings now also signs in the in-app iCloud browser windows; new timer widget (from the clock widget) with shrinking circle countdown, pause/resume, always-on-top toggle, and cancel-to-close."
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "Windows installer (unsigned). 0.3.6: digital clock content now centered regardless of the timer button; timer always-on-top toggle no longer resets a running countdown; iCloud button shows Connected state when signed in; calendar now uses the single iCloud sign-in (separate CalDAV login removed); saved iCloud session resumes at app start so the shared sign-in covers iCloud windows right away."
