@@ -31,7 +31,7 @@ button.b{border:0;background:#0a84ff;color:#fff;border-radius:8px;padding:7px 14
 <details style="padding:12px"><summary>אפשרויות מתקדמות · אתר רשמי ו-CalDAV נפרד</summary><div class=row><div class=n>חיבור ל-iCloud<div class=d>פתקים ותזכורות נפתחים באתר הרשמי בתוך האפליקציה. זו אינה תצוגת תוכן מסונכרן בכרטיסים.</div></div><button class=b id=cloudSign>פתח והתחבר</button></div>
 <div class=row><button class=b id=cloudNotes>פתקים</button><button class=b id=cloudRem>תזכורות</button><button class=b id=cloudCalendar>לוח שנה</button><button class=b id=cloudOut style="background:#8e8e93">מחק התחברות מהאפליקציה</button></div>
 <div class=row><div class=n>סנכרון לוח שנה בכרטיס<div class=d>כניסה נפרדת עם סיסמה ייעודית של Apple. הסיסמה נשמרת מוצפנת ב-Windows.</div></div><input class=t id=appleUser dir=ltr placeholder="Apple ID"><input class=t id=applePass type=password dir=ltr placeholder="סיסמה ייעודית"><button class=b id=calSign>חבר לוח שנה</button><div class=d id=calMsg style="width:100%;user-select:text"></div></div>
-</details></div><h2>ווידג׳טים <button class=b id=showWidgets>הצג ווידג׳טים עכשיו</button></h2><div class=card id=list></div>
+</details></div><h2>ווידג׳טים <button class=b id=showWidgets>הצג ווידג׳טים עכשיו</button></h2><div class=d id=sizeMsg style="padding:4px 12px;user-select:text"></div><div class=card id=list></div>
 <h2>מעקב השקעות</h2><div class=card id=inv>
  <div class=row id=invList style="display:block;padding:4px 14px"></div>
  <div class=row><input class=t id=symIn dir=ltr placeholder="סימול, למשל AAPL או TA35.TA"><input class=t id=qtyIn dir=ltr placeholder="כמות (לא חובה)" style="max-width:130px"><button class=b id=symGo>הוסף</button><div class=res id=symMsg style="color:#8e8e93"></div></div>
@@ -59,7 +59,7 @@ async function load(){const r=await api.setGet();S=r.settings;
   if(STYLES[w.id]){const s=document.createElement('div');s.className='sty';s.innerHTML='<span>סגנון</span><div class=seg></div>';row.appendChild(s);
    seg(s.querySelector('.seg'),STYLES[w.id],S.styles[w.id],async v=>{S=await api.setSave({styles:{[w.id]:v}});load()})}
   const sz=document.createElement('div');sz.className='sty';sz.innerHTML='<span>תצוגה</span><div class=seg></div>';row.appendChild(sz);
-  seg(sz.querySelector('.seg'),[['square','ריבוע'],['rectangle','מלבן']],S.sizes?.[w.id]||w.size||(['sysmon','battery','nowplaying','units'].includes(w.id)?'rectangle':'square'),async v=>{S=await api.setSave({sizes:{[w.id]:v}});load()});
+  seg(sz.querySelector('.seg'),[['square','ריבוע'],['rectangle','מלבן']],S.sizes?.[w.id]||w.size||(['sysmon','battery','nowplaying','units'].includes(w.id)?'rectangle':'square'),async v=>{S=await api.setSave({sizes:{[w.id]:v}});await load();const msg=document.getElementById('sizeMsg');msg.textContent=w.label+': '+(v==='square'?'200 × 200':'400 × 200')+' · הגודל עודכן'+(w.on?'':' · הווידג׳ט כבוי')});
   list.appendChild(row)});
  seg(document.getElementById('theme'),[['auto','אוטומטי'],['light','בהיר'],['dark','כהה']],S.theme,async v=>{S=await api.setSave({theme:v});load()});
  for(const k of ['onTop','autostart']){const el=document.getElementById(k);const on=k==='onTop'?S.onTop:r.autostart;el.className='sw'+(on?' on':'');
@@ -84,7 +84,7 @@ if(new URLSearchParams(location.search).get('demo')){S={portfolio:[{sym:'AAPL',q
  const names={clock:'שעון',weather:'מזג אוויר',notes:'פתקים',sysmon:'ניטור מערכת',clipboard:'היסטוריית העתקות',calendar:'לוח שנה',units:'ממיר יחידות',network:'רשת',battery:'סוללה',nowplaying:'מנגן עכשיו',invest:'מעקב השקעות'};
  window.api={invCheck:async()=>({ok:true,name:'x'}),setGet:async()=>({settings:S,widgets:Object.keys(names).map((id,i)=>({id,label:names[id],on:i!==3&&i!==8})),autostart:true,version:'0.3.1'}),setToggle:async()=>{},setSave:async p=>{S={...S,...p,styles:{...S.styles,...(p.styles||{})}};return S},geocode:async()=>[]}}
 async function cloudState(){const st=await api.icloudStatus();serviceState.textContent=['notes','reminders','calendar'].map((k,i)=>['פתקים','תזכורות','לוח שנה'][i]+': '+(st.errors?.[k]?'שגיאת קריאה':st.connected?(st.at?'עודכן · '+st.counts[k]+' פריטים':'מחובר · טרם נקרא מידע'):st.saved?'התחברות שמורה · יש לבדוק בעדכון':'לא מחובר')).join(' | ');}
-async function result(r){const method={trusted_device:'למכשיר מהימן',sms:'ב-SMS',security_key:'באמצעות מפתח אבטחה',unknown:'ללא ערוץ זמין'}[r.delivery]||'';webMsg.textContent=r.error||(r.state==='code_required'?(r.requested?'בקשת אימות הועברה ל-Apple '+method+'. יש לאשר במכשיר ולהזין קוד.':'נדרש אימות, אך לא אושרה בקשת קוד. בקש שוב או השתמש באתר הרשמי.'):r.connected?'מחובר. לחץ עדכן מידע עכשיו כדי לקרוא את שלושת השירותים.':'לא מחובר');codeRow.style.display=r.state==='code_required'?'':'none';await cloudState();}
+async function result(r){const method={trusted_device:'למכשיר מהימן',sms:'ב-SMS',security_key:'באמצעות מפתח אבטחה',unknown:'ללא ערוץ זמין'}[r.delivery]||'';webMsg.textContent=(r.error?(r.error+(r.diagnostic?' [שלב: '+r.diagnostic.stage+' · '+r.diagnostic.frame+':'+r.diagnostic.line+(r.diagnostic.encoding?' · '+r.diagnostic.encoding:'')+']':'')):'')||(r.state==='code_required'?(r.requested?'בקשת אימות הועברה ל-Apple '+method+'. יש לאשר במכשיר ולהזין קוד.':'נדרש אימות, אך לא אושרה בקשת קוד. בקש שוב או השתמש באתר הרשמי.'):r.connected?'מחובר. לחץ עדכן מידע עכשיו כדי לקרוא את שלושת השירותים.':'לא מחובר');codeRow.style.display=r.state==='code_required'?'':'none';await cloudState();}
 requestCode.onclick=async()=>{requestCode.disabled=true;try{await result(await api.icloudRequestCode())}finally{requestCode.disabled=false}};
 webLogin.onclick=async()=>{webLogin.disabled=true;webMsg.textContent='מתחבר ל-Apple…';try{await result(await api.icloudLogin(webUser.value,webPass.value));webPass.value=''}catch{webMsg.textContent='החיבור נכשל'}finally{webLogin.disabled=false}};
 codeGo.onclick=async()=>{codeGo.disabled=true;try{await result(await api.icloudCode(webCode.value,manualCode.checked));webCode.value=''}finally{codeGo.disabled=false}};
@@ -94,4 +94,4 @@ cloudSign.onclick=()=>api.cloudOpen('home');cloudNotes.onclick=()=>api.cloudOpen
 calSign.onclick=async()=>{calSign.disabled=true;calMsg.textContent='בודק התחברות…';try{const r=await api.calConnect(appleUser.value,applePass.value);calMsg.textContent=r.ok?'לוח השנה מחובר':r.error;if(r.ok)applePass.value=''}catch(e){calMsg.textContent=e.message}finally{calSign.disabled=false}};
 showWidgets.onclick=()=>api.widgetsShow();
 load();
-</script>
+ </script>
