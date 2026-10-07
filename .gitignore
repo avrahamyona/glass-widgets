@@ -1,4 +1,8 @@
-node_modules
-dist
-build/*.png
-src/shared/fonts/
+node_modules/
+dist/
+native/**/bin/
+native/**/obj/
+native/**/publish/
+
+native/**/build/
+native/**/*.spec
