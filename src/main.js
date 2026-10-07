@@ -23,19 +23,25 @@ const U=()=>app.getPath('userData');
 const rd=(f,d)=>{try{return JSON.parse(fs.readFileSync(path.join(U(),f)))}catch{return d}};
 const wr=(f,v)=>fs.writeFileSync(path.join(U(),f),JSON.stringify(v));
 const wins={};
-function dimensions(id){const size=getSet().sizes[id]||((WIDGETS[id].w>WIDGETS[id].h)?'rectangle':'square');return size==='rectangle'?{width:400,height:200}:{width:200,height:200}}
+function instances(){const saved=rd('instances.json',null);if(Array.isArray(saved))return saved.filter(x=>x&&typeof x.id==='string'&&/^[a-z0-9-]+$/.test(x.id)&&WIDGETS[x.type]);const migrated=Object.keys(WIDGETS).map(type=>({id:type,type}));wr('instances.json',migrated);return migrated}
+function instance(id){return instances().find(x=>x.id===id)}
+function instanceConfig(id){const it=instance(id);if(!it)return {size:WIDGETS[id]?.w>WIDGETS[id]?.h?'rectangle':'square',style:getSet().styles[id],timezone:'Asia/Jerusalem',city:getSet().city,portfolio:getSet().portfolio};const s=getSet(),local=s.instanceConfigs?.[id]||{};return {size:s.sizes[id]||((WIDGETS[it.type].w>WIDGETS[it.type].h)?'rectangle':'square'),style:s.styles[id]||s.styles[it.type],timezone:'Asia/Jerusalem',onTop:s.onTop,city:s.city,portfolio:s.portfolio,...local}}
+function callerInstance(event){try{const u=new URL(event.sender.getURL()),id=u.searchParams.get('instance');return instance(id)?id:null}catch{return null}}
+function instanceNoteFile(event){const id=callerInstance(event);return !id||id==='notes'?'notes.json':'notes-'+id+'.json'}
+
+function dimensions(id){const size=instanceConfig(id).size;return size==='rectangle'?{width:400,height:200}:{width:200,height:200}}
 function saveLayout(){const c=rd('layout.json',{});for(const [id,w] of Object.entries(wins)){if(!w.isDestroyed()){const [x,y]=w.getPosition();c[id]={x,y}}}wr('layout.json',c)}
 function visiblePosition(x,y,width,height){const ds=screen.getAllDisplays();if(ds.some(d=>x>=d.workArea.x&&y>=d.workArea.y&&x+width<=d.workArea.x+d.workArea.width&&y+height<=d.workArea.y+d.workArea.height))return {x,y};const a=screen.getDisplayNearestPoint({x,y}).workArea;return {x:Math.max(a.x,Math.min(x,a.x+a.width-width)),y:Math.max(a.y,Math.min(y,a.y+a.height-height))}}
 
 function open(id){
   if(wins[id]&&!wins[id].isDestroyed())return;
-  const d=WIDGETS[id],s=(rd('layout.json',{}))[id]||{};
+  const it=instance(id);if(!it)return;const d=WIDGETS[it.type],s=(rd('layout.json',{}))[id]||{};
   const dim=dimensions(id),pos=visiblePosition(s.x??d.x,s.y??d.y,dim.width,dim.height);
   const w=new BrowserWindow({...dim,...pos,frame:false,transparent:true,hasShadow:false,
     resizable:false,skipTaskbar:true,show:false,
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
-  w.loadFile(path.join(__dirname,'widgets',id,'index.html'),{query:wq(id)});
-  w.once('ready-to-show',()=>{w.show();if(getSet().onTop)w.setAlwaysOnTop(true,'screen-saver')});
+  w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)});
+  w.once('ready-to-show',()=>{w.show();if(instanceConfig(id).onTop)w.setAlwaysOnTop(true,'screen-saver')});
   w.on('move',saveLayout);w.on('moved',saveLayout);w.on('close',saveLayout);
   w.on('closed',()=>{delete wins[id]});
   wins[id]=w;
@@ -55,8 +61,8 @@ ipcMain.handle('sys:stats',()=>{
     disk={total:s.blocks*s.bsize,free:s.bavail*s.bsize}}catch{}
   return {cpu:cpuPct,mem:{total,used:total-free},disk,uptime:os.uptime()};
 });
-ipcMain.handle('notes:get',()=>rd('notes.json',{text:''}).text);
-ipcMain.handle('notes:save',(_,t)=>{wr('notes.json',{text:String(t).slice(0,20000)})});
+ipcMain.handle('notes:get',e=>rd(instanceNoteFile(e),{text:''}).text);
+ipcMain.handle('notes:save',(e,t)=>{wr(instanceNoteFile(e),{text:String(t).slice(0,20000)})});
 let clips=[];let lastClip='';
 function pollClip(){const t=clipboard.readText();
   if(t&&t!==lastClip){lastClip=t;clips=[t,...clips.filter(x=>x!==t)].slice(0,30);wr('clips.json',clips);
@@ -64,14 +70,14 @@ function pollClip(){const t=clipboard.readText();
 ipcMain.handle('clip:list',()=>clips);
 ipcMain.handle('clip:copy',(_,t)=>{lastClip=t;clipboard.writeText(t)});
 ipcMain.handle('clip:clear',()=>{clips=[];wr('clips.json',clips);Object.values(wins).forEach(w=>w.webContents.send('clip:update',clips))});
-ipcMain.handle('cfg:get',()=>{const c=getSet().city;return c?{...CITY,...c}:CITY});
+ipcMain.handle('cfg:get',e=>{const id=callerInstance(e),c=id?instanceConfig(id).city:getSet().city;return c?{...CITY,...c}:CITY});
 
 
 // ---- settings (theme, per-widget style, general)
-const DEF={sizes:{},theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
-const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,sizes:{...DEF.sizes,...(s.sizes||{})},styles:{...DEF.styles,...(s.styles||{})}}};
-function wq(id){const s=getSet(),q={size:dimensions(id).width===200?'square':'rectangle',id};if(s.theme!=='auto')q.theme=s.theme;if(s.styles[id])q.style=s.styles[id];return q}
-function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widgets',id,'index.html'),{query:wq(id)})}
+const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
+const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,instanceConfigs:s.instanceConfigs||{},sizes:{...DEF.sizes,...(s.sizes||{})},styles:{...DEF.styles,...(s.styles||{})}}};
+function wq(id){const s=getSet(),c=instanceConfig(id),q={size:c.size,id:instance(id).type,instance:id,tz:c.timezone};if(s.theme!=='auto')q.theme=s.theme;if(c.style)q.style=c.style;return q}
+function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)})}
 let setWin=null;
 function openSettings(){
   if(setWin){setWin.show();setWin.focus();return}
@@ -82,17 +88,25 @@ function openSettings(){
   setWin.on('closed',()=>{setWin=null}); // closing never touches the widgets
 }
 ipcMain.handle('set:get',()=>{const en=rd('enabled.json',{});return {settings:getSet(),
-  widgets:Object.keys(WIDGETS).map(id=>({id,label:WIDGETS[id].label,on:!!wins[id],size:dimensions(id).width===200?'square':'rectangle'})),
+  widgetTypes:Object.entries(WIDGETS).map(([type,w])=>({type,label:w.label})),widgets:instances().map((it,i)=>({id:it.id,type:it.type,label:WIDGETS[it.type].label+' '+(instances().filter(x=>x.type===it.type).findIndex(x=>x.id===it.id)+1),on:!!wins[it.id],...instanceConfig(it.id)})),
   autostart:app.getLoginItemSettings().openAtLogin,version:app.getVersion()}});
-ipcMain.handle('set:toggle',(_,id,on)=>{if(!WIDGETS[id])return;if(on&&!wins[id])open(id);else if(!on&&wins[id])toggle(id);return !!wins[id]});
-ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,sizes:{...cur.sizes,...(patch.sizes||{})},styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
+ipcMain.handle('set:toggle',(_,id,on)=>{if(!instance(id))return;if(on&&!wins[id])open(id);else if(!on&&wins[id])toggle(id);return !!wins[id]});
+ipcMain.handle('instance:add',(_,type,source)=>{if(!WIDGETS[type])return {error:'סוג כרטיס לא מוכר'};const list=instances();if(list.length>=60)return {error:'אפשר עד 60 כרטיסים'};const id=type+'-'+crypto.randomUUID();list.push({id,type});wr('instances.json',list);const cur=getSet(),cfg=source&&instance(source)?.type===type?instanceConfig(source):instanceConfig(list.find(x=>x.type===type&&x.id!==id)?.id||type);cur.instanceConfigs[id]=JSON.parse(JSON.stringify(cfg));wr('settings.json',cur);const layout=rd('layout.json',{}),base=layout[source]||WIDGETS[type];layout[id]={x:(base.x||60)+28,y:(base.y||60)+28};wr('layout.json',layout);if(type==='notes')wr('notes-'+id+'.json',rd(source==='notes'||!source?'notes.json':'notes-'+source+'.json',{text:''}));open(id);return {ok:true,id}});
+ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(wins[id])wins[id].close();wr('instances.json',instances().filter(x=>x.id!==id));for(const file of ['layout.json','enabled.json']){const val=rd(file,{});delete val[id];wr(file,val)}const s=getSet();delete s.instanceConfigs[id];delete s.sizes[id];delete s.styles[id];wr('settings.json',s);return {ok:true}});
+ipcMain.handle('instance:save',(_,id,patch)=>saveInstance(id,patch));
+ipcMain.handle('instance:self',e=>{const id=callerInstance(e);return id?{id,...instanceConfig(id)}:null});
+ipcMain.handle('instance:self-save',(e,patch)=>{const id=callerInstance(e);return id?saveInstance(id,patch):{ok:false}});
+function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined)wins[id].setAlwaysOnTop(safe.onTop,'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}reload(id);wins[id].show();wins[id].moveTop()}return {ok:true,settings:getSet()}}
+ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,instanceConfigs:cur.instanceConfigs,sizes:{...cur.sizes,...(patch.sizes||{})},styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
   const themeChanged=next.theme!==cur.theme;
-  for(const id of Object.keys(wins)){if(patch.sizes&&patch.sizes[id]){const dim=dimensions(id);wins[id].setResizable(true);wins[id].setMinimumSize(0,0);wins[id].setMaximumSize(0,0);wins[id].setBounds({...wins[id].getBounds(),width:dim.width,height:dim.height});wins[id].setResizable(false);const [x,y]=wins[id].getPosition();const pos=visiblePosition(x,y,dim.width,dim.height);wins[id].setPosition(pos.x,pos.y);reload(id);wins[id].show();wins[id].moveTop()}if(themeChanged||(patch.styles&&patch.styles[id]!==undefined&&patch.styles[id]!==cur.styles[id])||(id==='weather'&&patch.city!==undefined)||(id==='invest'&&patch.portfolio!==undefined))reload(id)}
-  if(patch.onTop!==undefined)Object.values(wins).forEach(w=>w.setAlwaysOnTop(!!next.onTop,'screen-saver'));
+  for(const id of Object.keys(wins)){if(patch.sizes&&patch.sizes[id]){next.instanceConfigs[id]={...next.instanceConfigs[id],size:patch.sizes[id]};wr('settings.json',next);const dim=dimensions(id);wins[id].setResizable(true);wins[id].setMinimumSize(0,0);wins[id].setMaximumSize(0,0);wins[id].setBounds({...wins[id].getBounds(),width:dim.width,height:dim.height});wins[id].setResizable(false);const [x,y]=wins[id].getPosition();const pos=visiblePosition(x,y,dim.width,dim.height);wins[id].setPosition(pos.x,pos.y);reload(id);wins[id].show();wins[id].moveTop()}if(patch.styles?.[id]!==undefined){next.instanceConfigs[id]={...next.instanceConfigs[id],style:patch.styles[id]};wr('settings.json',next)}if(themeChanged||patch.styles?.[id]!==undefined||(instance(id).type==='weather'&&patch.city!==undefined)||(instance(id).type==='invest'&&patch.portfolio!==undefined))reload(id)}
+  if(patch.onTop!==undefined)Object.entries(wins).forEach(([id,w])=>w.setAlwaysOnTop(!!instanceConfig(id).onTop,'screen-saver'));
   if(patch.autostart!==undefined)app.setLoginItemSettings({openAtLogin:!!patch.autostart});
   return next});
 // ---- investments (Yahoo chart endpoint, no key)
-async function quote(sym){
+const stockQuoteCache=new Map();
+async function quote(sym){const key=String(sym).trim().toUpperCase();const old=stockQuoteCache.get(key);if(old&&Date.now()-old.at<60000)return old.promise;const promise=fetchQuote(key);stockQuoteCache.set(key,{at:Date.now(),promise});if(stockQuoteCache.size>100)stockQuoteCache.delete(stockQuoteCache.keys().next().value);return promise}
+async function fetchQuote(sym){
   const r=await fetch('https://query1.finance.yahoo.com/v8/finance/chart/'+encodeURIComponent(sym)+'?interval=1d&range=5d',{headers:{'User-Agent':'Mozilla/5.0'}});
   if(!r.ok)throw new Error('HTTP '+r.status);
   const j=await r.json(),res=j.chart&&j.chart.result&&j.chart.result[0];if(!res)throw new Error('not found');
@@ -102,11 +116,22 @@ async function quote(sym){
   let pct=prev?((price-prev)/prev)*100:(mt.regularMarketChangePercent||0);
   return {sym,name:mt.shortName||mt.longName||sym,price,pct,cur:mt.currency||'',chart:cl.slice(-50)};
 }
-ipcMain.handle('inv:get',async()=>{
-  const list=getSet().portfolio||[];
+ipcMain.handle('inv:get',async e=>{
+  const id=callerInstance(e),list=(id?instanceConfig(id).portfolio:getSet().portfolio)||[];
   const out=await Promise.all(list.map(async p=>{try{return {...(await quote(p.sym)),qty:+p.qty||0}}catch(e){return {sym:p.sym,qty:+p.qty||0,error:e.message}}}));
   return out});
-ipcMain.handle('inv:check',async(_,sym)=>{try{const q=await quote(String(sym).trim());return {ok:true,name:q.name}}catch(e){return {ok:false,error:e.message}}});
+const stockSearchCache=new Map();let stockSearchBackoff=0;
+function stockFailure(e){const msg=String(e?.message||'');return msg.includes('429')?'ספק הנתונים הגביל בקשות. המתן דקה ונסה שוב.':msg.includes('404')?'לא נמצאו נתונים לסימול הזה כרגע.':'לא ניתן להגיע לספק הנתונים כרגע. נסה שוב מאוחר יותר.'}
+ipcMain.handle('inv:search',async(_,query)=>{
+ const q=String(query||'').trim().slice(0,80);if(q.length<2)return {items:[]};
+ const cached=stockSearchCache.get(q.toLowerCase());if(cached&&Date.now()-cached.at<300000)return {items:cached.items};
+ if(Date.now()<stockSearchBackoff)return {items:[],error:'ספק החיפוש הגביל בקשות. המתן דקה ונסה שוב.'};
+ try{const r=await fetch('https://query1.finance.yahoo.com/v1/finance/search?q='+encodeURIComponent(q)+'&quotesCount=8&newsCount=0',{headers:{'User-Agent':'Mozilla/5.0'},signal:AbortSignal.timeout(10000)});
+ if(r.status===429){stockSearchBackoff=Date.now()+60000;throw new Error('HTTP 429')}if(!r.ok)throw new Error('HTTP '+r.status);
+ const j=await r.json(),items=(j.quotes||[]).filter(x=>x.symbol&&['EQUITY','ETF','INDEX','MUTUALFUND'].includes(x.quoteType)).slice(0,8).map(x=>({sym:String(x.symbol),name:String(x.shortname||x.longname||x.symbol),exchange:String(x.exchDisp||x.exchange||''),type:String(x.quoteType)}));
+ stockSearchCache.set(q.toLowerCase(),{at:Date.now(),items});if(stockSearchCache.size>50)stockSearchCache.delete(stockSearchCache.keys().next().value);return {items};
+ }catch(e){return {items:[],error:stockFailure(e)}}});
+ipcMain.handle('inv:check',async(_,sym)=>{try{const q=await quote(String(sym).trim());return {ok:true,name:q.name}}catch(e){return {ok:false,error:stockFailure(e)}}});
 // ---- network
 ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
@@ -212,14 +237,14 @@ app.whenReady().then(()=>{
   startMedia();startScan();const batTok=startBatteryServer();
   clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);
   const en=rd('enabled.json',null);
-  Object.keys(WIDGETS).forEach(id=>{if(!en||en[id]!==false)open(id)});
+  instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
   openSettings(); // every launch opens the management window
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
   tray.setToolTip('GlassWidgets');
   tray.on('click',openSettings);
   const menu=()=>Menu.buildFromTemplate([
     {label:'הגדרות…',click:openSettings},{type:'separator'},
-    ...Object.keys(WIDGETS).map(id=>({label:WIDGETS[id].label,type:'checkbox',checked:!!wins[id],click:()=>{toggle(id);tray.setContextMenu(menu())}})),
+    ...instances().map(({id,type})=>({label:WIDGETS[type].label+' · '+id.slice(-6),type:'checkbox',checked:!!wins[id],click:()=>{toggle(id);tray.setContextMenu(menu())}})),
     {type:'separator'},
     {label:'העתק כתובת סוללת אייפון (ל-Shortcut)',click:()=>clipboard.writeText('http://'+require('os').hostname()+':8765/iphone-battery?t='+batTok+'&level=<Battery Level>&charging=<1 or 0>')},
     {label:'תמיד מעל חלונות אחרים',type:'checkbox',checked:getSet().onTop,click:i=>{const s=getSet();s.onTop=i.checked;wr('settings.json',s);Object.values(wins).forEach(w=>w.setAlwaysOnTop(i.checked,'screen-saver'))}},
