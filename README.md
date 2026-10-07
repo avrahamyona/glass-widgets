@@ -2,6 +2,11 @@
 
 Original desktop cards for Windows 10 (1809+) and Windows 11. Hebrew RTL UI, Inter and Heebo fonts under SIL OFL. No Apple logos or bundled Apple artwork. Not affiliated with Apple.
 
+## 0.3.2
+
+- UTF-8 process streams and ASCII-safe JSON for Windows helper text. Python UTF-8 mode also covers implicit cookie-file encoding. Errors expose only a safe stage, function name, line number and codec, never exception contents or credentials.
+- Resize temporarily clears non-resizable size constraints, applies bounds and locks again. Changes bring the card forward and show its selected dimensions. Calendar content now fits both 200px-high layouts. All 24 local Electron size transitions and sample pixel layouts checked; Windows runtime confirmation still pending.
+
 ## 0.3.1
 
 - One regular Apple Account data login for Notes, Reminders and Calendar (experimental and read-only). CalDAV is an optional separate advanced login. Chrome and official web app cookies remain separate.
