@@ -18,31 +18,33 @@ const WIDGETS={
   nowplaying:{label:'מנגן עכשיו',w:400,h:200,x:480,y:500},
   reminders:{label:'תזכורות',w:200,h:200,x:1000,y:500},
   invest:{label:'מעקב השקעות',w:260,h:360,x:780,y:500},
-  timer:{label:'טיימר',w:200,h:200,x:340,y:280}
+  timer:{label:'טיימר',w:200,h:200,x:340,y:280},
+  chat:{label:'צ׳אט עם חיים',w:400,h:200,x:1060,y:280}
 };
 const U=()=>app.getPath('userData');
 const rd=(f,d)=>{try{return JSON.parse(fs.readFileSync(path.join(U(),f)))}catch{return d}};
 const wr=(f,v)=>fs.writeFileSync(path.join(U(),f),JSON.stringify(v));
 const wins={};
-function instances(){const saved=rd('instances.json',null);if(Array.isArray(saved))return saved.filter(x=>x&&typeof x.id==='string'&&/^[a-z0-9-]+$/.test(x.id)&&WIDGETS[x.type]);const migrated=Object.keys(WIDGETS).filter(t=>t!=='timer').map(type=>({id:type,type}));wr('instances.json',migrated);return migrated}
+function instances(){const saved=rd('instances.json',null);if(Array.isArray(saved))return saved.filter(x=>x&&typeof x.id==='string'&&/^[a-z0-9-]+$/.test(x.id)&&WIDGETS[x.type]);const migrated=Object.keys(WIDGETS).filter(t=>t!=='timer'&&t!=='chat').map(type=>({id:type,type}));wr('instances.json',migrated);return migrated}
 function instance(id){return instances().find(x=>x.id===id)}
 function instanceConfig(id){const it=instance(id);if(!it)return {size:WIDGETS[id]?.w>WIDGETS[id]?.h?'rectangle':'square',style:getSet().styles[id],timezone:'Asia/Jerusalem',city:getSet().city,portfolio:getSet().portfolio};const s=getSet(),local=s.instanceConfigs?.[id]||{};return {size:s.sizes[id]||((WIDGETS[it.type].w>WIDGETS[it.type].h)?'rectangle':'square'),style:s.styles[id]||s.styles[it.type],timezone:'Asia/Jerusalem',onTop:s.onTop,city:s.city,portfolio:s.portfolio,...local}}
 function callerInstance(event){try{const u=new URL(event.sender.getURL()),id=u.searchParams.get('instance');return instance(id)?id:null}catch{return null}}
 function instanceNoteFile(event){const id=callerInstance(event);return !id||id==='notes'?'notes.json':'notes-'+id+'.json'}
 
-function dimensions(id){const size=instanceConfig(id).size;return size==='rectangle'?{width:400,height:200}:{width:200,height:200}}
+function dimensions(id){const size=instanceConfig(id).size;return size==='rectangle'?{width:400,height:200}:size==='island'?{width:380,height:340}:{width:200,height:200}}
 function saveLayout(){const c=rd('layout.json',{});for(const [id,w] of Object.entries(wins)){if(!w.isDestroyed()){const [x,y]=w.getPosition();c[id]={x,y}}}wr('layout.json',c)}
 function visiblePosition(x,y,width,height){const ds=screen.getAllDisplays();if(ds.some(d=>x>=d.workArea.x&&y>=d.workArea.y&&x+width<=d.workArea.x+d.workArea.width&&y+height<=d.workArea.y+d.workArea.height))return {x,y};const a=screen.getDisplayNearestPoint({x,y}).workArea;return {x:Math.max(a.x,Math.min(x,a.x+a.width-width)),y:Math.max(a.y,Math.min(y,a.y+a.height-height))}}
 
 function open(id){
   if(wins[id]&&!wins[id].isDestroyed())return;
   const it=instance(id);if(!it)return;const d=WIDGETS[it.type],s=(rd('layout.json',{}))[id]||{};
+  if(it.type==='chat'&&instanceConfig(id).size==='island'&&s.x===undefined){const wa=screen.getPrimaryDisplay().workArea;s.x=Math.round(wa.x+(wa.width-380)/2);s.y=wa.y+10}
   const dim=dimensions(id),pos=visiblePosition(s.x??d.x,s.y??d.y,dim.width,dim.height);
   const w=new BrowserWindow({...dim,...pos,frame:false,transparent:true,hasShadow:false,
     resizable:false,skipTaskbar:true,show:false,
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
   w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)});
-  w.once('ready-to-show',()=>{w.show();if(instanceConfig(id).onTop)w.setAlwaysOnTop(true,'screen-saver')});
+  w.once('ready-to-show',()=>{w.show();if(instanceConfig(id).onTop||instanceConfig(id).size==='island')w.setAlwaysOnTop(true,'screen-saver')});
   w.on('move',saveLayout);w.on('moved',saveLayout);w.on('close',saveLayout);
   w.on('closed',()=>{delete wins[id]});
   wins[id]=w;
@@ -99,7 +101,7 @@ ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(
 ipcMain.handle('instance:save',(_,id,patch)=>saveInstance(id,patch));
 ipcMain.handle('instance:self',e=>{const id=callerInstance(e);return id?{id,...instanceConfig(id)}:null});
 ipcMain.handle('instance:self-save',(e,patch)=>{const id=callerInstance(e);return id?saveInstance(id,patch):{ok:false}});
-function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined)wins[id].setAlwaysOnTop(safe.onTop,'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}return {ok:true,settings:getSet()}}
+function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size)||(patch.size==='island'&&instance(id)?.type==='chat'))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined||safe.size!==undefined)wins[id].setAlwaysOnTop(!!(instanceConfig(id).onTop||instanceConfig(id).size==='island'),'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}return {ok:true,settings:getSet()}}
 ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,instanceConfigs:cur.instanceConfigs,sizes:{...cur.sizes,...(patch.sizes||{})},styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
   const themeChanged=next.theme!==cur.theme;
   for(const id of Object.keys(wins)){if(patch.sizes&&patch.sizes[id]){next.instanceConfigs[id]={...next.instanceConfigs[id],size:patch.sizes[id]};wr('settings.json',next);const dim=dimensions(id);wins[id].setResizable(true);wins[id].setMinimumSize(0,0);wins[id].setMaximumSize(0,0);wins[id].setBounds({...wins[id].getBounds(),width:dim.width,height:dim.height});wins[id].setResizable(false);const [x,y]=wins[id].getPosition();const pos=visiblePosition(x,y,dim.width,dim.height);wins[id].setPosition(pos.x,pos.y);reload(id);wins[id].show();wins[id].moveTop()}if(patch.styles?.[id]!==undefined){next.instanceConfigs[id]={...next.instanceConfigs[id],style:patch.styles[id]};wr('settings.json',next)}if(themeChanged||patch.styles?.[id]!==undefined||(instance(id).type==='weather'&&patch.city!==undefined)||(instance(id).type==='invest'&&patch.portfolio!==undefined))reload(id)}
@@ -177,6 +179,19 @@ ipcMain.handle('media:get',()=>({...media,age:Date.now()-mediaAt}));
 ipcMain.handle('media:cmd',(_,c)=>{if(!['toggle','next','prev','play','pause'].includes(c))return {ok:false};if(!mediaProcess||!mediaProcess.stdin.writable)return {ok:false,error:'רכיב המדיה אינו זמין'};mediaProcess.stdin.write(c+'\n');return {ok:true}});
 // ---- user feedback to the fixes center (Avi Music Cloudflare worker, separate path/table)
 const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/report';
+// chat widget: messages go to the fixes-center worker; Chaim replies by poll.
+const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
+const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||'__GW_CHAT_KEY__'; // CI replaces the placeholder from the GW_CHAT_KEY secret; env override is for local tests
+ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
+ try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now()})});
+  if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
+  if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
+  const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
+ catch{return {ok:false,error:'אין חיבור כרגע. ההודעה לא נשלחה'}}});
+ipcMain.handle('chat:poll',async(_,after)=>{try{const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u);if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}catch{return {ok:false,error:'אין חיבור כרגע'}}});
+ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],seenHint:false,lastReceived:0}});
+ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};const messages=h.messages.slice(-200).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));wr('chat-'+id+'.json',{messages,seenHint:!!h.seenHint,lastReceived:+h.lastReceived||0});return {ok:true}});
+ipcMain.handle('chat:passthrough',(e,on)=>{const id=callerInstance(e);if(id&&wins[id]){wins[id].setIgnoreMouseEvents(!!on,{forward:true});return {ok:true}}return {ok:false}});
 ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(text.length<5)return {ok:false,error:'כתוב לפחות כמה מילים (5 תווים ומעלה)'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};
  try{const r=await fetch(FEEDBACK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app:'glasswidgets',version:app.getVersion(),text,at:Date.now()}),signal:AbortSignal.timeout(15000)});
   if(!r.ok)return {ok:false,error:'השרת לא קיבל את הדיווח ('+r.status+'). נסה שוב מאוחר יותר'};return {ok:true}}

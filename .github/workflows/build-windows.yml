@@ -6,6 +6,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Inject chat key
+        shell: pwsh
+        env: { GW_CHAT_KEY: '${{ secrets.GW_CHAT_KEY }}' }
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GW_CHAT_KEY)) { throw 'GW_CHAT_KEY secret is missing - create it in repo Settings > Secrets and variables > Actions' }
+          $p = 'src/main.js'
+          $s = [System.IO.File]::ReadAllText($p)
+          if (-not $s.Contains('__GW_CHAT_KEY__')) { throw 'chat key placeholder not found in src/main.js' }
+          [System.IO.File]::WriteAllText($p, $s.Replace('__GW_CHAT_KEY__', $env:GW_CHAT_KEY))
+          if ([System.IO.File]::ReadAllText($p).Contains('__GW_CHAT_KEY__')) { throw 'chat key placeholder still present after injection' }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-dotnet@v4
@@ -34,4 +44,15 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "Windows installer (unsigned). 0.3.6: digital clock content now centered regardless of the timer button; timer always-on-top toggle no longer resets a running countdown; iCloud button shows Connected state when signed in; calendar now uses the single iCloud sign-in (separate CalDAV login removed); saved iCloud session resumes at app start so the shared sign-in covers iCloud windows right away."
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.3.7
+
+          **New: Chat widget**
+          - A Dynamic Island-style chat with Chaim, right from your desktop
+          - Tap the pill to open the chat, type, and send - replies arrive in the island
+          - Click anywhere outside the island (or switch windows) to collapse it back to the pill
+          - New reply while collapsed: a small green dot appears next to חיים - tap to read
+          - Smooth capsule open/close animation
+          - Connects through the Avi Music server; nothing is stored locally
+
+          **Under the hood**
+          - Chat key is injected at build time - never stored in the repository"
