@@ -19,3 +19,5 @@ function render(a){l.innerHTML='';if(!a.length){l.innerHTML='<div class=empty>ה
 if(q.get('demo'))render(['https://github.com/rsms/inter','הפגישה הוזזה ל-15:30, תביא את הדוח','npm run dist','050-123-4567','תודה רבה, נדבר מחר','SELECT * FROM users WHERE id = 42;']);
 else{api.clipList().then(render);api.onClip(render);document.getElementById('cl').onclick=()=>api.clipClear()}
 </script>
+
+<script src="../../shared/widget.js"></script>
