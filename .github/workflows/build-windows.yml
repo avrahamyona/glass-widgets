@@ -34,4 +34,4 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe --title "GlassWidgets $TAG" --notes "Windows installer (unsigned). 0.3: compiled media bridge, square/rectangle layouts, persistent iCloud access. See README for sync limits."
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "Windows installer (unsigned). 0.3.4: auto dark/light theme by time of day (local sunrise/sunset + manual override); click a stock to open full Yahoo Finance data; in-app update check and install; feedback/requests button delivered to the fixes center."

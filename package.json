@@ -1,6 +1,6 @@
 {
   "name": "glasswidgets",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "description": "Rounded-card desktop widgets for Windows",
   "main": "src/main.js",
@@ -52,10 +52,18 @@
           "**/*"
         ]
       }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "avrahamyona",
+        "repo": "glass-widgets"
+      }
     ]
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.2",
-    "ical.js": "^2.2.1"
+    "ical.js": "^2.2.1",
+    "electron-updater": "^6.3.9"
   }
 }
