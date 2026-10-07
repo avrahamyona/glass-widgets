@@ -11,6 +11,8 @@ for stream in (sys.stdin, sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="strict")
 logging.disable(logging.CRITICAL)
 from pyicloud import PyiCloudService
+from pyicloud.exceptions import PyiCloudTrustedDeviceVerificationException
+import unicodedata
 
 folder = os.environ.get('GLASSWIDGETS_CLOUD_TEMP') or tempfile.mkdtemp(prefix='gw-cloud-')
 os.makedirs(folder, exist_ok=True)
@@ -33,6 +35,26 @@ def restore(bundle):
         if Path(name).name != name or len(value) > 3_000_000:
             raise ValueError('Invalid saved session')
         (Path(folder) / name).write_bytes(base64.b64decode(value))
+
+def normalize_code(value):
+    # Users paste codes with spaces or invisible RTL marks from Hebrew SMS apps.
+    out = []
+    for ch in str(value or ''):
+        if '0' <= ch <= '9':
+            out.append(ch)
+            continue
+        try:
+            out.append(str(int(unicodedata.digit(ch))))
+        except Exception:
+            continue
+    return ''.join(out)
+
+def try_validate(code):
+    # False means Apple rejected the code. Transport errors still raise.
+    try:
+        return bool(api.validate_2fa_code(code))
+    except PyiCloudTrustedDeviceVerificationException:
+        return False
 
 def emit(request_id, value):
     value['id'] = request_id
@@ -119,7 +141,7 @@ try:
         try:
             request = json.loads(line)
             action = request.get('action')
-            stage = str(action) if action in ['login','resume','code','request_code','refresh','status'] else 'request'
+            stage = str(action) if action in ['login','resume','code','request_code','cookies','refresh','status'] else 'request'
             if action == 'login':
                 username = str(request.get('user', '')).strip()
                 stage = 'apple_login'
@@ -139,14 +161,40 @@ try:
                 emit(request.get('id'), request_code(retry=True))
             elif action == 'code':
                 if api is None:
-                    raise ValueError('No login in progress')
-                if request.get('manual'):
+                    emit(request.get('id'), {'connected': False, 'state': 'signed_out', 'error': 'תהליך ההתחברות התנתק לפני האימות. התחבר מחדש ובקש קוד חדש'})
+                    continue
+                code = normalize_code(request.get('code'))
+                if len(code) != 6:
+                    emit(request.get('id'), {'connected': False, 'state': 'code_required', 'error': 'קוד האימות מכיל 6 ספרות בדיוק'})
+                    continue
+                manual = bool(request.get('manual'))
+                if manual:
                     api.use_existing_trusted_device_code()
-                if not api.validate_2fa_code(str(request.get('code', ''))):
-                    emit(request.get('id'), {'connected': False, 'state': 'code_required', 'error': 'קוד האימות לא התקבל'})
+                ok = try_validate(code)
+                if not ok and not manual and api.two_factor_delivery_method != 'sms':
+                    # Push-flow challenges sometimes reject device-shown codes; the
+                    # legacy trusted-device endpoint often still accepts them.
+                    try:
+                        api.use_existing_trusted_device_code()
+                        ok = try_validate(code)
+                    except Exception:
+                        ok = False
+                if not ok:
+                    emit(request.get('id'), {'connected': False, 'state': 'code_required', 'error': 'קוד האימות לא התקבל. ודא שהקוד עדכני, או סמן שהקוד הופק ידנית במכשיר'})
                 else:
                     api.trust_session()
                     emit(request.get('id'), state())
+            elif action == 'cookies':
+                jar = getattr(getattr(api, 'session', None), 'cookies', None)
+                cookies = []
+                if api is not None and not api.requires_2fa and jar is not None:
+                    for c in jar:
+                        d = (c.domain or '').lower()
+                        if d.endswith('.icloud.com') or d.endswith('.apple.com'):
+                            cookies.append({'name': c.name, 'value': c.value, 'domain': c.domain, 'path': c.path or '/', 'secure': bool(c.secure), 'expires': c.expires})
+                        if len(cookies) >= 60:
+                            break
+                emit(request.get('id'), {'connected': api is not None and not api.requires_2fa, 'cookies': cookies})
             elif action == 'refresh':
                 emit(request.get('id'), fetch_data())
             elif action == 'status':
