@@ -21,3 +21,5 @@ function render(s){H.d.push(s.down);H.d.shift();H.u.push(s.up);H.u.shift();
 if(q.get('demo')){for(let i=0;i<40;i++)render({down:200e3+Math.abs(Math.sin(i/4))*2.2e6+(i>30?3e6:0),up:60e3+Math.abs(Math.cos(i/5))*4e5});}
 else setInterval(()=>api.net().then(render),1000);
 </script>
+
+<script src="../../shared/widget.js"></script>
