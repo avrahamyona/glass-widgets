@@ -1,6 +1,6 @@
 const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session}=require('electron');
 const {spawn}=require('child_process'),http=require('http'),crypto=require('crypto');
-const {parseAirPods}=require('./lib/airpods'),caldav=require('./lib/caldav'),net=require('./lib/net');
+const {parseAirPods}=require('./lib/airpods'),caldav=require('./lib/caldav'),net=require('./lib/net'),themeLib=require('./lib/theme');
 const path=require('path'),fs=require('fs'),os=require('os');
 const TZ='Asia/Jerusalem';
 const CITY={name:'פתח תקווה',lat:32.0840,lon:34.8878,tz:TZ};
@@ -76,7 +76,9 @@ ipcMain.handle('cfg:get',e=>{const id=callerInstance(e),c=id?instanceConfig(id).
 // ---- settings (theme, per-widget style, general)
 const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
 const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,instanceConfigs:s.instanceConfigs||{},sizes:{...DEF.sizes,...(s.sizes||{})},styles:{...DEF.styles,...(s.styles||{})}}};
-function wq(id){const s=getSet(),c=instanceConfig(id),q={size:c.size,id:instance(id).type,instance:id,tz:c.timezone};if(s.theme!=='auto')q.theme=s.theme;if(c.style)q.style=c.style;return q}
+function currentTheme(){const s=getSet();const city=s.city||CITY;const t=themeLib.effectiveTheme(s.theme,new Date(),city.lat,city.lon);return t==='system'?null:t}
+function wq(id){const s=getSet(),c=instanceConfig(id),q={size:c.size,id:instance(id).type,instance:id,tz:c.timezone};const t=currentTheme();if(t)q.theme=t;else if(s.theme!=='auto'&&s.theme!=='system')q.theme=s.theme;if(c.style)q.style=c.style;return q}
+ipcMain.handle('theme:get',()=>currentTheme()||'system');
 function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)})}
 let setWin=null;
 function openSettings(){
@@ -133,6 +135,7 @@ ipcMain.handle('inv:search',async(_,query)=>{
  }catch(e){return {items:[],error:stockFailure(e)}}});
 ipcMain.handle('inv:check',async(_,sym)=>{try{const q=await quote(String(sym).trim());return {ok:true,name:q.name}}catch(e){return {ok:false,error:stockFailure(e)}}});
 // ---- network
+ipcMain.handle('inv:open',(_,sym)=>{sym=String(sym||'').trim();if(!/^[A-Za-z0-9.^=-]{1,20}$/.test(sym))return {ok:false};shell.openExternal('https://finance.yahoo.com/quote/'+encodeURIComponent(sym));return {ok:true}});
 ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
 const credFile='cal.bin';
@@ -185,6 +188,12 @@ function startMedia(){
 }
 ipcMain.handle('media:get',()=>({...media,age:Date.now()-mediaAt}));
 ipcMain.handle('media:cmd',(_,c)=>{if(!['toggle','next','prev','play','pause'].includes(c))return {ok:false};if(!mediaProcess||!mediaProcess.stdin.writable)return {ok:false,error:'רכיב המדיה אינו זמין'};mediaProcess.stdin.write(c+'\n');return {ok:true}});
+// ---- user feedback to the fixes center (Avi Music Cloudflare worker, separate path/table)
+const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/report';
+ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(text.length<2)return {ok:false,error:'כתוב כמה מילים לפני השליחה'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};
+ try{const r=await fetch(FEEDBACK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app:'glasswidgets',version:app.getVersion(),text,at:Date.now()}),signal:AbortSignal.timeout(15000)});
+  if(!r.ok)return {ok:false,error:'השרת לא קיבל את הדיווח ('+r.status+'). נסה שוב מאוחר יותר'};return {ok:true}}
+ catch{return {ok:false,error:'אין חיבור כרגע. הדיווח לא נשלח'}}});
 // Official web apps share one persistent login. Remote content gets no application preload.
 const ICLOUD={notes:'https://www.icloud.com/notes/',calendar:'https://www.icloud.com/calendar/',reminders:'https://www.icloud.com/reminders/',home:'https://www.icloud.com/'};
 let cloudWin=null;
@@ -229,6 +238,25 @@ ipcMain.handle('icloud:refresh',()=>refreshCloud());
 ipcMain.handle('icloud:data',()=>({...cloudData,stale:!cloudData.connected||!cloudData.at||Date.now()-cloudData.at>3600000}));
 ipcMain.handle('icloud:forget',()=>{stopCloud();for(const f of ['cloud-session.bin','cloud-cache.bin']){try{fs.unlinkSync(path.join(U(),f))}catch{}}cloudData={connected:false,notes:[],reminders:[]};return {ok:true}});
 
+// ---- self update from GitHub Releases (manual check from the settings window)
+const upd={state:'idle',percent:0,version:null,error:null};
+let updWired=false;
+function wireUpdater(){
+ if(updWired)return true;if(!app.isPackaged)return false;
+ try{
+  const {autoUpdater}=require('electron-updater');
+  autoUpdater.autoDownload=true;autoUpdater.autoInstallOnAppQuit=true;
+  autoUpdater.on('update-available',i=>{upd.state='downloading';upd.version=i.version;upd.percent=0;upd.error=null});
+  autoUpdater.on('update-not-available',()=>{upd.state='none';upd.error=null});
+  autoUpdater.on('download-progress',p=>{upd.state='downloading';upd.percent=Math.round(p.percent)});
+  autoUpdater.on('update-downloaded',i=>{upd.state='ready';upd.version=i.version;upd.percent=100});
+  autoUpdater.on('error',e=>{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'});
+  updWired=true;return true;
+ }catch{return false}
+}
+ipcMain.handle('update:check',()=>{if(!wireUpdater())return {state:'unavailable',error:'בדיקת עדכונים פועלת רק בגרסה המותקנת, לא בפיתוח'};upd.state='checking';upd.error=null;require('electron-updater').autoUpdater.checkForUpdates().catch(()=>{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'});return upd});
+ipcMain.handle('update:state',()=>upd);
+ipcMain.handle('update:install',()=>{if(upd.state==='ready'&&updWired){require('electron-updater').autoUpdater.quitAndInstall();return {ok:true}}return {ok:false}});
 const lock=app.requestSingleInstanceLock();if(!lock)app.quit();
 app.on('second-instance',()=>openSettings());
 app.whenReady().then(()=>{
