@@ -1,6 +1,6 @@
 const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session}=require('electron');
 const {spawn}=require('child_process'),http=require('http'),crypto=require('crypto');
-const {parseAirPods}=require('./lib/airpods'),caldav=require('./lib/caldav'),net=require('./lib/net'),themeLib=require('./lib/theme');
+const {parseAirPods}=require('./lib/airpods'),net=require('./lib/net'),themeLib=require('./lib/theme');
 const path=require('path'),fs=require('fs'),os=require('os');
 const TZ='Asia/Jerusalem';
 const CITY={name:'פתח תקווה',lat:32.0840,lon:34.8878,tz:TZ};
@@ -99,7 +99,7 @@ ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(
 ipcMain.handle('instance:save',(_,id,patch)=>saveInstance(id,patch));
 ipcMain.handle('instance:self',e=>{const id=callerInstance(e);return id?{id,...instanceConfig(id)}:null});
 ipcMain.handle('instance:self-save',(e,patch)=>{const id=callerInstance(e);return id?saveInstance(id,patch):{ok:false}});
-function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined)wins[id].setAlwaysOnTop(safe.onTop,'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}reload(id);wins[id].show();wins[id].moveTop()}return {ok:true,settings:getSet()}}
+function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined)wins[id].setAlwaysOnTop(safe.onTop,'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}return {ok:true,settings:getSet()}}
 ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,instanceConfigs:cur.instanceConfigs,sizes:{...cur.sizes,...(patch.sizes||{})},styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
   const themeChanged=next.theme!==cur.theme;
   for(const id of Object.keys(wins)){if(patch.sizes&&patch.sizes[id]){next.instanceConfigs[id]={...next.instanceConfigs[id],size:patch.sizes[id]};wr('settings.json',next);const dim=dimensions(id);wins[id].setResizable(true);wins[id].setMinimumSize(0,0);wins[id].setMaximumSize(0,0);wins[id].setBounds({...wins[id].getBounds(),width:dim.width,height:dim.height});wins[id].setResizable(false);const [x,y]=wins[id].getPosition();const pos=visiblePosition(x,y,dim.width,dim.height);wins[id].setPosition(pos.x,pos.y);reload(id);wins[id].show();wins[id].moveTop()}if(patch.styles?.[id]!==undefined){next.instanceConfigs[id]={...next.instanceConfigs[id],style:patch.styles[id]};wr('settings.json',next)}if(themeChanged||patch.styles?.[id]!==undefined||(instance(id).type==='weather'&&patch.city!==undefined)||(instance(id).type==='invest'&&patch.portfolio!==undefined))reload(id)}
@@ -139,22 +139,8 @@ ipcMain.handle('inv:check',async(_,sym)=>{try{const q=await quote(String(sym).tr
 ipcMain.handle('inv:open',(_,sym)=>{sym=String(sym||'').trim();if(!/^[A-Za-z0-9.^=-]{1,20}$/.test(sym))return {ok:false};shell.openExternal('https://finance.yahoo.com/quote/'+encodeURIComponent(sym));return {ok:true}});
 ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
-const credFile='cal.bin';
-function loadCreds(){try{const b=fs.readFileSync(path.join(U(),credFile));return JSON.parse(safeStorage.isEncryptionAvailable()?safeStorage.decryptString(b):null)}catch{return null}}
-ipcMain.handle('cal:status',()=>({connected:cloudData.connected||!!loadCreds()||!!cloudData.calendar?.length}));
-ipcMain.handle('cal:connect',async(_,user,pw)=>{user=String(user).trim();pw=String(pw).replace(/\s+/g,'');
-  try{await caldav.fetchEvents(user,String(pw).replace(/\s+/g,''),new Date(),new Date(Date.now()+864e5));
-    if(!safeStorage.isEncryptionAvailable())throw new Error('Windows לא מאפשר שמירת סיסמה מוצפנת');const j=JSON.stringify({user,pw});fs.writeFileSync(path.join(U(),credFile),safeStorage.encryptString(j));return {ok:true}}
-  catch(e){return {ok:false,error:caldav.explain(e)}}});
-ipcMain.handle('cal:disconnect',()=>{try{fs.unlinkSync(path.join(U(),credFile))}catch{}});
-ipcMain.handle('cal:events',async()=>{if(cloudData.connected||cloudData.calendar?.length)return {connected:true,events:cloudData.calendar||[],stale:!cloudData.connected||Date.now()-(cloudData.at||0)>3600000,error:cloudData.errors?.calendar,manual:true};const c=loadCreds();if(!c)return {connected:false,events:[]};
-  const cache=rd('calcache.json',{events:[]});
-  const from=new Date(Date.now()-864e5);const to=new Date(+from+7*864e5);
-  for(let i=0;i<3;i++){ // retry network blips; never drop the saved login on a transient error
-    try{const ev=await caldav.fetchEvents(c.user,c.pw,from,to);const out=ev.map(e=>({...e,start:+e.start,end:e.end?+e.end:null}));
-      wr('calcache.json',{events:out,at:Date.now()});return {connected:true,events:out}}
-    catch(e){if(e.kind==='AUTH')return {connected:true,events:cache.events,authError:true,error:caldav.explain(e)};await new Promise(r=>setTimeout(r,2000*(i+1)))}}
-  return {connected:true,events:cache.events,stale:true};});
+ipcMain.handle('cal:status',()=>({connected:cloudData.connected||!!cloudData.calendar?.length}));
+ipcMain.handle('cal:events',async()=>{if(cloudData.connected||cloudData.calendar?.length)return {connected:true,events:cloudData.calendar||[],stale:!cloudData.connected||Date.now()-(cloudData.at||0)>3600000,error:cloudData.errors?.calendar,manual:true};return {connected:false,events:[]}});
 // ---- battery: AirPods via BLE advert scan, iPhone via a Shortcut that POSTs to a local URL
 const bat={pods:null,podsAt:0,iphone:null};
 function startScan(){
@@ -232,9 +218,10 @@ function ensureCloud(){
  current.on('error',()=>{if(cloudProcess===current)stopCloud()});current.on('exit',()=>{if(cloudProcess===current)stopCloud()});current.stderr.on('data',()=>{});return true;
 }
 function cloudRequest(action,data={}){if(!ensureCloud())return Promise.resolve({connected:false,state:'unavailable',error:'רכיב iCloud חסר. התקן את הגרסה המלאה'});return new Promise(resolve=>{const id=++cloudSeq;const timer=setTimeout(()=>{cloudPending.delete(id);resolve({connected:false,state:'error',error:'iCloud לא ענה בזמן. לא בוצעו שינויים'});stopCloud()},120000);cloudPending.set(id,{id,resolve,timer});cloudProcess.stdin.write(JSON.stringify({id,action,...data})+'\n')})}
+function resumeCloudSession(){let saved=null;try{saved=encryptedRead('cloud-session.bin')}catch{}if(!saved)return;cloudResume().then(s=>{if(s?.connected){cloudData={...cloudData,...s};shareCloudCookies()}}).catch(()=>{})}
 async function cloudResume(){if(!cloudProcess){const saved=encryptedRead('cloud-session.bin');if(saved){const r=await cloudRequest('resume',{session:saved});cloudData={...cloudData,...r};return r}}return cloudRequest('status')}
 async function refreshCloud(){if(cloudRefreshing)return {...cloudData,busy:true};if(Date.now()-cloudLastRefresh<60000)return {...cloudData,cooldown:true};cloudRefreshing=true;cloudLastRefresh=Date.now();try{const s=await cloudResume();if(!s.connected){cloudData={...cloudData,...s};return cloudData}const r=await cloudRequest('refresh');cloudData={...cloudData,...r};if(r.connected){shareCloudCookies();const old=encryptedRead('cloud-cache.bin')||{};cloudData.notes=r.errors?.notes?(old.notes||[]):r.notes;cloudData.reminders=r.errors?.reminders?(old.reminders||[]):r.reminders;cloudData.calendar=r.errors?.calendar?(old.calendar||[]):r.calendar;encryptedWrite('cloud-cache.bin',cloudData)}return cloudData}finally{cloudRefreshing=false}}
-ipcMain.handle('icloud:status',()=>({saved:!!encryptedRead('cloud-session.bin'),state:cloudData.state||'signed_out',connected:cloudData.connected,at:cloudData.at||null,calendar:!!loadCreds(),errors:cloudData.errors||{},counts:{notes:cloudData.notes?.length||0,reminders:cloudData.reminders?.length||0,calendar:cloudData.calendar?.length||0}}));
+ipcMain.handle('icloud:status',()=>({saved:!!encryptedRead('cloud-session.bin'),state:cloudData.state||'signed_out',connected:cloudData.connected,at:cloudData.at||null,calendar:cloudData.connected,errors:cloudData.errors||{},counts:{notes:cloudData.notes?.length||0,reminders:cloudData.reminders?.length||0,calendar:cloudData.calendar?.length||0}}));
 ipcMain.handle('icloud:login',async(_,user,password)=>{stopCloud();cloudData={connected:false,notes:[],reminders:[]};cloudLastRefresh=0;const r=await cloudRequest('login',{user:String(user).trim(),password:String(password)});cloudData={...cloudData,...r};if(r.connected)shareCloudCookies();return r});
 ipcMain.handle('icloud:request-code',async()=>{const r=await cloudRequest('request_code');cloudData={...cloudData,...r};return r});
 ipcMain.handle('icloud:code',async(_,code,manual)=>{const clean=String(code).normalize('NFKC').replace(/[^0-9]/g,'');const r=await cloudRequest('code',{code:clean,manual:!!manual});cloudData={...cloudData,...r};if(r.connected)shareCloudCookies();return r});
@@ -265,7 +252,7 @@ const lock=app.requestSingleInstanceLock();if(!lock)app.quit();
 app.on('second-instance',()=>openSettings());
 app.whenReady().then(()=>{
   if(!lock)return;
-  const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};
+  const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};resumeCloudSession();
   startMedia();startScan();const batTok=startBatteryServer();
   clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);
   const en=rd('enabled.json',null);
