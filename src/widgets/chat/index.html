@@ -8,10 +8,13 @@
 .bub.out{align-self:flex-start;background:#0a84ff;color:#fff;border-bottom-left-radius:5px}
 .bub.in{align-self:flex-end;background:rgba(128,128,128,.18);color:var(--text);border-bottom-right-radius:5px}
 .meta{font-size:9.5px;color:var(--text2);align-self:flex-start;margin-top:-4px}
+.bub{cursor:pointer}
+#toast{position:absolute;bottom:64px;left:50%;transform:translateX(-50%);background:rgba(20,20,22,.92);color:#fff;font-size:10.5px;padding:5px 12px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
 .meta.fail{color:#ff453a}
 .hint{font-size:10px;color:var(--text2);text-align:center;padding:3px}
 .composer{display:flex;gap:6px;padding-top:8px}
-.composer input{flex:1;border:0;border-radius:11px;background:rgba(128,128,128,.14);color:var(--text);font:400 12.5px var(--font);padding:8px 11px;outline:0}
+.composer{align-items:flex-end}
+.composer textarea{flex:1;border:0;border-radius:11px;background:rgba(128,128,128,.14);color:var(--text);font:400 12.5px var(--font);padding:8px 11px;outline:0;resize:none;line-height:1.3;max-height:78px;overflow-y:auto;font-family:var(--font)}
 .composer button{border:0;border-radius:11px;background:#0a84ff;color:#fff;font:600 12.5px var(--font);padding:8px 14px;cursor:pointer}
 .composer button:disabled{opacity:.5;cursor:default}
 /* dynamic island mode */
@@ -28,17 +31,18 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 #pill.open #pillBody{max-height:270px;opacity:1;padding:0 14px 12px}
 #pill .log{max-height:200px}
 #pill .bub{font-size:12px}
-#pill .composer input{background:rgba(255,255,255,.12);color:#fff}
+#pill .composer textarea{background:rgba(255,255,255,.12);color:#fff}
 #pill .hint{color:rgba(235,235,245,.45)}
 #pill .meta{color:rgba(235,235,245,.45)}
 </style>
 <body><div class=widget>
-<div id=pill><div id=pillHead class=nd><span class=av>ח</span><span class=who>חיים</span><span class=dot id=dot style="display:none"></span><span class=st id=pillSt></span></div><div id=pillBody></div></div>
+<div id=toast>הועתק</div>
+<div id=pill><div id=pillHead class=nd><span class=av>ח</span><span class=who>חיים שלי</span><span class=dot id=dot style="display:none"></span><span class=st id=pillSt></span></div><div id=pillBody></div></div>
 <div id=card style="display:none;flex:1;flex-direction:column;min-height:0">
  <div class=chdr>חיים</div>
  <div class=log id=log></div>
  <div class=hint id=hint style="display:none">תשובות מגיעות עד ~5 דקות · המסך הזה שומר את השיחה במחשב בלבד</div>
- <div class="composer nd"><input id=txt maxlength=2000 placeholder="כתוב לחיים…"><button id=send>שלח</button></div>
+ <div class="composer nd"><textarea id=txt rows=1 maxlength=2000 placeholder="כתוב לחיים…"></textarea><button id=send>שלח</button></div>
 </div>
 </div>
 <script src="../../shared/widget.js"></script>
@@ -49,34 +53,40 @@ const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
 let awaiting=false,pollTimer=null;
+function calcAwaiting(){const o=H.messages.filter(m=>m.dir==='out').pop();awaiting=!!o&&o.status==='waiting'}
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function statusText(m){return m.dir==='in'?'':({waiting:'נשלח · מחכה לתשובה',replied:'נענה',sent:'נשלח',failed:'לא נשלח · אין חיבור'}[m.status]||'')}
-function bubble(m){const d=document.createElement('div');d.className='bub '+m.dir;d.dir='auto';d.textContent=m.text;const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=statusText(m);if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'');mt.textContent=t;wrap.append(mt)}return wrap}
-function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;pillSt.textContent=awaiting?'מחכה לתשובה…':''}
+let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
+function bubble(m){const d=document.createElement('div');d.className='bub '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=statusText(m);if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'');mt.textContent=t;wrap.append(mt)}return wrap}
+function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread?'יש תשובה':awaiting?'מחכה לתשובה…':''}
+function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
-async function poll(){if(!window.api)return;const r=await api.chatPoll(H.lastReceived||'');
- if(!r.ok){if(!island)pillSt.textContent='';return}
+async function poll(){if(!window.api)return;const r=await api.chatPoll(awaiting?'':(H.lastReceived||''));
+ if(!r.ok){if(island)updatePillSt(true);return}
+ updatePillSt();
  let changed=false;for(const m of r.messages||[]){if(H.messages.some(x=>x.id===m.id))continue;
   H.messages.push({id:m.id,dir:'in',text:m.text,at:m.at,received_at:m.received_at,status:'sent',in_reply_to:m.in_reply_to});
   if(m.in_reply_to){const o=H.messages.find(x=>x.id===m.in_reply_to);if(o&&o.status==='waiting')o.status='replied'}
   H.lastReceived=Math.max(H.lastReceived||0,m.received_at||0);changed=true}
- if(H.messages.some(m=>m.dir==='out'&&m.status==='waiting'))awaiting=true;else awaiting=false;
+ calcAwaiting();
  if(changed){await save();render(log);if(island)newReply()}}
+function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
+function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
 async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
  const r=await api.chatSend(t);
- if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'waiting'};H.messages.push(m);awaiting=true;txt.value='';
+ if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'waiting'};H.messages.push(m);awaiting=true;txt.value='';grow(txt);
   if(!H.seenHint){H.seenHint=true;hint.style.display=''}
   await save();render(log)}
  else{H.messages.push({id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'});await save();render(log)}
  send.disabled=false;txt.disabled=false;txt.focus();setTimeout(poll,3000)}
-function newReply(){if(!island)return;if(pillMode==='closed')setUnread(true);else render(pillBodyLog())}
+function newReply(){if(!island)return;if(pillMode==='closed'){setUnread(true);updatePillSt()}else render(pillBodyLog())}
 /* island behavior */
 let pillMode='closed',unread=false;
 function setUnread(v){unread=v;dot.style.display=v?'':'none'}
 function openPill(mode){pillMode=mode;setUnread(false);pill.classList.add('open');render(pillBodyLog());api.chatPassthrough(false)}
 function closePill(){pillMode='closed';pill.classList.remove('open');api.chatPassthrough(true)}
-function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';const lg=document.createElement('div');lg.className='log';lg.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('input').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);pillBody.append(lg,comp)}return l}
-async function islandSend(comp){const inp=comp.querySelector('input');const t=inp.value.trim();if(!t)return;inp.value='';txt.value=t;await doSend();render(pillBodyLog())}
+function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';const lg=document.createElement('div');lg.className='log';lg.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(lg,comp)}return l}
+async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
  pillHead.onclick=()=>{pillMode==='closed'?openPill('input'):closePill()};
  pill.addEventListener('mouseleave',()=>{if(pillMode==='closed')api.chatPassthrough(true)});
@@ -84,8 +94,8 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
  document.addEventListener('mousedown',e=>{if(pillMode!=='closed'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode!=='closed')closePill()});
-}else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;}
+}else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
- window.__poll=poll;awaiting=H.messages.some(m=>m.dir==='out'&&m.status==='waiting');
+ window.__poll=poll;calcAwaiting();
  render(island?pillBodyLog():log);await poll();pollTimer=setInterval(poll,25000)})();
 </script>
