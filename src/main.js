@@ -38,7 +38,7 @@ function visiblePosition(x,y,width,height){const ds=screen.getAllDisplays();if(d
 function open(id){
   if(wins[id]&&!wins[id].isDestroyed())return;
   const it=instance(id);if(!it)return;const d=WIDGETS[it.type],s=(rd('layout.json',{}))[id]||{};
-  if(it.type==='chat'&&instanceConfig(id).size==='island'&&s.x===undefined){const wa=screen.getPrimaryDisplay().workArea;s.x=Math.round(wa.x+(wa.width-380)/2);s.y=wa.y+10}
+  if(it.type==='chat'&&instanceConfig(id).size==='island'){const wa=screen.getPrimaryDisplay().workArea;s.x=Math.round(wa.x+(wa.width-380)/2);s.y=wa.y+10}
   const dim=dimensions(id),pos=visiblePosition(s.x??d.x,s.y??d.y,dim.width,dim.height);
   const w=new BrowserWindow({...dim,...pos,frame:false,transparent:true,hasShadow:false,
     resizable:false,skipTaskbar:true,show:false,
