@@ -8,6 +8,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - run: dotnet publish native/MediaBridge/MediaBridge.csproj -c Release -r win-x64 -o native/MediaBridge/publish
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r native/CloudBridge/requirements.txt
+      - run: python -m PyInstaller --noconfirm --clean --onedir --name CloudBridge --collect-all pyicloud --collect-all keyrings --collect-all fido2 --workpath native/CloudBridge/build --specpath native/CloudBridge --distpath native/CloudBridge/publish native/CloudBridge/bridge.py
+      - name: Cloud helper smoke test
+        shell: pwsh
+        run: |
+          '{"id":1,"action":"status"}' | & native/CloudBridge/publish/CloudBridge/CloudBridge.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Cloud helper failed' }
       - run: npm install --no-audit --no-fund
       - run: npm run dist
       - uses: actions/upload-artifact@v4
@@ -18,4 +30,4 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe --title "GlassWidgets $TAG" --notes "Portable Windows build (unsigned)."
+          gh release create "$TAG" dist/*.exe --title "GlassWidgets $TAG" --notes "Windows installer (unsigned). 0.3: compiled media bridge, square/rectangle layouts, persistent iCloud access. See README for sync limits."
