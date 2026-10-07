@@ -5,4 +5,7 @@
  if(['notes','calendar','reminders'].includes(id)){
   const b=document.createElement('button');b.className='cloud-link nd';b.title='פתח ב-Chrome · iCloud';b.setAttribute('aria-label','פתח ב-Chrome את '+id+' ב-iCloud');b.textContent='↗';b.onclick=()=>window.api?.cloudChrome(id);document.querySelector('.widget')?.append(b);
  }
+ if(window.api&&api.theme){let lastTheme=document.documentElement.dataset.theme;
+  setInterval(async()=>{try{const t=await api.theme();if(t&&t!=='system'&&t!==lastTheme){lastTheme=t;document.documentElement.dataset.theme=t}}catch{}},60000);
+ }
 })();
