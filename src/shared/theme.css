@@ -28,6 +28,7 @@ html,body{background:transparent;font-family:var(--font);color:var(--text);-webk
   -webkit-app-region:drag; overflow:hidden; color:var(--text);
 }
 .nd,.nd *{-webkit-app-region:no-drag}
+button,input,textarea,select,a,[contenteditable]{-webkit-app-region:no-drag}
 .hdr{font-size:12px;font-weight:600;color:var(--text2);letter-spacing:.1px}
 ::-webkit-scrollbar{width:0}
 
