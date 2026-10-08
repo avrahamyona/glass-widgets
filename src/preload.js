@@ -17,5 +17,5 @@ contextBridge.exposeInMainWorld('api',{
   invSearch:q=>ipcRenderer.invoke('inv:search',q),invGet:()=>ipcRenderer.invoke('inv:get'),invCheck:s=>ipcRenderer.invoke('inv:check',s),
   bat:()=>ipcRenderer.invoke('bat:get'),
   config:()=>ipcRenderer.invoke('cfg:get'),
-  theme:()=>ipcRenderer.invoke('theme:get'),winNudge:()=>ipcRenderer.invoke('win:nudge'),onTheme:cb=>{ipcRenderer.on('theme:set',(_,t)=>cb(t))},chatReadSend:()=>ipcRenderer.send('chat:read'),onChatRead:cb=>{ipcRenderer.on('chat:read',()=>cb())},invOpen:s=>ipcRenderer.invoke('inv:open',s),feedbackSend:t=>ipcRenderer.invoke('feedback:send',t),updateCheck:()=>ipcRenderer.invoke('update:check'),updateState:()=>ipcRenderer.invoke('update:state'),updateInstall:()=>ipcRenderer.invoke('update:install')
+  theme:()=>ipcRenderer.invoke('theme:get'),winNudge:()=>ipcRenderer.invoke('win:nudge'),onTheme:cb=>{ipcRenderer.on('theme:set',(_,t)=>cb(t))},chatReadSend:()=>ipcRenderer.send('chat:read'),onChatRead:cb=>{ipcRenderer.on('chat:read',()=>cb())},chatNewSend:()=>ipcRenderer.send('chat:new'),onChatNew:cb=>{ipcRenderer.on('chat:new',()=>cb())},invOpen:s=>ipcRenderer.invoke('inv:open',s),feedbackSend:t=>ipcRenderer.invoke('feedback:send',t),updateCheck:()=>ipcRenderer.invoke('update:check'),updateState:()=>ipcRenderer.invoke('update:state'),updateInstall:()=>ipcRenderer.invoke('update:install')
 });

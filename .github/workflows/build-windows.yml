@@ -44,9 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.14
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.15
 
-          **GlassWidgets 0.4.14**
-          - Chat island: reply preview stays 4 seconds, with no visible scrollbar (a fade hints that there is more)
-          - Investments widget: scrollbar hidden, the list still scrolls
-          - Includes everything from 0.4.13"
+          **GlassWidgets 0.4.15**
+          - Chat island: collapsed state is minimal (icon and name only), with the reply text shown only during an alert
+          - Chat island: alerts now appear at the same time on every screen
+          - Includes everything from 0.4.14"

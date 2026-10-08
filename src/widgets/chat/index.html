@@ -90,7 +90,7 @@ const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&qu
 function statusText(m){if(m.dir!=='out')return'';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=statusText(m);if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'');mt.textContent=t;wrap.append(mt)}return wrap}
-function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread?(pillMode==='alert'?'יש תשובה':''):waitingReply()?'מחכה לתשובה…':''}
+function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
 async function poll(){if(!window.api)return;const r=await api.chatPoll('');
@@ -99,7 +99,7 @@ async function poll(){if(!window.api)return;const r=await api.chatPoll('');
  let changed=false;for(const m of r.messages||[]){if(H.messages.some(x=>x.id===m.id))continue;
   H.messages.push({id:m.id,dir:'in',text:m.text,at:m.at,received_at:m.received_at,status:'sent',in_reply_to:m.in_reply_to});
   if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);changed=true}
- if(changed){await save();render(log);if(island)newReply(H.messages[H.messages.length-1])}}
+ if(changed){await save();render(log);if(island)newReply(H.messages[H.messages.length-1]);if(api.chatNewSend)api.chatNewSend()}}
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
 async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
@@ -152,6 +152,7 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+ if(api.onChatNew)api.onChatNew(()=>{poll()});
  window.__poll=poll;
  render(island?pillBodyLog():log);shotInit();await poll();pollTimer=setInterval(poll,25000)})();
 </script>
