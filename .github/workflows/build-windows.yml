@@ -44,7 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.3.9
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.0
 
-          **Fix**
-          - Incoming chat bubbles were nearly invisible on the dark background - now proper iMessage-style gray with clear white text, in the island, dark card, and light card"
+          **Mini island**
+          - The island now rests as a small, minimal pill - avatar and name only
+          - A new reply expands it with a smooth animation and a green dot - without opening the chat
+          - Click to read, click away, and it shrinks back to the mini pill with the same animation"
