@@ -44,3 +44,21 @@ button,input,textarea,select,a,[contenteditable]{-webkit-app-region:no-drag}
 [data-size=square] .dev{min-width:0;width:auto}[data-size=square] .dev .ring{width:46px;height:46px}[data-size=square] .dev .pct{font-size:11px}[data-size=square] .dev .name{font-size:9px}
 [data-size=square][data-widget=battery] .widget{display:grid;grid-template-columns:1fr 1fr;padding:9px;gap:4px}
 [data-size=square][data-widget=battery] .widget .ring{width:44px;height:44px}[data-size=square][data-widget=battery] .widget .p{font-size:11px;margin-top:1px}[data-size=square][data-widget=battery] .widget .l{font-size:9px}
+
+[data-size=large][data-widget=battery] .widget{display:grid;grid-template-columns:1fr 1fr;padding:26px;gap:16px}
+[data-size=large][data-widget=battery] .it{width:auto}
+[data-size=large][data-widget=battery] .ring{width:104px;height:104px}
+[data-size=large][data-widget=battery] .ic svg{width:32px;height:32px}
+[data-size=large][data-widget=battery] .p{font-size:19px}
+[data-size=large][data-widget=battery] .l{font-size:12.5px}
+[data-size=large][data-widget=sysmon] .widget:not(.bars){display:grid;grid-template-columns:1fr 1fr;padding:24px;gap:14px}
+[data-size=large][data-widget=sysmon] .it{width:auto}
+[data-size=large][data-widget=sysmon] .ring{width:118px;height:118px}
+[data-size=large][data-widget=sysmon] .ring b{font-size:26px}
+[data-size=large][data-widget=sysmon] .ring b small{font-size:13px}
+[data-size=large][data-widget=sysmon] .l{font-size:14px;margin-top:6px}
+[data-size=large][data-widget=sysmon] .s{font-size:12px}
+[data-size=large][data-widget=sysmon] .bars{gap:26px;padding:0 30px}
+[data-size=large][data-widget=sysmon] .br b{font-size:15px;width:82px}
+[data-size=large][data-widget=sysmon] .trk{height:12px}
+[data-size=large][data-widget=sysmon] .br span{font-size:14px;width:56px!important}
