@@ -93,13 +93,14 @@ function bubble(m){const d=document.createElement('div');d.className='bub nd '+m
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
-async function poll(){if(!window.api)return;const r=await api.chatPoll('');
+async function poll(){if(!window.api)return;const r=await api.chatPoll(String(Math.max(0,(H.lastReceived||0)-1)));
  if(!r.ok){if(island)updatePillSt(true);return}
  updatePillSt();
  let changed=false;for(const m of r.messages||[]){if(H.messages.some(x=>x.id===m.id))continue;
   H.messages.push({id:m.id,dir:'in',text:m.text,at:m.at,received_at:m.received_at,status:'sent',in_reply_to:m.in_reply_to});
   if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);changed=true}
- if(changed){await save();render(log);if(island)newReply(H.messages[H.messages.length-1]);if(api.chatNewSend)api.chatNewSend()}}
+ if(changed){await save();render(log);if(island)newReply(H.messages[H.messages.length-1]);if(api.chatNewSend)api.chatNewSend()}
+ if((r.messages||[]).length>=50)setTimeout(poll,800)}
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
 async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
