@@ -44,9 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.15
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.16
 
-          **GlassWidgets 0.4.15**
-          - Chat island: collapsed state is minimal (icon and name only), with the reply text shown only during an alert
-          - Chat island: alerts now appear at the same time on every screen
-          - Includes everything from 0.4.14"
+          **GlassWidgets 0.4.16**
+          - Chat: messages sent from one island now appear instantly in the chat windows on all other screens
+          - Fixes chat getting out of sync between screens
+          - Includes everything from 0.4.15"
