@@ -1,4 +1,4 @@
-const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session}=require('electron');
+const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session,desktopCapturer}=require('electron');
 const {spawn}=require('child_process'),http=require('http'),crypto=require('crypto');
 const {parseAirPods}=require('./lib/airpods'),net=require('./lib/net'),themeLib=require('./lib/theme');
 const path=require('path'),fs=require('fs'),os=require('os');
@@ -190,6 +190,19 @@ ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע. ההודעה לא נשלחה'}}});
+const SHOT_URL=process.env.GLASSWIDGETS_SHOT_URL||CHAT_URL.replace(/\/chat$/,'/screenshot');
+ipcMain.handle('shot:list',async()=>{try{const srcs=await desktopCapturer.getSources({types:['screen']});return {ok:true,screens:srcs.map((sc,i)=>({index:i,name:sc.name||('מסך '+(i+1))}))}}catch{return {ok:false,error:'לא ניתן לגשת למסכים'}}});
+ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));const id=crypto.randomUUID();
+ try{const srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:1920,height:1080}});
+  const src=srcs[idx];if(!src)return {ok:false,error:'המסך לא נמצא'};
+  const img=src.thumbnail;if(!img||img.isEmpty())return {ok:false,error:'הצילום נכשל'};
+  const jpeg=img.toJPEG(82),sz=img.getSize();
+  if(jpeg.length>3500000)return {ok:false,error:'התמונה גדולה מדי'};
+  const r=await fetch(SHOT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,image:jpeg.toString('base64'),at:Date.now(),width:sz.width,height:sz.height})});
+  if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
+  const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
+  return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
+ catch{return {ok:false,error:'אין חיבור כרגע'}}});
 ipcMain.handle('chat:poll',async(_,after)=>{try{const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u);if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};const messages=h.messages.slice(-200).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));wr('chat-'+id+'.json',{messages,seenHint:!!h.seenHint,lastReceived:+h.lastReceived||0});return {ok:true}});

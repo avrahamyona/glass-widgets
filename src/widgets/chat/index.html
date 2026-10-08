@@ -56,7 +56,7 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
  <div class=chdr>חיים</div>
  <div class=log id=log></div>
  <div class=hint id=hint style="display:none">תשובות מגיעות עד ~5 דקות · המסך הזה שומר את השיחה במחשב בלבד</div>
- <div class="composer nd"><textarea id=txt rows=1 maxlength=2000 placeholder="כתוב לחיים…"></textarea><button id=send>שלח</button></div>
+ <div class="composer nd"><textarea id=txt rows=1 maxlength=2000 placeholder="כתוב לחיים…"></textarea><button id=scr title="בחר מסך לצילום" style="background:rgba(128,128,128,.18);color:var(--text);padding:8px 9px;font-size:11px;display:none">מסך 1</button><button id=shot title="צלם מסך" style="background:rgba(128,128,128,.18);color:var(--text);padding:8px 11px">📷</button><button id=send>שלח</button></div>
 </div>
 </div>
 <script src="../../shared/widget.js"></script>
@@ -94,12 +94,21 @@ async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true
  else{H.messages.push({id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'});await save();render(log)}
  send.disabled=false;txt.disabled=false;txt.focus();setTimeout(poll,3000)}
 function newReply(){if(!island)return;if(pillMode!=='open'){pillMode='alert';pill.classList.add('alert');setUnread(true);updatePillSt()}else render(pillBodyLog())}
+let scrIdx=0,scrCount=1;
+function updScrBtn(){for(const b of[document.getElementById('scr'),document.getElementById('scr2')]){if(b){b.style.display=scrCount>1?'':'none';b.textContent='מסך '+(scrIdx+1)}}}
+async function shotInit(){if(!window.api)return;try{const r=await api.shotList();if(r&&r.ok&&r.screens&&r.screens.length)scrCount=r.screens.length}catch{}updScrBtn()}
+function scrCycle(){scrIdx=(scrIdx+1)%scrCount;updScrBtn()}
+async function doShot(idx){const b=document.getElementById(island?'shot2':'shot');if(b)b.disabled=true;
+ const r=await api.chatScreenshot(idx);
+ const m={id:(r&&r.id)||('local-'+Date.now()),dir:'out',text:'📷 צילום מסך '+(idx+1),at:Date.now(),status:r&&r.ok?'sent':'failed'};
+ H.messages.push(m);await save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
+ if(b)b.disabled=false}
 /* island behavior */
 let pillMode='mini',unread=false;
 function setUnread(v){unread=v;dot.style.display=v?'':'none'}
 function openPill(){pillMode='open';setUnread(false);pill.classList.add('open');pill.classList.remove('alert');render(pillBodyLog());api.chatPassthrough(false)}
 function closePill(){pillMode='mini';pill.classList.remove('open','alert');api.chatPassthrough(true)}
-function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=document.createElement('div');l.className='log';l.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(l,comp)}return l}
+function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=document.createElement('div');l.className='log';l.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('#shot').id='shot2';comp.querySelector('#shot2').onclick=()=>doShot(scrIdx);comp.querySelector('#scr').id='scr2';comp.querySelector('#scr2').onclick=scrCycle;updScrBtn();comp.querySelector('#send').id='send2';comp.querySelector('#send2').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(l,comp)}return l}
 async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
  pillHead.onclick=()=>{pillMode==='open'?closePill():openPill()};
@@ -108,8 +117,8 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
  document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
-}else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;wireComposer(txt,()=>doSend())}
+}else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  window.__poll=poll;
- render(island?pillBodyLog():log);await poll();pollTimer=setInterval(poll,25000)})();
+ render(island?pillBodyLog():log);shotInit();await poll();pollTimer=setInterval(poll,25000)})();
 </script>
