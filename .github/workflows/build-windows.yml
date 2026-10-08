@@ -44,9 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.5
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.6
 
-          **GlassWidgets 0.4.5 - screenshots in chat**
-          - New camera button in the chat: take a screenshot and it goes straight to the chat, with no popup
-          - If you have two screens, click to switch which screen is captured
-          - Screenshots are sent to your own chat server and are not shared anywhere else"
+          **GlassWidgets 0.4.6 - fixes**
+          - Fixed the timer close button, which could miss clicks because of the animation
+          - Fixed the calendar showing "not connected" by mistake in the first minutes after launch
+          - The weekday name on the clock is red again"
