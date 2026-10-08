@@ -44,10 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.4
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.5
 
-          **GlassWidgets 0.4.4 - clock timer and iCloud**
-          - Starting a timer from the clock now opens it as its own timer card, with the clock face left alone
-          - Clock digits follow the theme colour
-          - Notes and reminders show a clear not-connected state when iCloud is not linked
-          - Widgets keep updating when the window is in the background, which fixes the frozen clock"
+          **GlassWidgets 0.4.5 - screenshots in chat**
+          - New camera button in the chat: take a screenshot and it goes straight to the chat, with no popup
+          - If you have two screens, click to switch which screen is captured
+          - Screenshots are sent to your own chat server and are not shared anywhere else"
