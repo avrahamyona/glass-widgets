@@ -48,4 +48,5 @@ jobs:
 
           **GlassWidgets 0.4.13**
           - Investments widget: the list now scrolls when there are many items
-          - Chat island: opening the chat from a notification works"
+          - Chat island: clicking a notification opens the chat
+          - Chat island: long replies are capped at 10 lines with scrolling, shown for 2.5 seconds, with smoother animations"
