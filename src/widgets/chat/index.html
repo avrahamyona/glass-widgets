@@ -104,10 +104,10 @@ function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeigh
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
 async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
  const r=await api.chatSend(t);
- if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'sent'};H.messages.push(m);txt.value='';grow(txt);
+ if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'sent'};H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);txt.value='';grow(txt);
   if(!H.seenHint){H.seenHint=true;hint.style.display=''}
   await save();render(log)}
- else{H.messages.push({id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'});await save();render(log)}
+ else{const m={id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'};H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log)}
  send.disabled=false;txt.disabled=false;txt.focus();setTimeout(poll,3000)}
 let alertPreview='';let soundOn=true;let actx=null;
 async function chime(){if(q.get('companion')||!soundOn)return;try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();
@@ -132,7 +132,7 @@ function scrCycle(){scrIdx=(scrIdx+1)%scrCount;updScrBtn()}
 async function doShot(idx){const b=document.getElementById(island?'shot2':'shot');if(b)b.disabled=true;
  const r=await api.chatScreenshot(idx);
  const m={id:(r&&r.id)||('local-'+Date.now()),dir:'out',text:'📷 צילום מסך '+(idx+1),at:Date.now(),status:r&&r.ok?'sent':'failed'};
- H.messages.push(m);await save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
+ H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
  if(b)b.disabled=false}
 /* island behavior */
 let pillMode='mini',unread=false;
@@ -153,6 +153,7 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatNew)api.onChatNew(()=>{poll()});
+ if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  window.__poll=poll;
  render(island?pillBodyLog():log);shotInit();await poll();pollTimer=setInterval(poll,25000)})();
 </script>
