@@ -21,21 +21,27 @@
 /* dynamic island mode */
 body.island{background:transparent}
 body.island .widget{position:static;inset:auto;background:transparent;backdrop-filter:none;box-shadow:none;padding:0;overflow:visible}
-#pill{position:absolute;top:0;left:50%;transform:translateX(-50%);min-width:92px;max-width:360px;border-radius:16px;background:rgba(12,12,14,.92);box-shadow:0 4px 18px rgba(0,0,0,.35),0 0 0 .5px rgba(255,255,255,.08) inset;color:#fff;overflow:hidden;transition:min-width .28s cubic-bezier(.32,.72,.35,1),max-height .32s cubic-bezier(.32,.72,.35,1),border-radius .3s;max-height:32px;cursor:pointer;backdrop-filter:blur(30px) saturate(160%)}
-#pillHead{display:flex;align-items:center;gap:5px;height:32px;padding:0 10px;white-space:nowrap;transition:height .28s cubic-bezier(.32,.72,.35,1),padding .28s cubic-bezier(.32,.72,.35,1),gap .28s}
-#pillHead .av{width:17px;height:17px;border-radius:50%;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;font-size:9px;transition:width .28s cubic-bezier(.32,.72,.35,1),height .28s cubic-bezier(.32,.72,.35,1),font-size .28s}
-#pillHead .who{font:600 10.5px var(--font);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
-#pillHead .st{font:400 8.5px var(--font);color:rgba(235,235,245,.55);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
-#pillHead .dot{width:5px;height:5px;border-radius:50%;background:#30d158;flex:none;box-shadow:0 0 6px rgba(48,209,88,.7);transition:width .28s,height .28s}
+#pill{position:absolute;top:0;left:50%;transform:translateX(-50%);min-width:70px;max-width:360px;border-radius:12px;background:rgba(12,12,14,.92);box-shadow:0 4px 18px rgba(0,0,0,.35),0 0 0 .5px rgba(255,255,255,.08) inset;color:#fff;overflow:hidden;transition:min-width .28s cubic-bezier(.32,.72,.35,1),max-height .32s cubic-bezier(.32,.72,.35,1),border-radius .3s;max-height:24px;cursor:pointer;backdrop-filter:blur(30px) saturate(160%)}
+#pillHead{display:flex;align-items:center;gap:4px;height:24px;padding:0 8px;white-space:nowrap;transition:height .28s cubic-bezier(.32,.72,.35,1),padding .28s cubic-bezier(.32,.72,.35,1),gap .28s}
+#pillHead .av{width:13px;height:13px;border-radius:50%;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;font-size:7px;transition:width .28s cubic-bezier(.32,.72,.35,1),height .28s cubic-bezier(.32,.72,.35,1),font-size .28s}
+#pillHead .who{font:600 9px var(--font);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
+#pillHead .st{font:400 7.5px var(--font);color:rgba(235,235,245,.55);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
+#pillHead .dot{width:4px;height:4px;border-radius:50%;background:#30d158;flex:none;box-shadow:0 0 5px rgba(48,209,88,.7);transition:width .28s,height .28s}
 #pillBody{display:block;overflow:hidden;max-height:0;opacity:0;padding:0 14px;transition:max-height .3s cubic-bezier(.32,.72,.35,1),opacity .22s ease,padding .3s cubic-bezier(.32,.72,.35,1)}
-#pill.alert,#pill.open{min-width:150px;max-height:56px;border-radius:28px}
-#pill.alert #pillHead,#pill.open #pillHead{gap:8px;height:56px;padding:0 18px}
-#pill.alert .av,#pill.open .av{width:26px;height:26px;font-size:13px}
-#pill.alert .who,#pill.open .who{font-size:13px}
-#pill.alert .st,#pill.open .st{font-size:10.5px}
-#pill.alert .dot,#pill.open .dot{width:8px;height:8px}
+#pill.alert{min-width:110px;max-height:40px;border-radius:20px}
+#pill.alert #pillHead{gap:6px;height:40px;padding:0 12px}
+#pill.alert .av{width:20px;height:20px;font-size:10.5px}
+#pill.alert .who{font-size:11.5px}
+#pill.alert .st{font-size:9px}
+#pill.alert .dot{width:6px;height:6px}
+#pill.open #pillHead{gap:8px;height:56px;padding:0 18px}
+#pill.open .av{width:26px;height:26px;font-size:13px}
+#pill.open .who{font-size:13px}
+#pill.open .st{font-size:10.5px}
+#pill.open .dot{width:8px;height:8px}
 #pill.open{min-width:340px;max-height:330px;border-radius:24px;cursor:default}
 #pill.open #pillBody{max-height:270px;opacity:1;padding:0 14px 12px}
+#pill:not(.open) #pillBody{contain:size}
 #pill .log{max-height:200px}
 #pill .bub{font-size:12px}
 #pill .bub.in{background:#3a3a3c;color:#fff}
@@ -60,29 +66,29 @@ document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-col
 const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
-let awaiting=false,pollTimer=null;
-function calcAwaiting(){const o=H.messages.filter(m=>m.dir==='out').pop();awaiting=!!o&&o.status==='waiting'}
+let pollTimer=null;
+function lastMsg(){return H.messages[H.messages.length-1]}
+function awaitingHis(){const l=lastMsg();return !!l&&l.dir==='out'}
+function waitingForMe(){const l=lastMsg();return !!l&&l.dir==='in'}
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-function statusText(m){return m.dir==='in'?'':({waiting:'נשלח · מחכה לתשובה',replied:'נענה',sent:'נשלח',failed:'לא נשלח · אין חיבור'}[m.status]||'')}
+function statusText(m){if(m.dir!=='out')return'';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function bubble(m){const d=document.createElement('div');d.className='bub '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=statusText(m);if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'');mt.textContent=t;wrap.append(mt)}return wrap}
-function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread?'יש תשובה':awaiting?'מחכה לתשובה…':''}
+function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread?'יש תשובה':waitingForMe()?'מחכה לתשובה…':''}
 function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
-async function poll(){if(!window.api)return;const r=await api.chatPoll(awaiting?'':(H.lastReceived||''));
+async function poll(){if(!window.api)return;const r=await api.chatPoll(awaitingHis()?'':(H.lastReceived||''));
  if(!r.ok){if(island)updatePillSt(true);return}
  updatePillSt();
  let changed=false;for(const m of r.messages||[]){if(H.messages.some(x=>x.id===m.id))continue;
   H.messages.push({id:m.id,dir:'in',text:m.text,at:m.at,received_at:m.received_at,status:'sent',in_reply_to:m.in_reply_to});
-  if(m.in_reply_to){const o=H.messages.find(x=>x.id===m.in_reply_to);if(o&&o.status==='waiting')o.status='replied'}
   H.lastReceived=Math.max(H.lastReceived||0,m.received_at||0);changed=true}
- calcAwaiting();
  if(changed){await save();render(log);if(island)newReply()}}
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
 async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
  const r=await api.chatSend(t);
- if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'waiting'};H.messages.push(m);awaiting=true;txt.value='';grow(txt);
+ if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'sent'};H.messages.push(m);txt.value='';grow(txt);
   if(!H.seenHint){H.seenHint=true;hint.style.display=''}
   await save();render(log)}
  else{H.messages.push({id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'});await save();render(log)}
@@ -93,7 +99,7 @@ let pillMode='mini',unread=false;
 function setUnread(v){unread=v;dot.style.display=v?'':'none'}
 function openPill(){pillMode='open';setUnread(false);pill.classList.add('open');pill.classList.remove('alert');render(pillBodyLog());api.chatPassthrough(false)}
 function closePill(){pillMode='mini';pill.classList.remove('open','alert');api.chatPassthrough(true)}
-function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';const lg=document.createElement('div');lg.className='log';lg.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(lg,comp)}return l}
+function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=document.createElement('div');l.className='log';l.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(l,comp)}return l}
 async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
  pillHead.onclick=()=>{pillMode==='open'?closePill():openPill()};
@@ -104,6 +110,6 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
- window.__poll=poll;calcAwaiting();
+ window.__poll=poll;
  render(island?pillBodyLog():log);await poll();pollTimer=setInterval(poll,25000)})();
 </script>
