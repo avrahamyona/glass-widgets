@@ -44,9 +44,8 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.17
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.18
 
-          **GlassWidgets 0.4.17**
-          - iCloud arrow button in Notes, Calendar and Reminders now opens inside the app window, never Chrome
-          - New button in Settings: Enter iCloud, opens iCloud home in the app window
-          - Includes everything from 0.4.16"
+          **GlassWidgets 0.4.18**
+          - Clicking a stock row opens Google Finance inside the app window instead of the default browser
+          - Includes everything from 0.4.17"
