@@ -30,13 +30,14 @@ function showEvents(evs){
   if(t.length>2){const m=document.createElement('div');m.className='more';m.textContent='עוד '+(t.length-2)+(t.length>3?' אירועים':' אירוע');body.appendChild(m)}
 }
 function showForm(err){day.style.display='none';dow.textContent='לוח שנה iCloud';body.innerHTML='<div class=hint style="margin:12px 0">חבר את חשבון iCloud בהגדרות ועדכן מידע.</div><button class=nd onclick="api.settingsOpen()" style="border:0;border-radius:8px;background:#0a84ff;color:white;padding:8px;cursor:pointer">פתח הגדרות</button>';if(err){const e=document.createElement('div');e.className='err';e.textContent=err;body.append(e)}}
-async function load(){const s=await api.calStatus();if(!s.connected)return showForm();const r=await api.calEvents();
+async function load(){const s=await api.calStatus();if(!s.connected){showForm();return false}const r=await api.calEvents();
   day.style.display='';dow.style.color='#ff3b30';showEvents(r.events||[]);if(r.stale){const e=document.createElement('div');e.className='hint';e.textContent='אין חיבור כרגע · מידע שמור';body.append(e)}
   if(r.manual){const h=document.createElement('div');h.className='hint';h.textContent='עדכון ידני דרך הגדרות iCloud';h.onclick=()=>api.settingsOpen();body.append(h)}if(r.error&&!r.authError){const h=document.createElement('div');h.className='err';h.textContent=r.error;body.append(h)}
-  if(r.authError){const a=document.createElement('div');a.className='err';a.style.cursor='pointer';a.textContent=(r.error||'הסיסמה נדחתה')+' · לחץ להגדרות';a.onclick=()=>{api.settingsOpen()};body.appendChild(a)}}
+  if(r.authError){const a=document.createElement('div');a.className='err';a.style.cursor='pointer';a.textContent=(r.error||'הסיסמה נדחתה')+' · לחץ להגדרות';a.onclick=()=>{api.settingsOpen()};body.appendChild(a)};return true}
 if(q.get('demo')==='form')showForm();
 else if(q.get('demo'))showEvents([{title:'Dentist, Dr Levi',start:+new Date('2026-10-06T13:00:00+03:00'),end:+new Date('2026-10-06T14:00:00+03:00')},{title:'Call with Dana',start:+new Date('2026-10-06T16:30:00+03:00'),end:+new Date('2026-10-06T17:00:00+03:00')},{title:'Dinner',start:+new Date('2026-10-06T20:00:00+03:00'),end:+new Date('2026-10-06T21:30:00+03:00')}]);
-else{load();setInterval(load,10*60e3)}
+else{(async()=>{if(await load()){setInterval(load,10*60e3);return}
+ const f=setInterval(async()=>{if(await load()){clearInterval(f);setInterval(load,10*60e3)}},5000)})()}
 </script>
 
 <script src="../../shared/widget.js"></script>
