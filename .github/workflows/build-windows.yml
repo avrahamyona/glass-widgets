@@ -44,12 +44,7 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.3.8
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.3.9
 
-          **Chat widget polish**
-          - The island now always opens at the top-center of the screen
-          - Enter sends your message (Shift+Enter for a new line)
-          - Click any chat bubble to copy it
-          - Status labels in the pill: \"מחכה לתשובה...\" after you send, \"יש תשובה\" when a reply arrives - then back to clean
-          - A reply can no longer get lost behind a broken sync marker
-          - Gentle \"אין חיבור\" note if the server can't be reached, clearing when back online"
+          **Fix**
+          - Incoming chat bubbles were nearly invisible on the dark background - now proper iMessage-style gray with clear white text, in the island, dark card, and light card"
