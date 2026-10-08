@@ -4,15 +4,14 @@
 .tmr-on .widget{transform:scale(1.05)}
 svg#c{width:100%;height:100%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.18))}
 .dg-on #c{display:none}
-.dg-on #dg{position:absolute;inset:0;display:flex!important;flex-direction:column;align-items:center;justify-content:center;direction:ltr;text-align:center;transform:translate(3.5px,9px)}
+.dg-on #dg{position:absolute;inset:0;display:flex!important;flex-direction:column;align-items:center;justify-content:center;direction:ltr;text-align:center}
 #c,#dg,.tlink{transition:opacity .18s ease,transform .36s cubic-bezier(.3,1.4,.45,1)}
 .tmr-on #c,.tmr-on #dg,.tmr-on .tlink{opacity:0;transform:scale(.8);pointer-events:none}
-.tmr-on.dg-on #dg{transform:scale(.8) translate(3.5px,9px)}
+.tmr-on.dg-on #dg{transform:scale(.8)}
 .tlink{position:absolute;left:8px;bottom:7px;border:0;border-radius:50%;width:22px;height:22px;background:rgba(128,128,128,.12);font:400 13px var(--font);color:var(--text2);cursor:pointer;z-index:5;-webkit-app-region:no-drag}
-.dd{font-size:12px;font-weight:600;color:#ff3b30;direction:rtl}.tt{font-size:50px;font-weight:300;letter-spacing:-2px;line-height:1.05;font-variant-numeric:tabular-nums}.ds{font-size:11px;color:var(--text2);font-weight:500;margin-top:3px;direction:rtl}
+.dd{font-size:12px;font-weight:600;color:var(--text);direction:rtl}.tt{font-size:50px;font-weight:300;letter-spacing:-2px;line-height:1.05;font-variant-numeric:tabular-nums}.ds{font-size:11px;color:var(--text2);font-weight:500;margin-top:3px;direction:rtl}
 #tmr{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px;opacity:0;visibility:hidden;transform:scale(.8);transition:opacity .18s ease,transform .36s cubic-bezier(.3,1.4,.45,1),visibility 0s linear .36s;z-index:6}
 .tmr-on #tmr{opacity:1;visibility:visible;transform:scale(1);transition:opacity .22s ease .05s,transform .4s cubic-bezier(.3,1.4,.45,1),visibility 0s}
-#tmr svg{width:118px;height:118px}
 .xbtn{position:absolute;left:8px;top:7px;border:0;border-radius:50%;width:22px;height:22px;background:rgba(128,128,128,.12);font:600 13px var(--font);color:var(--text2);cursor:pointer;z-index:5}
 .tbtn{position:absolute;right:8px;top:7px;border:0;border-radius:7px;width:24px;height:24px;background:rgba(128,128,128,.12);font:600 14px var(--font);color:var(--text2);cursor:pointer;z-index:5}
 .tbtn.on{background:var(--accent);color:#fff}
@@ -22,30 +21,18 @@ svg#c{width:100%;height:100%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.18))}
 .tcol input{width:44px;height:38px;border:0;border-radius:10px;background:rgba(128,128,128,.12);color:var(--text);font:300 22px var(--font);text-align:center;outline:none;font-variant-numeric:tabular-nums}
 .tcol label{font-size:10px;color:var(--text2)}
 .go{border:0;border-radius:12px;padding:8px 26px;background:var(--accent);color:#fff;font:600 14px var(--font);cursor:pointer}
-.rm{font:300 30px var(--font);font-variant-numeric:tabular-nums;letter-spacing:-1px}
-.ctl{display:flex;gap:8px;margin-top:10px}
-.ctl button{border:0;border-radius:10px;padding:6px 14px;background:rgba(128,128,128,.15);color:var(--text);font:500 12px var(--font);cursor:pointer}
-#tmr.done .rm{color:#ff3b30}
-@keyframes pulse{50%{opacity:.35}}
-#tmr.done svg{animation:pulse 1s infinite}
 </style>
 <body><div class=widget><button class="tlink nd" id=timerBtn title="פתח טיימר">⏱</button><svg id=c></svg><div id=dg style="display:none"><div class=dd id=dd></div><div class=tt id=tt></div><div class=ds id=ds></div></div>
 <div id=tmr>
 <button class="xbtn nd" id=xbtn title="סגור">✕</button>
-<button class="tbtn nd" id=topBtn title="הצמד מעל חלונות">▢</button>
 <div id=setup>
  <div class=ttl>טיימר</div>
- <div class=times>
+ <div class="times nd">
   <div class=tcol><input id=h inputmode=numeric maxlength=2 value=0><label>שעות</label></div>
   <div class=tcol><input id=m inputmode=numeric maxlength=2 value=5><label>דקות</label></div>
   <div class=tcol><input id=s inputmode=numeric maxlength=2 value=0><label>שניות</label></div>
  </div>
  <button class="go nd" id=start>הפעל</button>
-</div>
-<div id=run style="display:none;flex-direction:column;align-items:center;position:relative">
- <svg viewBox="0 0 200 200"><circle id=cir cx=100 cy=100 r=86 fill="var(--accent)" opacity=.85 /></svg>
- <div class=rm id=rm style="position:absolute;top:59px;left:50%;transform:translate(-50%,-50%)">00:00</div>
- <div class="ctl nd"><button id=pause>עצור</button><button id=cancel>ביטול</button></div>
 </div>
 </div>
 </div>
@@ -59,29 +46,18 @@ const style=q.get('style')||'analog';const set0=buildClock(document.getElementBy
 const HE=new Intl.DateTimeFormat('he-IL',{timeZone:q.get('tz')||'Asia/Jerusalem',weekday:'long',day:'numeric',month:'long'});
 const set=d=>{if(style==='digital'){document.body.classList.add('dg-on');dg.style.display='';tt.textContent=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');const dt=new Date();const p=HE.formatToParts(dt);dd.textContent=p.find(x=>x.type==='weekday').value;ds.textContent=p.filter(x=>x.type==='day'||x.type==='month').map(x=>x.value).join(' ')}else set0(d)};
 const t=q.get('time');
-(function f(){const d=t?new Date('2026-10-06T'+t):inTZ(q.get('tz')||'Asia/Jerusalem');set(d);if(!t)(style==='digital'?setTimeout(f,1000):requestAnimationFrame(f))})();
+let lastRender=0;
+(function f(){try{const d=t?new Date('2026-10-06T'+t):inTZ(q.get('tz')||'Asia/Jerusalem');set(d);lastRender=Date.now()}catch(e){}if(!t)(style==='digital'?setTimeout(f,1000):requestAnimationFrame(f))})();
+if(!t)setInterval(()=>{if(Date.now()-lastRender>3000){try{set(inTZ(q.get('tz')||'Asia/Jerusalem'));lastRender=Date.now()}catch(e){}}},3000);
 </script>
 <script>
-const $=i=>document.getElementById(i);
-let total=0,left=0,iv=null,paused=false,deadline=0;
 function openTmr(){document.body.classList.add('tmr-on')}
-function resetTmr(){clearInterval(iv);iv=null;paused=false;tmr.classList.remove('done');run.style.display='none';setup.style.display='';xbtn.style.display='';pause.style.display='';pause.textContent='עצור';rm.textContent='00:00'}
-function closeTmr(){resetTmr();document.body.classList.remove('tmr-on')}
+function closeTmr(){document.body.classList.remove('tmr-on')}
 if(window.api)timerBtn.onclick=openTmr;else timerBtn.style.display='none';
 xbtn.onclick=closeTmr;
-cancel.onclick=closeTmr;
-if(window.api)api.instanceSelf().then(c=>{if(c&&c.onTop)topBtn.classList.add('on')});
-topBtn.onclick=async()=>{const on=!topBtn.classList.contains('on');topBtn.classList.toggle('on',on);try{await api.instanceSelfSave({onTop:on})}catch{}};
 for(const el of [h,m,s])el.addEventListener('input',()=>{el.value=el.value.replace(/\D/g,'').slice(0,2)});
-function fmt(ms){const t=Math.max(0,Math.ceil(ms/1000)),hh=Math.floor(t/3600),mm=Math.floor(t%3600/60),ss=t%60;return hh?hh+':'+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0'):String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
-function draw(){const frac=total?left/total:0;const r=20+66*frac;cir.setAttribute('r',r.toFixed(1));rm.textContent=fmt(left)}
-function tick(){if(paused)return;left=deadline-Date.now();if(left<=0){left=0;draw();finish();return}draw()}
-function finish(){clearInterval(iv);iv=null;tmr.classList.add('done');rm.textContent=fmt(0);pause.style.display='none';if(window.api){api.beep();let n=1;const t=setInterval(()=>{api.beep();if(++n>=3)clearInterval(t)},700)}}
-start.onclick=()=>{total=((+h.value||0)*3600+(+m.value||0)*60+(+s.value||0))*1000;if(total<1000){m.focus();return}
- setup.style.display='none';xbtn.style.display='none';run.style.display='flex';
- deadline=Date.now()+total;left=total;draw();iv=setInterval(tick,200)};
-pause.onclick=()=>{if(!iv&&!paused)return;paused=!paused;if(paused){pause.textContent='המשך'}else{deadline=Date.now()+left;pause.textContent='עצור'}};
-const demo=q.get('demo');if(demo){openTmr();total=left=+demo*1000||30000;start.onclick()}
+start.onclick=()=>{const secs=(+h.value||0)*3600+(+m.value||0)*60+(+s.value||0);if(secs<1){m.focus();return}
+ closeTmr();api.timerStart(secs)};
 </script>
 
 <script src="../../shared/widget.js"></script>
