@@ -44,9 +44,10 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.3
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.4
 
-          **GlassWidgets 0.4.3 - clock timer**
-          - The clock widget now has a built-in timer: tap the timer button and it opens in place with a smooth animation, no separate widget needed
-          - Set hours, minutes and seconds, then start, pause or cancel; the clock face returns when you close it
-          - Small layout polish in the standalone timer widget"
+          **GlassWidgets 0.4.4 - clock timer and iCloud**
+          - Starting a timer from the clock now opens it as its own timer card, with the clock face left alone
+          - Clock digits follow the theme colour
+          - Notes and reminders show a clear not-connected state when iCloud is not linked
+          - Widgets keep updating when the window is in the background, which fixes the frozen clock"
