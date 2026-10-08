@@ -23,7 +23,7 @@ svg{width:118px;height:118px}
 <button class="tbtn nd" id=topBtn title="הצמד מעל חלונות">▢</button>
 <div id=setup>
  <div class=ttl>טיימר</div>
- <div class=times>
+ <div class="times nd">
   <div class=tcol><input id=h inputmode=numeric maxlength=2 value=0><label>שעות</label></div>
   <div class=tcol><input id=m inputmode=numeric maxlength=2 value=5><label>דקות</label></div>
   <div class=tcol><input id=s inputmode=numeric maxlength=2 value=0><label>שניות</label></div>
@@ -57,5 +57,5 @@ start.onclick=()=>{total=((+h.value||0)*3600+(+m.value||0)*60+(+s.value||0))*100
  setup.style.display='none';xbtn.style.display='none';run.style.display='flex';
  deadline=Date.now()+total;left=total;draw();iv=setInterval(tick,200)};
 pause.onclick=()=>{if(!iv&&!paused)return;paused=!paused;if(paused){pause.textContent='המשך'}else{deadline=Date.now()+left;pause.textContent='עצור'}};
-const demo=q.get('demo');if(demo){total=left=+demo*1000||30000;start.onclick()}
+const demo=q.get('demo');if(demo){const v=Math.max(1,Math.round(+demo||30));h.value=Math.floor(v/3600);m.value=Math.floor(v%3600/60);s.value=v%60;start.onclick()}
 </script>
