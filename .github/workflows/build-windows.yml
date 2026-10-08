@@ -44,10 +44,8 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.1
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.2
 
-          **GlassWidgets 0.4.1 - chat island polish**
-          - Smaller island: mini collapses to a tiny 24px pill, reply alert is a compact 40px pill; both hug their content
-          - Smarter status: the pill reads the conversation itself - clean after your message, מחכה לתשובה… while Chaim's reply awaits your answer, יש תשובה for unread
-          - Fixed: island could silently stop refreshing after restart or switching widget modes, leaving states stuck
-          - Fixed: status no longer depends on server reply linking"
+          **GlassWidgets 0.4.2 - chat status fix**
+          - מחכה לתשובה now appears when it's actually your word that's last - after you write, the chat waits for the reply; once the reply arrives and you've read it, the pill goes back to clean
+          - Fixed the reversed status from 0.4.1"
