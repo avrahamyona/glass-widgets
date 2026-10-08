@@ -32,7 +32,8 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 #pill.alert .st{max-width:190px;overflow:hidden;text-overflow:ellipsis}
 @keyframes pillBump{0%{transform:translateX(-50%) scale(1)}35%{transform:translateX(-50%) scale(1.12)}100%{transform:translateX(-50%) scale(1)}}
 #pill.bump{animation:pillBump .55s ease}
-#pillPrev{display:none;direction:rtl;padding:0 13px;font-size:12px;line-height:1.45;color:rgba(235,235,245,.92);overflow:hidden;max-height:0;opacity:0;white-space:pre-wrap;word-break:break-word;transition:max-height .35s cubic-bezier(.32,.72,.35,1),opacity .25s ease}
+#pillPrev{display:none;direction:rtl;padding:0 13px;font-size:12px;line-height:1.45;color:rgba(235,235,245,.92);overflow:hidden;overflow-y:auto;max-height:0;opacity:0;white-space:pre-wrap;word-break:break-word;scroll-behavior:smooth;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.3) transparent;transition:max-height .35s cubic-bezier(.32,.72,.35,1),opacity .25s ease}
+#pillPrev::-webkit-scrollbar{width:5px}#pillPrev::-webkit-scrollbar-thumb{background:rgba(255,255,255,.3);border-radius:3px}#pillPrev::-webkit-scrollbar-track{background:transparent}
 #pill.preview{max-height:290px;min-width:250px;border-radius:20px}
 #pill.preview #pillPrev{display:block;opacity:1;padding-bottom:10px}
 #pill.preview #pillPrev{cursor:pointer}
@@ -120,9 +121,9 @@ function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog(
  if(m)alertPreview=m.text;setUnread(true);updatePillSt();chime();
  pillMode='alert';pill.classList.add('alert','bump');setTimeout(()=>pill.classList.remove('bump'),700);
  pillPrev.textContent=alertPreview;pill.classList.add('preview');
- requestAnimationFrame(()=>{pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,200)+'px'});
+ requestAnimationFrame(()=>{const lh=parseFloat(getComputedStyle(pillPrev).lineHeight)||17.4;const cap=Math.round(lh*10)+8;pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,cap)+'px'});
  if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();
- clearTimeout(prevT);prevT=setTimeout(collapseAlert,2300)}
+ clearTimeout(prevT);prevT=setTimeout(collapseAlert,2500)}
 let scrIdx=0,scrCount=1;
 function updScrBtn(){for(const b of[document.getElementById('scr'),document.getElementById('scr2')]){if(b){b.style.display=scrCount>1?'':'none';b.textContent='מסך '+(scrIdx+1)}}}
 async function shotInit(){if(!window.api)return;try{const r=await api.shotList();if(r&&r.ok&&r.screens&&r.screens.length)scrCount=r.screens.length}catch{}updScrBtn()}
