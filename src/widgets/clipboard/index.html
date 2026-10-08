@@ -15,7 +15,7 @@ const q=new URLSearchParams(location.search);
 document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
 const l=document.getElementById('l');
 function render(a){l.innerHTML='';if(!a.length){l.innerHTML='<div class=empty>העתק משהו<br>והוא יופיע כאן</div>';return}
- a.forEach(t=>{const d=document.createElement('div');d.className='item';d.dir='auto';d.textContent=t;d.onclick=()=>{window.api&&api.clipCopy(t);d.classList.add('ok');setTimeout(()=>d.classList.remove('ok'),500)};l.appendChild(d)})}
+ a.forEach(t=>{const d=document.createElement('div');d.className='item nd';d.dir='auto';d.textContent=t;d.onclick=()=>{window.api&&api.clipCopy(t);d.classList.add('ok');setTimeout(()=>d.classList.remove('ok'),500)};l.appendChild(d)})}
 if(q.get('demo'))render(['https://github.com/rsms/inter','הפגישה הוזזה ל-15:30, תביא את הדוח','npm run dist','050-123-4567','תודה רבה, נדבר מחר','SELECT * FROM users WHERE id = 42;']);
 else{api.clipList().then(render);api.onClip(render);document.getElementById('cl').onclick=()=>api.clipClear()}
 </script>
