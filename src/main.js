@@ -177,7 +177,7 @@ ipcMain.handle('inv:open',async(_,sym)=>{sym=String(sym||'').trim().toUpperCase(
   else if(q.ex==='TLV'&&q.it!=='INDEX')url='https://www.google.com/finance/quote/'+encodeURIComponent(sym.replace(/\.TA$/,''))+':TLV';
   else if(q.it!=='INDEX'&&q.ex&&G_EX[q.ex])url='https://www.google.com/finance/quote/'+encodeURIComponent(sym)+':'+G_EX[q.ex]}catch{}
  if(!url)url='https://finance.yahoo.com/quote/'+encodeURIComponent(sym);
- shell.openExternal(url);return {ok:true,url}});
+ return openFinance(url)});
 ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
 ipcMain.handle('cal:status',()=>({connected:cloudData.connected||!!cloudData.calendar?.length}));
@@ -262,6 +262,14 @@ function openCloud(section){const url=ICLOUD[section]||ICLOUD.home;
  cloudWin.webContents.setWindowOpenHandler(({url})=>{if(allowedCloud(url)){cloudWin.loadURL(url);return {action:'deny'}}return {action:'deny'}});
  cloudWin.webContents.on('will-navigate',(event,url)=>{if(!allowedCloud(url))event.preventDefault()});cloudWin.on('closed',()=>cloudWin=null)}
  cloudWin.loadURL(url);cloudWin.show();cloudWin.focus();return {ok:true}}
+// Finance pages open in the app's own window too, same style as the iCloud one.
+let finWin=null;
+function allowedFinance(url){try{const u=new URL(url);return u.protocol==='https:'&&(/(^|\.)google\.com$/.test(u.hostname)||/(^|\.)yahoo\.com$/.test(u.hostname))}catch{return false}}
+function openFinance(url){if(!allowedFinance(url))return {ok:false};
+ if(!finWin){finWin=new BrowserWindow({width:1100,height:800,title:'מניות',autoHideMenuBar:true,webPreferences:{partition:'persist:finance',contextIsolation:true,nodeIntegration:false,sandbox:true}});
+ finWin.webContents.setWindowOpenHandler(({url})=>{if(allowedFinance(url))finWin.loadURL(url);return {action:'deny'}});
+ finWin.webContents.on('will-navigate',(event,url)=>{if(!allowedFinance(url))event.preventDefault()});finWin.on('closed',()=>finWin=null)}
+ finWin.loadURL(url);finWin.show();finWin.focus();return {ok:true,url}}
 ipcMain.handle('cloud:open',(_,section)=>openCloud(section));
 ipcMain.handle('cloud:status',async()=>{const cookies=await session.fromPartition('persist:icloud').cookies.get({domain:'.icloud.com'});return {savedSession:cookies.some(c=>c.name.toLowerCase().includes('auth'))}});
 ipcMain.handle('cloud:logout',async()=>{if(cloudWin)cloudWin.close();await session.fromPartition('persist:icloud').clearStorageData();return {ok:true}});
