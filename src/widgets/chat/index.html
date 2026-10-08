@@ -35,6 +35,7 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 #pillPrev{display:none;direction:rtl;padding:0 13px;font-size:12px;line-height:1.45;color:rgba(235,235,245,.92);overflow:hidden;max-height:0;opacity:0;white-space:pre-wrap;word-break:break-word;transition:max-height .35s cubic-bezier(.32,.72,.35,1),opacity .25s ease}
 #pill.preview{max-height:290px;min-width:250px;border-radius:20px}
 #pill.preview #pillPrev{display:block;opacity:1;padding-bottom:10px}
+#pill.preview #pillPrev{cursor:pointer}
 #pill.alert #pillHead{gap:6px;height:40px;padding:0 12px}
 #pill.alert .av{width:20px;height:20px;font-size:10.5px}
 #pill.alert .who{font-size:11.5px}
@@ -140,6 +141,7 @@ function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=documen
 async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
  pillHead.onclick=()=>{pillMode==='open'?closePill():openPill()};
+ pillPrev.onclick=()=>{if(pillMode==='alert')openPill()};
  if(api.onChatRead)api.onChatRead(()=>{if(pillMode!=='open'){clearTimeout(prevT);pillMode='mini';pill.classList.remove('alert','preview','bump');pillPrev.style.maxHeight='0';setUnread(false);alertPreview='';updatePillSt()}});
  pill.addEventListener('mouseleave',()=>{if(pillMode!=='open')api.chatPassthrough(true)});
  document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode!=='open')api.chatPassthrough(true)});
