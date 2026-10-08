@@ -44,8 +44,8 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.7
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.8
 
-          **GlassWidgets 0.4.7 - investments**
-          - Clicking a watchlist item in the investments widget now opens the real Google Finance page for that security (S&P 500, US stocks, TA-35 and Tel Aviv stocks)
-          - If no Google Finance page is found, it falls back to Yahoo Finance"
+          **GlassWidgets 0.4.8 - click fix**
+          - Fixed clicking watchlist items in the investments widget on Windows (a drag area swallowed the click)
+          - Same click fix applied to the calendar, chat and clipboard widgets"
