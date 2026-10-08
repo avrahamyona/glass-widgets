@@ -44,8 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.2
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.3
 
-          **GlassWidgets 0.4.2 - chat status fix**
-          - מחכה לתשובה now appears when it's actually your word that's last - after you write, the chat waits for the reply; once the reply arrives and you've read it, the pill goes back to clean
-          - Fixed the reversed status from 0.4.1"
+          **GlassWidgets 0.4.3 - clock timer**
+          - The clock widget now has a built-in timer: tap the timer button and it opens in place with a smooth animation, no separate widget needed
+          - Set hours, minutes and seconds, then start, pause or cancel; the clock face returns when you close it
+          - Small layout polish in the standalone timer widget"
