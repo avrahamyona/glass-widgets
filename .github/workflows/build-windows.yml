@@ -44,8 +44,8 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.18
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.19
 
-          **GlassWidgets 0.4.18**
-          - Clicking a stock row opens Google Finance inside the app window instead of the default browser
-          - Includes everything from 0.4.17"
+          **GlassWidgets 0.4.19**
+          - Fixed the island chat: replies are now fetched reliably and no longer get stuck after a long backlog (one-time catch-up of missed replies after updating)
+          - Includes everything from 0.4.18"
