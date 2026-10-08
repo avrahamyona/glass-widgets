@@ -121,7 +121,7 @@ async function fetchQuote(sym){
   const price=mt.regularMarketPrice;let prev=cl.length>=2?cl[cl.length-2]:mt.chartPreviousClose;
   if(cl.length>=2&&Math.abs(cl[cl.length-1]-price)>price*0.2)prev=cl[cl.length-1];
   let pct=prev?((price-prev)/prev)*100:(mt.regularMarketChangePercent||0);
-  return {sym,name:mt.shortName||mt.longName||sym,price,pct,cur:mt.currency||'',chart:cl.slice(-50)};
+  return {sym,name:mt.shortName||mt.longName||sym,price,pct,cur:mt.currency||'',ex:mt.exchangeName||'',it:mt.instrumentType||'',chart:cl.slice(-50)};
 }
 ipcMain.handle('inv:get',async e=>{
   const id=callerInstance(e),list=(id?instanceConfig(id).portfolio:getSet().portfolio)||[];
@@ -140,7 +140,16 @@ ipcMain.handle('inv:search',async(_,query)=>{
  }catch(e){return {items:[],error:stockFailure(e)}}});
 ipcMain.handle('inv:check',async(_,sym)=>{try{const q=await quote(String(sym).trim());return {ok:true,name:q.name}}catch(e){return {ok:false,error:stockFailure(e)}}});
 // ---- network
-ipcMain.handle('inv:open',(_,sym)=>{sym=String(sym||'').trim();if(!/^[A-Za-z0-9.^=-]{1,20}$/.test(sym))return {ok:false};shell.openExternal('https://finance.yahoo.com/quote/'+encodeURIComponent(sym));return {ok:true}});
+const G_EX={NMS:'NASDAQ',NGM:'NASDAQ',NCM:'NASDAQ',NYQ:'NYSE',ASE:'NYSEAMERICAN',PCX:'NYSEARCA'};
+const G_SYM={'^GSPC':'.INX:INDEXSP','^IXIC':'.IXIC:INDEXNASDAQ','^DJI':'.DJI:INDEXDJX','TA35.TA':'142:TLV'};
+ipcMain.handle('inv:open',async(_,sym)=>{sym=String(sym||'').trim().toUpperCase();if(!/^[A-Za-z0-9.^=-]{1,20}$/.test(sym))return {ok:false};
+ let url=null;
+ try{const q=await quote(sym);
+  if(G_SYM[sym])url='https://www.google.com/finance/quote/'+G_SYM[sym];
+  else if(q.ex==='TLV'&&q.it!=='INDEX')url='https://www.google.com/finance/quote/'+encodeURIComponent(sym.replace(/\.TA$/,''))+':TLV';
+  else if(q.it!=='INDEX'&&q.ex&&G_EX[q.ex])url='https://www.google.com/finance/quote/'+encodeURIComponent(sym)+':'+G_EX[q.ex]}catch{}
+ if(!url)url='https://finance.yahoo.com/quote/'+encodeURIComponent(sym);
+ shell.openExternal(url);return {ok:true,url}});
 ipcMain.handle('net:get',()=>net.get());
 // ---- calendar (iCloud CalDAV; app-specific password kept encrypted with the OS)
 ipcMain.handle('cal:status',()=>({connected:cloudData.connected||!!cloudData.calendar?.length}));
