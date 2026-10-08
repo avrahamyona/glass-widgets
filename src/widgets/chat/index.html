@@ -6,7 +6,8 @@
 .log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:2px}
 .bub{max-width:85%;padding:7px 11px;border-radius:15px;font-size:12.5px;line-height:1.35;white-space:pre-wrap;word-break:break-word}
 .bub.out{align-self:flex-start;background:#0a84ff;color:#fff;border-bottom-left-radius:5px}
-.bub.in{align-self:flex-end;background:rgba(128,128,128,.18);color:var(--text);border-bottom-right-radius:5px}
+.bub.in{align-self:flex-end;background:#e9e9eb;color:#1c1c1e;border-bottom-right-radius:5px}
+[data-theme=dark] .bub.in{background:#3a3a3c;color:#fff}
 .meta{font-size:9.5px;color:var(--text2);align-self:flex-start;margin-top:-4px}
 .bub{cursor:pointer}
 #toast{position:absolute;bottom:64px;left:50%;transform:translateX(-50%);background:rgba(20,20,22,.92);color:#fff;font-size:10.5px;padding:5px 12px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
@@ -31,6 +32,7 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 #pill.open #pillBody{max-height:270px;opacity:1;padding:0 14px 12px}
 #pill .log{max-height:200px}
 #pill .bub{font-size:12px}
+#pill .bub.in{background:#3a3a3c;color:#fff}
 #pill .composer textarea{background:rgba(255,255,255,.12);color:#fff}
 #pill .hint{color:rgba(235,235,245,.45)}
 #pill .meta{color:rgba(235,235,245,.45)}
