@@ -44,8 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.12
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.13
 
-          **GlassWidgets 0.4.12**
-          - Fix: no visible window jump when the timer opens or closes on the clock
-          - Includes everything from 0.4.11 (Large size, chat island improvements, instant theme changes)"
+          **GlassWidgets 0.4.13**
+          - Investments widget: the list now scrolls when there are many items
+          - Chat island: clicking a notification opens the chat
+          - Chat island: long replies are capped at 10 lines with scrolling, shown for 2.5 seconds, with smoother animations"
