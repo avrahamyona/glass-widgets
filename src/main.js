@@ -83,7 +83,7 @@ setInterval(()=>{const cur=os.cpus().map(c=>({...c.times}));let idle=0,tot=0;
   cur.forEach((c,i)=>{const p=prev[i];const t=Object.keys(c).reduce((a,k)=>a+c[k]-p[k],0);idle+=c.idle-p.idle;tot+=t});
   cpuPct=tot?Math.round(100*(1-idle/tot)):0;prev=cur},1000);
 ipcMain.handle('win:nudge',e=>{const w=BrowserWindow.fromWebContents(e.sender);if(!w||w.isDestroyed())return {ok:false};
- try{const rs=w.isResizable(),[width,height]=w.getSize();w.setResizable(true);w.setSize(width+1,height);setTimeout(()=>{if(!w.isDestroyed()){w.setSize(width,height);w.setResizable(rs)}},60)}catch{}
+ try{const rs=w.isResizable(),[width,height]=w.getSize();w.setResizable(true);w.setSize(width+1,height);w.setSize(width,height);w.setResizable(rs)}catch{}
  return {ok:true}});
 ipcMain.handle('sys:stats',()=>{
   const total=os.totalmem(),free=os.freemem();let disk=null;
