@@ -44,9 +44,8 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.6
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.7
 
-          **GlassWidgets 0.4.6 - fixes**
-          - Fixed the timer close button, which could miss clicks because of the animation
-          - Fixed the calendar showing a not-connected message by mistake in the first minutes after launch
-          - The weekday name on the clock is red again"
+          **GlassWidgets 0.4.7 - investments**
+          - Clicking a watchlist item in the investments widget now opens the real Google Finance page for that security (S&P 500, US stocks, TA-35 and Tel Aviv stocks)
+          - If no Google Finance page is found, it falls back to Yahoo Finance"
