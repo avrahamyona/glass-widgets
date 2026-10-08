@@ -21,13 +21,19 @@
 /* dynamic island mode */
 body.island{background:transparent}
 body.island .widget{position:static;inset:auto;background:transparent;backdrop-filter:none;box-shadow:none;padding:0;overflow:visible}
-#pill{position:absolute;top:0;left:50%;transform:translateX(-50%);min-width:150px;max-width:360px;border-radius:28px;background:rgba(12,12,14,.92);box-shadow:0 4px 18px rgba(0,0,0,.35),0 0 0 .5px rgba(255,255,255,.08) inset;color:#fff;overflow:hidden;transition:min-width .28s cubic-bezier(.32,.72,.35,1),max-height .32s cubic-bezier(.32,.72,.35,1),border-radius .3s;max-height:56px;cursor:pointer;backdrop-filter:blur(30px) saturate(160%)}
-#pillHead{display:flex;align-items:center;gap:8px;height:56px;padding:0 18px;white-space:nowrap}
-#pillHead .av{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;font-size:13px}
-#pillHead .who{font:600 13px var(--font)}
-#pillHead .st{font:400 10.5px var(--font);color:rgba(235,235,245,.55)}
-#pillHead .dot{width:8px;height:8px;border-radius:50%;background:#30d158;flex:none;box-shadow:0 0 6px rgba(48,209,88,.7)}
+#pill{position:absolute;top:0;left:50%;transform:translateX(-50%);min-width:92px;max-width:360px;border-radius:16px;background:rgba(12,12,14,.92);box-shadow:0 4px 18px rgba(0,0,0,.35),0 0 0 .5px rgba(255,255,255,.08) inset;color:#fff;overflow:hidden;transition:min-width .28s cubic-bezier(.32,.72,.35,1),max-height .32s cubic-bezier(.32,.72,.35,1),border-radius .3s;max-height:32px;cursor:pointer;backdrop-filter:blur(30px) saturate(160%)}
+#pillHead{display:flex;align-items:center;gap:5px;height:32px;padding:0 10px;white-space:nowrap;transition:height .28s cubic-bezier(.32,.72,.35,1),padding .28s cubic-bezier(.32,.72,.35,1),gap .28s}
+#pillHead .av{width:17px;height:17px;border-radius:50%;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;font-size:9px;transition:width .28s cubic-bezier(.32,.72,.35,1),height .28s cubic-bezier(.32,.72,.35,1),font-size .28s}
+#pillHead .who{font:600 10.5px var(--font);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
+#pillHead .st{font:400 8.5px var(--font);color:rgba(235,235,245,.55);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
+#pillHead .dot{width:5px;height:5px;border-radius:50%;background:#30d158;flex:none;box-shadow:0 0 6px rgba(48,209,88,.7);transition:width .28s,height .28s}
 #pillBody{display:block;overflow:hidden;max-height:0;opacity:0;padding:0 14px;transition:max-height .3s cubic-bezier(.32,.72,.35,1),opacity .22s ease,padding .3s cubic-bezier(.32,.72,.35,1)}
+#pill.alert,#pill.open{min-width:150px;max-height:56px;border-radius:28px}
+#pill.alert #pillHead,#pill.open #pillHead{gap:8px;height:56px;padding:0 18px}
+#pill.alert .av,#pill.open .av{width:26px;height:26px;font-size:13px}
+#pill.alert .who,#pill.open .who{font-size:13px}
+#pill.alert .st,#pill.open .st{font-size:10.5px}
+#pill.alert .dot,#pill.open .dot{width:8px;height:8px}
 #pill.open{min-width:340px;max-height:330px;border-radius:24px;cursor:default}
 #pill.open #pillBody{max-height:270px;opacity:1;padding:0 14px 12px}
 #pill .log{max-height:200px}
@@ -81,21 +87,21 @@ async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true
   await save();render(log)}
  else{H.messages.push({id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'});await save();render(log)}
  send.disabled=false;txt.disabled=false;txt.focus();setTimeout(poll,3000)}
-function newReply(){if(!island)return;if(pillMode==='closed'){setUnread(true);updatePillSt()}else render(pillBodyLog())}
+function newReply(){if(!island)return;if(pillMode!=='open'){pillMode='alert';pill.classList.add('alert');setUnread(true);updatePillSt()}else render(pillBodyLog())}
 /* island behavior */
-let pillMode='closed',unread=false;
+let pillMode='mini',unread=false;
 function setUnread(v){unread=v;dot.style.display=v?'':'none'}
-function openPill(mode){pillMode=mode;setUnread(false);pill.classList.add('open');render(pillBodyLog());api.chatPassthrough(false)}
-function closePill(){pillMode='closed';pill.classList.remove('open');api.chatPassthrough(true)}
+function openPill(){pillMode='open';setUnread(false);pill.classList.add('open');pill.classList.remove('alert');render(pillBodyLog());api.chatPassthrough(false)}
+function closePill(){pillMode='mini';pill.classList.remove('open','alert');api.chatPassthrough(true)}
 function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';const lg=document.createElement('div');lg.className='log';lg.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('button').id='send2';comp.querySelector('button').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(lg,comp)}return l}
 async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
- pillHead.onclick=()=>{pillMode==='closed'?openPill('input'):closePill()};
- pill.addEventListener('mouseleave',()=>{if(pillMode==='closed')api.chatPassthrough(true)});
- document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode==='closed')api.chatPassthrough(true)});
+ pillHead.onclick=()=>{pillMode==='open'?closePill():openPill()};
+ pill.addEventListener('mouseleave',()=>{if(pillMode!=='open')api.chatPassthrough(true)});
+ document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode!=='open')api.chatPassthrough(true)});
  pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
- document.addEventListener('mousedown',e=>{if(pillMode!=='closed'&&!pill.contains(e.target))closePill()});
- window.addEventListener('blur',()=>{if(pillMode!=='closed')closePill()});
+ document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
+ window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  window.__poll=poll;calcAwaiting();
