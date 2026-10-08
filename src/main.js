@@ -42,7 +42,7 @@ function open(id){
   const dim=dimensions(id),pos=visiblePosition(s.x??d.x,s.y??d.y,dim.width,dim.height);
   const w=new BrowserWindow({...dim,...pos,frame:false,transparent:true,hasShadow:false,
     resizable:false,skipTaskbar:true,show:false,
-    webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
+    webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
   w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)});
   w.once('ready-to-show',()=>{w.show();if(instanceConfig(id).onTop||instanceConfig(id).size==='island')w.setAlwaysOnTop(true,'screen-saver')});
   w.on('move',saveLayout);w.on('moved',saveLayout);w.on('close',saveLayout);
@@ -80,7 +80,8 @@ ipcMain.handle('cfg:get',e=>{const id=callerInstance(e),c=id?instanceConfig(id).
 const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
 const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,instanceConfigs:s.instanceConfigs||{},sizes:{...DEF.sizes,...(s.sizes||{})},styles:{...DEF.styles,...(s.styles||{})}}};
 function currentTheme(){const s=getSet();const city=s.city||CITY;const t=themeLib.effectiveTheme(s.theme,new Date(),city.lat,city.lon);return t==='system'?null:t}
-function wq(id){const s=getSet(),c=instanceConfig(id),q={size:c.size,id:instance(id).type,instance:id,tz:c.timezone};const t=currentTheme();if(t)q.theme=t;else if(s.theme!=='auto'&&s.theme!=='system')q.theme=s.theme;if(c.style)q.style=c.style;return q}
+const pendingTimerDemo={};
+function wq(id){const s=getSet(),c=instanceConfig(id),q={size:c.size,id:instance(id).type,instance:id,tz:c.timezone};const t=currentTheme();if(t)q.theme=t;else if(s.theme!=='auto'&&s.theme!=='system')q.theme=s.theme;if(c.style)q.style=c.style;if(pendingTimerDemo[id]){q.demo=pendingTimerDemo[id];delete pendingTimerDemo[id]}return q}
 ipcMain.handle('theme:get',()=>currentTheme()||'system');
 function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)})}
 let setWin=null;
@@ -97,6 +98,7 @@ ipcMain.handle('set:get',()=>{const en=rd('enabled.json',{});return {settings:ge
   autostart:app.getLoginItemSettings().openAtLogin,version:app.getVersion()}});
 ipcMain.handle('set:toggle',(_,id,on)=>{if(!instance(id))return;if(on&&!wins[id])open(id);else if(!on&&wins[id])toggle(id);return !!wins[id]});
 ipcMain.handle('instance:add',(_,type,source)=>{if(!WIDGETS[type])return {error:'סוג כרטיס לא מוכר'};const list=instances();if(list.length>=60)return {error:'אפשר עד 60 כרטיסים'};const id=type+'-'+crypto.randomUUID();list.push({id,type});wr('instances.json',list);const cur=getSet(),cfg=source&&instance(source)?.type===type?instanceConfig(source):instanceConfig(list.find(x=>x.type===type&&x.id!==id)?.id||type);cur.instanceConfigs[id]=JSON.parse(JSON.stringify(cfg));wr('settings.json',cur);const layout=rd('layout.json',{}),base=layout[source]||WIDGETS[type];layout[id]={x:(base.x||60)+28,y:(base.y||60)+28};wr('layout.json',layout);if(type==='notes')wr('notes-'+id+'.json',rd(source==='notes'||!source?'notes.json':'notes-'+source+'.json',{text:''}));open(id);return {ok:true,id}});
+ipcMain.handle('timer:start',(e,secs)=>{secs=Math.min(86400,Math.max(1,Math.round(+secs||0)));const list=instances();if(list.length>=60)return {error:'אפשר עד 60 כרטיסים'};const id='timer-'+crypto.randomUUID();list.push({id,type:'timer'});wr('instances.json',list);const cur=getSet(),cfg=instanceConfig(list.find(x=>x.type==='timer'&&x.id!==id)?.id||'timer');cur.instanceConfigs[id]=JSON.parse(JSON.stringify(cfg));wr('settings.json',cur);const layout=rd('layout.json',{}),src=callerInstance(e),base=layout[src]||WIDGETS.timer;layout[id]={x:(base.x||60)+28,y:(base.y||60)+28};wr('layout.json',layout);pendingTimerDemo[id]=secs;open(id);return {ok:true,id}});
 ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(wins[id])wins[id].close();wr('instances.json',instances().filter(x=>x.id!==id));for(const file of ['layout.json','enabled.json']){const val=rd(file,{});delete val[id];wr(file,val)}const s=getSet();delete s.instanceConfigs[id];delete s.sizes[id];delete s.styles[id];wr('settings.json',s);return {ok:true}});
 ipcMain.handle('instance:save',(_,id,patch)=>saveInstance(id,patch));
 ipcMain.handle('instance:self',e=>{const id=callerInstance(e);return id?{id,...instanceConfig(id)}:null});
