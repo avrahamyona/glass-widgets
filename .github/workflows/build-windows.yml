@@ -44,9 +44,9 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.16
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.17
 
-          **GlassWidgets 0.4.16**
-          - Chat: messages sent from one island now appear instantly in the chat windows on all other screens
-          - Fixes chat getting out of sync between screens
-          - Includes everything from 0.4.15"
+          **GlassWidgets 0.4.17**
+          - iCloud arrow button in Notes, Calendar and Reminders now opens inside the app window, never Chrome
+          - New button in Settings: Enter iCloud, opens iCloud home in the app window
+          - Includes everything from 0.4.16"
