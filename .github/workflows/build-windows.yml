@@ -44,10 +44,11 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.10
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.11
 
-          **GlassWidgets 0.4.10**
-          - Chat island on every connected screen, with a setting to turn it off
-          - Soft sound and a reply preview in the pill when a message arrives
-          - Clock and timer: window now resizes correctly when opening and closing the timer
-          - Investments widget: list rows are clickable again"
+          **GlassWidgets 0.4.11**
+          - New Large size for every widget, in settings
+          - Chat island: bigger reply preview that collapses on its own, clearer alerts, and the sound plays reliably
+          - Reading a reply on one screen clears the alert on the other screens
+          - Theme changes apply to open widgets right away
+          - Clock: fixes for the timer and drag areas"
