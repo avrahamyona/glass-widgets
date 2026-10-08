@@ -44,8 +44,10 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.8
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.10
 
-          **GlassWidgets 0.4.8 - click fix**
-          - Fixed clicking watchlist items in the investments widget on Windows (a drag area swallowed the click)
-          - Same click fix applied to the calendar, chat and clipboard widgets"
+          **GlassWidgets 0.4.10**
+          - Chat island on every connected screen, with a setting to turn it off
+          - Soft sound and a reply preview in the pill when a message arrives
+          - Clock and timer: window now resizes correctly when opening and closing the timer
+          - Investments widget: list rows are clickable again"

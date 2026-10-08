@@ -42,22 +42,49 @@ function open(id){
   const dim=dimensions(id),pos=visiblePosition(s.x??d.x,s.y??d.y,dim.width,dim.height);
   const w=new BrowserWindow({...dim,...pos,frame:false,transparent:true,hasShadow:false,
     resizable:false,skipTaskbar:true,show:false,
-    webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false}});
+    webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false,autoplayPolicy:'no-user-gesture-required'}});
   w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)});
   w.once('ready-to-show',()=>{w.show();if(instanceConfig(id).onTop||instanceConfig(id).size==='island')w.setAlwaysOnTop(true,'screen-saver')});
   w.on('move',saveLayout);w.on('moved',saveLayout);w.on('close',saveLayout);
   w.on('closed',()=>{delete wins[id]});
   wins[id]=w;
   const en=rd('enabled.json',{});en[id]=true;wr('enabled.json',en);
+  if(it.type==='chat')reconcileChatScreens();
 }
 function toggle(id){
-  if(wins[id]){const en=rd('enabled.json',{});en[id]=false;wr('enabled.json',en);wins[id].close()}else open(id);
+  if(wins[id]){const en=rd('enabled.json',{});en[id]=false;wr('enabled.json',en);wins[id].close();reconcileChatScreens()}else open(id);
 }
+// chat island ("חיים שלי") on every connected screen: companions are extra windows on the same chat instance
+const chatCompanions=new Map();let reconcileT=null;
+function chatIslandInstance(){const it=instances().find(x=>x.type==='chat');return it&&instanceConfig(it.id).size==='island'?it.id:null}
+function islandBounds(wa){return {x:Math.round(wa.x+(wa.width-380)/2),y:wa.y+10,width:380,height:340}}
+function reconcileChatScreens(){clearTimeout(reconcileT);reconcileT=setTimeout(()=>{
+ const id=chatIslandInstance(),multi=getSet().chatMultiScreen!==false;
+ const main=id&&wins[id]&&!wins[id].isDestroyed()?wins[id]:null;
+ const closeAll=()=>{for(const w of chatCompanions.values()){if(!w.isDestroyed())w.close()}chatCompanions.clear()};
+ if(!main||!multi){closeAll();if(main){const b=islandBounds(screen.getPrimaryDisplay().workArea),c=main.getBounds();if(c.x!==b.x||c.y!==b.y)main.setBounds(b)}return}
+ const primary=screen.getPrimaryDisplay(),b=islandBounds(primary.workArea),c=main.getBounds();if(c.x!==b.x||c.y!==b.y)main.setBounds(b);
+ const keep=new Set();
+ for(const d of screen.getAllDisplays()){if(d.id===primary.id)continue;keep.add(d.id);const pb=islandBounds(d.workArea);let w=chatCompanions.get(d.id);
+  if(w&&!w.isDestroyed()){const cb=w.getBounds();if(cb.x!==pb.x||cb.y!==pb.y)w.setBounds(pb);continue}
+  if(w)chatCompanions.delete(d.id);
+  w=new BrowserWindow({...pb,frame:false,transparent:true,hasShadow:false,resizable:false,skipTaskbar:true,show:false,
+   webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false,autoplayPolicy:'no-user-gesture-required'}});
+  w.loadFile(path.join(__dirname,'widgets','chat','index.html'),{query:{...wq(id),companion:1}});
+  w.once('ready-to-show',()=>{if(!w.isDestroyed()){w.show();w.setAlwaysOnTop(true,'screen-saver')}});
+  w.on('closed',()=>{for(const [k,v] of chatCompanions)if(v===w)chatCompanions.delete(k)});
+  chatCompanions.set(d.id,w)}
+ for(const [k,w] of [...chatCompanions]){if(!keep.has(k)){if(!w.isDestroyed())w.close();chatCompanions.delete(k)}}
+},150)}
+
 // CPU usage from os.cpus deltas
 let prev=os.cpus().map(c=>({...c.times}));let cpuPct=0;
 setInterval(()=>{const cur=os.cpus().map(c=>({...c.times}));let idle=0,tot=0;
   cur.forEach((c,i)=>{const p=prev[i];const t=Object.keys(c).reduce((a,k)=>a+c[k]-p[k],0);idle+=c.idle-p.idle;tot+=t});
   cpuPct=tot?Math.round(100*(1-idle/tot)):0;prev=cur},1000);
+ipcMain.handle('win:nudge',e=>{const w=BrowserWindow.fromWebContents(e.sender);if(!w||w.isDestroyed())return {ok:false};
+ try{const rs=w.isResizable(),[width,height]=w.getSize();w.setResizable(true);w.setSize(width+1,height);setTimeout(()=>{if(!w.isDestroyed()){w.setSize(width,height);w.setResizable(rs)}},60)}catch{}
+ return {ok:true}});
 ipcMain.handle('sys:stats',()=>{
   const total=os.totalmem(),free=os.freemem();let disk=null;
   try{const s=fs.statfsSync(process.platform==='win32'?(process.env.SystemDrive||'C:')+'\\':'/');
@@ -77,7 +104,7 @@ ipcMain.handle('cfg:get',e=>{const id=callerInstance(e),c=id?instanceConfig(id).
 
 
 // ---- settings (theme, per-widget style, general)
-const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
+const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,chatMultiScreen:true,chatSound:true,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
 const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,instanceConfigs:s.instanceConfigs||{},sizes:{...DEF.sizes,...(s.sizes||{})},styles:{...DEF.styles,...(s.styles||{})}}};
 function currentTheme(){const s=getSet();const city=s.city||CITY;const t=themeLib.effectiveTheme(s.theme,new Date(),city.lat,city.lon);return t==='system'?null:t}
 const pendingTimerDemo={};
@@ -99,16 +126,17 @@ ipcMain.handle('set:get',()=>{const en=rd('enabled.json',{});return {settings:ge
 ipcMain.handle('set:toggle',(_,id,on)=>{if(!instance(id))return;if(on&&!wins[id])open(id);else if(!on&&wins[id])toggle(id);return !!wins[id]});
 ipcMain.handle('instance:add',(_,type,source)=>{if(!WIDGETS[type])return {error:'סוג כרטיס לא מוכר'};const list=instances();if(list.length>=60)return {error:'אפשר עד 60 כרטיסים'};const id=type+'-'+crypto.randomUUID();list.push({id,type});wr('instances.json',list);const cur=getSet(),cfg=source&&instance(source)?.type===type?instanceConfig(source):instanceConfig(list.find(x=>x.type===type&&x.id!==id)?.id||type);cur.instanceConfigs[id]=JSON.parse(JSON.stringify(cfg));wr('settings.json',cur);const layout=rd('layout.json',{}),base=layout[source]||WIDGETS[type];layout[id]={x:(base.x||60)+28,y:(base.y||60)+28};wr('layout.json',layout);if(type==='notes')wr('notes-'+id+'.json',rd(source==='notes'||!source?'notes.json':'notes-'+source+'.json',{text:''}));open(id);return {ok:true,id}});
 ipcMain.handle('timer:start',(e,secs)=>{secs=Math.min(86400,Math.max(1,Math.round(+secs||0)));const list=instances();if(list.length>=60)return {error:'אפשר עד 60 כרטיסים'};const id='timer-'+crypto.randomUUID();list.push({id,type:'timer'});wr('instances.json',list);const cur=getSet(),cfg=instanceConfig(list.find(x=>x.type==='timer'&&x.id!==id)?.id||'timer');cur.instanceConfigs[id]=JSON.parse(JSON.stringify(cfg));wr('settings.json',cur);const layout=rd('layout.json',{}),src=callerInstance(e),base=layout[src]||WIDGETS.timer;layout[id]={x:(base.x||60)+28,y:(base.y||60)+28};wr('layout.json',layout);pendingTimerDemo[id]=secs;open(id);return {ok:true,id}});
-ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(wins[id])wins[id].close();wr('instances.json',instances().filter(x=>x.id!==id));for(const file of ['layout.json','enabled.json']){const val=rd(file,{});delete val[id];wr(file,val)}const s=getSet();delete s.instanceConfigs[id];delete s.sizes[id];delete s.styles[id];wr('settings.json',s);return {ok:true}});
+ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(wins[id])wins[id].close();wr('instances.json',instances().filter(x=>x.id!==id));for(const file of ['layout.json','enabled.json']){const val=rd(file,{});delete val[id];wr(file,val)}const s=getSet();delete s.instanceConfigs[id];delete s.sizes[id];delete s.styles[id];wr('settings.json',s);reconcileChatScreens();return {ok:true}});
 ipcMain.handle('instance:save',(_,id,patch)=>saveInstance(id,patch));
 ipcMain.handle('instance:self',e=>{const id=callerInstance(e);return id?{id,...instanceConfig(id)}:null});
 ipcMain.handle('instance:self-save',(e,patch)=>{const id=callerInstance(e);return id?saveInstance(id,patch):{ok:false}});
-function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size)||(patch.size==='island'&&instance(id)?.type==='chat'))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined||safe.size!==undefined)wins[id].setAlwaysOnTop(!!(instanceConfig(id).onTop||instanceConfig(id).size==='island'),'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}return {ok:true,settings:getSet()}}
+function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle'].includes(patch.size)||(patch.size==='island'&&instance(id)?.type==='chat'))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined||safe.size!==undefined)wins[id].setAlwaysOnTop(!!(instanceConfig(id).onTop||instanceConfig(id).size==='island'),'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}if(instance(id)?.type==='chat')reconcileChatScreens();return {ok:true,settings:getSet()}}
 ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,instanceConfigs:cur.instanceConfigs,sizes:{...cur.sizes,...(patch.sizes||{})},styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
   const themeChanged=next.theme!==cur.theme;
   for(const id of Object.keys(wins)){if(patch.sizes&&patch.sizes[id]){next.instanceConfigs[id]={...next.instanceConfigs[id],size:patch.sizes[id]};wr('settings.json',next);const dim=dimensions(id);wins[id].setResizable(true);wins[id].setMinimumSize(0,0);wins[id].setMaximumSize(0,0);wins[id].setBounds({...wins[id].getBounds(),width:dim.width,height:dim.height});wins[id].setResizable(false);const [x,y]=wins[id].getPosition();const pos=visiblePosition(x,y,dim.width,dim.height);wins[id].setPosition(pos.x,pos.y);reload(id);wins[id].show();wins[id].moveTop()}if(patch.styles?.[id]!==undefined){next.instanceConfigs[id]={...next.instanceConfigs[id],style:patch.styles[id]};wr('settings.json',next)}if(themeChanged||patch.styles?.[id]!==undefined||(instance(id).type==='weather'&&patch.city!==undefined)||(instance(id).type==='invest'&&patch.portfolio!==undefined))reload(id)}
   if(patch.onTop!==undefined)Object.entries(wins).forEach(([id,w])=>w.setAlwaysOnTop(!!instanceConfig(id).onTop,'screen-saver'));
   if(patch.autostart!==undefined)app.setLoginItemSettings({openAtLogin:!!patch.autostart});
+  if(patch.chatMultiScreen!==undefined)reconcileChatScreens();
   return next});
 // ---- investments (Yahoo chart endpoint, no key)
 const stockQuoteCache=new Map();
@@ -215,7 +243,7 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
 ipcMain.handle('chat:poll',async(_,after)=>{try{const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u);if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};const messages=h.messages.slice(-200).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));wr('chat-'+id+'.json',{messages,seenHint:!!h.seenHint,lastReceived:+h.lastReceived||0});return {ok:true}});
-ipcMain.handle('chat:passthrough',(e,on)=>{const id=callerInstance(e);if(id&&wins[id]){wins[id].setIgnoreMouseEvents(!!on,{forward:true});return {ok:true}}return {ok:false}});
+ipcMain.handle('chat:passthrough',(e,on)=>{const id=callerInstance(e);const ws=[];if(id&&wins[id])ws.push(wins[id]);for(const w of chatCompanions.values())ws.push(w);if(!ws.length)return {ok:false};ws.forEach(w=>{if(!w.isDestroyed())w.setIgnoreMouseEvents(!!on,{forward:true})});return {ok:true}});
 ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(text.length<5)return {ok:false,error:'כתוב לפחות כמה מילים (5 תווים ומעלה)'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};
  try{const r=await fetch(FEEDBACK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app:'glasswidgets',version:app.getVersion(),text,at:Date.now()}),signal:AbortSignal.timeout(15000)});
   if(!r.ok)return {ok:false,error:'השרת לא קיבל את הדיווח ('+r.status+'). נסה שוב מאוחר יותר'};return {ok:true}}
@@ -291,6 +319,7 @@ const lock=app.requestSingleInstanceLock();if(!lock)app.quit();
 app.on('second-instance',()=>openSettings());
 app.whenReady().then(()=>{
   if(!lock)return;
+  screen.on('display-added',reconcileChatScreens);screen.on('display-removed',reconcileChatScreens);screen.on('display-metrics-changed',reconcileChatScreens);
   const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};resumeCloudSession();
   startMedia();startScan();const batTok=startBatteryServer();
   clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);

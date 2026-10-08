@@ -8,7 +8,7 @@ svg#c{width:100%;height:100%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.18))}
 #c,#dg,.tlink{transition:opacity .18s ease,transform .36s cubic-bezier(.3,1.4,.45,1)}
 .tmr-on #c,.tmr-on #dg,.tmr-on .tlink{opacity:0;transform:scale(.8);pointer-events:none}
 .tmr-on.dg-on #dg{transform:scale(.8)}
-.tlink{position:absolute;left:8px;bottom:7px;border:0;border-radius:50%;width:22px;height:22px;background:rgba(128,128,128,.12);font:400 13px var(--font);color:var(--text2);cursor:pointer;z-index:5;-webkit-app-region:no-drag}
+.tlink{position:absolute;left:8px;bottom:7px;border:0;border-radius:50%;width:22px;height:22px;background:rgba(128,128,128,.12);font:400 13px var(--font);color:var(--text2);cursor:pointer;z-index:5;-webkit-app-region:no-drag;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;filter:grayscale(1)}
 .dd{font-size:12px;font-weight:600;color:#ff3b30;direction:rtl}.tt{font-size:50px;font-weight:300;letter-spacing:-2px;line-height:1.05;font-variant-numeric:tabular-nums}.ds{font-size:11px;color:var(--text2);font-weight:500;margin-top:3px;direction:rtl}
 #tmr{position:absolute;inset:0;-webkit-app-region:no-drag;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px;opacity:0;visibility:hidden;transform:scale(.8);transition:opacity .18s ease,transform .36s cubic-bezier(.3,1.4,.45,1),visibility 0s linear .36s;z-index:6}
 .tmr-on #tmr{opacity:1;visibility:visible;transform:scale(1);transition:opacity .22s ease .05s,transform .4s cubic-bezier(.3,1.4,.45,1),visibility 0s}
@@ -51,8 +51,8 @@ let lastRender=0;
 if(!t)setInterval(()=>{if(Date.now()-lastRender>3000){try{set(inTZ(q.get('tz')||'Asia/Jerusalem'));lastRender=Date.now()}catch(e){}}},3000);
 </script>
 <script>
-function openTmr(){document.body.classList.add('tmr-on')}
-function closeTmr(){document.body.classList.remove('tmr-on')}
+function openTmr(){document.body.classList.add('tmr-on');requestAnimationFrame(()=>window.api&&api.winNudge&&api.winNudge())}
+function closeTmr(){document.body.classList.remove('tmr-on');setTimeout(()=>window.api&&api.winNudge&&api.winNudge(),450)}
 if(window.api)timerBtn.onclick=openTmr;else timerBtn.style.display='none';
 xbtn.onclick=closeTmr;
 for(const el of [h,m,s])el.addEventListener('input',()=>{el.value=el.value.replace(/\D/g,'').slice(0,2)});
