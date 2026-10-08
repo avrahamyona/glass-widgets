@@ -21,6 +21,18 @@ svg#c{width:100%;height:100%;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.18))}
 .tcol input{width:44px;height:38px;border:0;border-radius:10px;background:rgba(128,128,128,.12);color:var(--text);font:300 22px var(--font);text-align:center;outline:none;font-variant-numeric:tabular-nums}
 .tcol label{font-size:10px;color:var(--text2)}
 .go{border:0;border-radius:12px;padding:8px 26px;background:var(--accent);color:#fff;font:600 14px var(--font);cursor:pointer}
+[data-size=large] .widget{padding:24px}
+[data-size=large] .dd{font-size:17px}
+[data-size=large] .tt{font-size:96px;letter-spacing:-4px}
+[data-size=large] .ds{font-size:15px;margin-top:5px}
+[data-size=large] #tmr{padding:24px}
+[data-size=large] .ttl{font-size:15px;margin:10px 0}
+[data-size=large] .tcol input{width:66px;height:58px;font-size:32px;border-radius:14px}
+[data-size=large] .tcol label{font-size:12px}
+[data-size=large] .times{gap:9px;margin-bottom:16px}
+[data-size=large] .go{padding:11px 36px;font-size:16px;border-radius:14px}
+[data-size=large] .xbtn,[data-size=large] .tbtn,[data-size=large] .tlink{width:28px;height:28px;font-size:16px}
+[data-size=large] .xbtn{left:12px;top:11px}[data-size=large] .tbtn{right:12px;top:11px;width:30px;height:30px}[data-size=large] .tlink{left:12px;bottom:11px}
 </style>
 <body><div class=widget><button class="tlink nd" id=timerBtn title="פתח טיימר">⏱</button><svg id=c></svg><div id=dg style="display:none"><div class=dd id=dd></div><div class=tt id=tt></div><div class=ds id=ds></div></div>
 <div id=tmr>
@@ -51,8 +63,8 @@ let lastRender=0;
 if(!t)setInterval(()=>{if(Date.now()-lastRender>3000){try{set(inTZ(q.get('tz')||'Asia/Jerusalem'));lastRender=Date.now()}catch(e){}}},3000);
 </script>
 <script>
-function openTmr(){document.body.classList.add('tmr-on');requestAnimationFrame(()=>window.api&&api.winNudge&&api.winNudge())}
-function closeTmr(){document.body.classList.remove('tmr-on');setTimeout(()=>window.api&&api.winNudge&&api.winNudge(),450)}
+function openTmr(){document.body.classList.add('tmr-on');requestAnimationFrame(()=>{window.api&&api.winNudge&&api.winNudge();window.gwDragRefresh&&gwDragRefresh()})}
+function closeTmr(){document.body.classList.remove('tmr-on');setTimeout(()=>{window.api&&api.winNudge&&api.winNudge();window.gwDragRefresh&&gwDragRefresh()},450)}
 if(window.api)timerBtn.onclick=openTmr;else timerBtn.style.display='none';
 xbtn.onclick=closeTmr;
 for(const el of [h,m,s])el.addEventListener('input',()=>{el.value=el.value.replace(/\D/g,'').slice(0,2)});

@@ -13,16 +13,43 @@
 .form button{border:0;border-radius:8px;background:#0a84ff;color:#fff;font:600 12px var(--font);padding:7px;cursor:pointer}
 .err{user-select:text;word-break:break-word;direction:rtl;text-align:right;max-height:90px;overflow:auto;color:#ff453a;font-size:10.5px;font-weight:500}
 .hint{font-size:10px;color:var(--text2);line-height:1.3}
+.day-h{font-size:12px;font-weight:600;color:var(--text2);margin:9px 1px 5px}
+.day-h.today{color:#ff3b30;margin-top:0}
+.ev2{display:flex;align-items:center;gap:10px;border-radius:12px;padding:9px 12px;margin-bottom:6px}
+.ev2 i{width:4px;align-self:stretch;border-radius:2px;flex:none}
+.ev2 .n2{flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ev2 .t2{direction:ltr;font-size:12px;font-weight:500;color:var(--text2);font-variant-numeric:tabular-nums;text-align:left;line-height:1.35;flex:none}
+[data-size=large] .widget{padding:16px 18px}
+[data-size=large] .dow{font-size:13px}
+[data-size=large] .day{font-size:44px}
 </style>
 <body><div class=widget><div class=dow id=dow></div><div class=day id=day></div><div id=body class=nd></div></div>
 <script>
 const q=new URLSearchParams(location.search);
 document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
 const now=new Date(q.get('demo')?'2026-10-06T10:07:00+03:00':Date.now());
+const LARGE=q.get('size')==='large';
+const DOWD=d=>d.toLocaleDateString('he-IL',{weekday:'long',day:'numeric',month:'short',timeZone:'Asia/Jerusalem'});
 dow.textContent=now.toLocaleDateString('he-IL',{weekday:'long',timeZone:'Asia/Jerusalem'});day.textContent=now.toLocaleDateString('he-IL',{day:'numeric',timeZone:'Asia/Jerusalem'});
+if(q.get('size')==='large'){dow.textContent=DOWD(now);day.style.display='none'}
 const COL=['#ff3b30','#af52de','#0a84ff','#34c759','#ff9500'];
 const tm=t=>new Date(t).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Jerusalem'});
+function evRow(e,i){const c=COL[i%5];const d=document.createElement('div');d.className='ev2';d.style.background=c+'1f';
+ d.innerHTML=`<i style="background:${c}"></i><div class="n2" dir="auto"></div><div class="t2">${e.allDay?'יום שלם':'<bdi>'+tm(e.start)+'<br>'+tm(e.end||e.start)+'</bdi>'}</div>`;
+ d.querySelector('.n2').textContent=e.title||'(ללא כותרת)';return d}
+function showAgenda(evs){
+  const dateKey=d=>new Date(d).toLocaleDateString('en-CA',{timeZone:'Asia/Jerusalem'});body.innerHTML='';
+  const days=[];for(let i=0;i<8;i++){const d=new Date(+now+i*864e5);days.push({d,key:dateKey(d)})}
+  let shown=0;const MAXR=9;
+  for(let i=0;i<days.length&&shown<MAXR;i++){
+   const t=evs.filter(e=>dateKey(e.start)<=days[i].key&&dateKey((e.end||e.start)-(e.allDay?1:0))>=days[i].key).filter(e=>e.allDay||i>0||(e.end||e.start)>=+now)
+    .sort((a,b)=>(a.allDay?0:1)-(b.allDay?0:1)||(+a.start)-(+b.start));
+   if(!t.length)continue;
+   if(i>0){const h=document.createElement('div');h.className='day-h';h.textContent=DOWD(days[i].d);body.appendChild(h)}
+   t.slice(0,Math.min(3,MAXR-shown)).forEach((e,j)=>{body.appendChild(evRow(e,j));shown++})}
+  if(!shown)body.innerHTML='<div class=none>אין אירועים קרובים</div>'}
 function showEvents(evs){
+  if(LARGE)return showAgenda(evs);
   const dateKey=d=>new Date(d).toLocaleDateString('en-CA',{timeZone:'Asia/Jerusalem'});const key=dateKey(now);
   const t=evs.filter(e=>dateKey(e.start)<=key&&dateKey((e.end||e.start)-(e.allDay?1:0))>=key).filter(e=>e.allDay||(e.end||e.start)>=+now);
   body.innerHTML='';if(!t.length){body.innerHTML='<div class=none>אין עוד אירועים היום</div>';return}
@@ -35,7 +62,10 @@ async function load(){const s=await api.calStatus();if(!s.connected){showForm();
   if(r.manual){const h=document.createElement('div');h.className='hint nd';h.textContent='עדכון ידני דרך הגדרות iCloud';h.onclick=()=>api.settingsOpen();body.append(h)}if(r.error&&!r.authError){const h=document.createElement('div');h.className='err';h.textContent=r.error;body.append(h)}
   if(r.authError){const a=document.createElement('div');a.className='err nd';a.style.cursor='pointer';a.textContent=(r.error||'הסיסמה נדחתה')+' · לחץ להגדרות';a.onclick=()=>{api.settingsOpen()};body.appendChild(a)};return true}
 if(q.get('demo')==='form')showForm();
-else if(q.get('demo'))showEvents([{title:'Dentist, Dr Levi',start:+new Date('2026-10-06T13:00:00+03:00'),end:+new Date('2026-10-06T14:00:00+03:00')},{title:'Call with Dana',start:+new Date('2026-10-06T16:30:00+03:00'),end:+new Date('2026-10-06T17:00:00+03:00')},{title:'Dinner',start:+new Date('2026-10-06T20:00:00+03:00'),end:+new Date('2026-10-06T21:30:00+03:00')}]);
+else if(q.get('demo'))showEvents([{title:'Dentist, Dr Levi',start:+new Date('2026-10-06T13:00:00+03:00'),end:+new Date('2026-10-06T14:00:00+03:00')},{title:'Call with Dana',start:+new Date('2026-10-06T16:30:00+03:00'),end:+new Date('2026-10-06T17:00:00+03:00')},{title:'Dinner',start:+new Date('2026-10-06T20:00:00+03:00'),end:+new Date('2026-10-06T21:30:00+03:00')},
+ {title:'עבודה עם ידידיה',start:+new Date('2026-10-06T20:00:00+03:00'),end:+new Date('2026-10-06T21:00:00+03:00')},
+ {title:'בוחן בעברית',start:+new Date('2026-10-11T08:00:00+03:00'),allDay:true},{title:'סYNC צוות',start:+new Date('2026-10-11T12:30:00+03:00'),end:+new Date('2026-10-11T13:15:00+03:00')},
+ {title:'בוחן באנגלית',start:+new Date('2026-10-13T08:00:00+03:00'),allDay:true},{title:'רופא שיניים',start:+new Date('2026-10-13T17:00:00+03:00'),end:+new Date('2026-10-13T17:45:00+03:00')}]);
 else{(async()=>{if(await load()){setInterval(load,10*60e3);return}
  const f=setInterval(async()=>{if(await load()){clearInterval(f);setInterval(load,10*60e3)}},5000)})()}
 </script>
