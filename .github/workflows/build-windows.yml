@@ -44,8 +44,8 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.19
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.20
 
-          **GlassWidgets 0.4.19**
-          - Fixed the island chat: replies are now fetched reliably and no longer get stuck after a long backlog (one-time catch-up of missed replies after updating)
-          - Includes everything from 0.4.18"
+          **GlassWidgets 0.4.20**
+          - Chat and the island now show the time each message was sent, and the time no longer overlaps the message bubble
+          - Includes everything from 0.4.19"
