@@ -83,7 +83,9 @@ document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-col
 const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
-let pollTimer=null;
+let pollTimer=null,fastUntil=0,polling=false;
+function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(async()=>{await poll();schedulePoll()},Date.now()<fastUntil?4000:25000)}
+function armFastPoll(){fastUntil=Date.now()+5*60e3;schedulePoll()}
 function lastMsg(){return H.messages[H.messages.length-1]}
 function awaitingHis(){const l=lastMsg();return !!l&&l.dir==='out'}
 function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!=='failed'}
@@ -95,23 +97,23 @@ function bubble(m){const d=document.createElement('div');d.className='bub nd '+m
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
-async function poll(){if(!window.api)return;const r=await api.chatPoll(String(Math.max(0,(H.lastReceived||0)-1)));
+async function poll(){if(!window.api||polling)return;polling=true;try{const r=await api.chatPoll(String(Math.max(0,(H.lastReceived||0)-1)));
  if(!r.ok){if(island)updatePillSt(true);return}
  updatePillSt();
  let changed=false;for(const m of r.messages||[]){if(H.messages.some(x=>x.id===m.id))continue;
   H.messages.push({id:m.id,dir:'in',text:m.text,at:m.at,received_at:m.received_at,status:'sent',in_reply_to:m.in_reply_to});
   if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);changed=true}
- if(changed){await save();render(log);if(island)newReply(H.messages[H.messages.length-1]);if(api.chatNewSend)api.chatNewSend()}
- if((r.messages||[]).length>=50)setTimeout(poll,800)}
+ if(changed){fastUntil=0;await save();render(log);if(island)newReply(H.messages[H.messages.length-1]);if(api.chatNewSend)api.chatNewSend()}
+ if((r.messages||[]).length>=50)setTimeout(poll,800)}finally{polling=false}}
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
 async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
  const r=await api.chatSend(t);
  if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'sent'};H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);txt.value='';grow(txt);
   if(!H.seenHint){H.seenHint=true;hint.style.display=''}
-  await save();render(log)}
+  await save();render(log);armFastPoll()}
  else{const m={id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'};H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log)}
- send.disabled=false;txt.disabled=false;txt.focus();setTimeout(poll,3000)}
+ send.disabled=false;txt.disabled=false;txt.focus()}
 let alertPreview='';let soundOn=true;let actx=null;
 async function chime(){if(q.get('companion')||!soundOn)return;try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();
  if(actx.state==='suspended'&&actx.resume){await actx.resume().catch(()=>{});if(actx.state==='suspended'){setTimeout(chime,300);return}}
@@ -122,8 +124,8 @@ let prevT=null;
 function collapseAlert(){if(pillMode!=='alert')return;pillMode='mini';pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.remove('alert','preview','bump');alertPreview='';updatePillSt();
  setTimeout(()=>{if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()},400)}
 function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());return}
- if(m)alertPreview=m.text;setUnread(true);updatePillSt();chime();
- pillMode='alert';pill.classList.add('alert','bump');setTimeout(()=>pill.classList.remove('bump'),700);
+ if(m)alertPreview=m.text;setUnread(true);chime();
+ pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
  pillPrev.textContent=alertPreview;pill.classList.add('preview');
  requestAnimationFrame(()=>{const lh=parseFloat(getComputedStyle(pillPrev).lineHeight)||17.4;const cap=Math.round(lh*10)+8;pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,cap)+'px';pillPrev.classList.toggle('more',pillPrev.scrollHeight-6>cap)});
  if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();
@@ -156,7 +158,8 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatNew)api.onChatNew(()=>{poll()});
- if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
- window.__poll=poll;
- render(island?pillBodyLog():log);shotInit();await poll();pollTimer=setInterval(poll,25000)})();
+ if(api.onChatSent)api.onChatSent(m=>{if(m&&m.id&&!H.messages.some(x=>x.id===m.id)){H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()}armFastPoll()});
+ window.addEventListener('focus',()=>poll());document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
+ window.__poll=poll;window.__armFast=armFastPoll;
+ render(island?pillBodyLog():log);shotInit();await poll();schedulePoll()})();
 </script>

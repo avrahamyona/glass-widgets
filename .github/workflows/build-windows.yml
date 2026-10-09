@@ -44,8 +44,11 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.20
+          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.21
 
-          **GlassWidgets 0.4.20**
-          - Chat and the island now show the time each message was sent, and the time no longer overlaps the message bubble
-          - Includes everything from 0.4.19"
+          **GlassWidgets 0.4.21**
+          - Faster chat replies in the island: checks every 4 seconds while waiting for a reply and every 25 seconds at rest
+          - Chat requests time out after 20 seconds instead of hanging
+          - Checks for new replies right away when you return to the window
+          - Fixed overlapping reply checks and the order of the new-reply alert
+          - Includes everything from 0.4.20"
