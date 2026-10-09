@@ -8,7 +8,8 @@
 .bub.out{align-self:flex-start;background:#0a84ff;color:#fff;border-bottom-left-radius:5px}
 .bub.in{align-self:flex-end;background:#e9e9eb;color:#1c1c1e;border-bottom-right-radius:5px}
 [data-theme=dark] .bub.in{background:#3a3a3c;color:#fff}
-.meta{font-size:9.5px;color:var(--text2);align-self:flex-start;margin-top:-4px}
+.meta{font-size:9.5px;color:var(--text2);align-self:flex-start;margin-top:1px}
+.meta.in{align-self:flex-end}
 .bub{cursor:pointer}
 #toast{position:absolute;bottom:64px;left:50%;transform:translateX(-50%);background:rgba(20,20,22,.92);color:#fff;font-size:10.5px;padding:5px 12px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
 .meta.fail{color:#ff453a}
@@ -89,7 +90,8 @@ function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!==
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function statusText(m){if(m.dir!=='out')return'';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
-function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=statusText(m);if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'');mt.textContent=t;wrap.append(mt)}return wrap}
+function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
+function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
