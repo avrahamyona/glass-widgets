@@ -222,7 +222,7 @@ const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glas
 const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
 const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||'__GW_CHAT_KEY__'; // CI replaces the placeholder from the GW_CHAT_KEY secret; env override is for local tests
 ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
- try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now()})});
+ try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now()}),signal:AbortSignal.timeout(20000)});
   if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
@@ -235,12 +235,12 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
   const img=src.thumbnail;if(!img||img.isEmpty())return {ok:false,error:'הצילום נכשל'};
   const jpeg=img.toJPEG(82),sz=img.getSize();
   if(jpeg.length>3500000)return {ok:false,error:'התמונה גדולה מדי'};
-  const r=await fetch(SHOT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,image:jpeg.toString('base64'),at:Date.now(),width:sz.width,height:sz.height})});
+  const r=await fetch(SHOT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,image:jpeg.toString('base64'),at:Date.now(),width:sz.width,height:sz.height}),signal:AbortSignal.timeout(20000)});
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
   return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע'}}});
-ipcMain.handle('chat:poll',async(_,after)=>{try{const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u);if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}catch{return {ok:false,error:'אין חיבור כרגע'}}});
+ipcMain.handle('chat:poll',async(_,after)=>{try{const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};const messages=h.messages.slice(-200).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));wr('chat-'+id+'.json',{messages,seenHint:!!h.seenHint,lastReceived:+h.lastReceived||0});return {ok:true}});
 ipcMain.on('chat:read',e=>{for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:read')}});
