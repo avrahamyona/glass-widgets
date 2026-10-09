@@ -86,7 +86,7 @@ let H={messages:[],seenHint:false,lastReceived:0};
 function incoming(m){if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;
  H.messages.push({id:m.id,dir:'in',text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
- save();render(log);if(island)newReply(H.messages[H.messages.length-1])}
+ save();render(log);if(island&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
 function lastMsg(){return H.messages[H.messages.length-1]}
 function awaitingHis(){const l=lastMsg();return !!l&&l.dir==='out'}
 function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!=='failed'}
@@ -117,7 +117,7 @@ async function chime(){if(q.get('companion')||!soundOn)return;try{actx=actx||new
 let prevT=null;
 function collapseAlert(){if(pillMode!=='alert')return;pillMode='mini';pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.remove('alert','preview','bump');alertPreview='';updatePillSt();
  setTimeout(()=>{if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()},400)}
-function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());return}
+function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());markRead();return}
  if(m)alertPreview=m.text;setUnread(true);chime();
  pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
  pillPrev.textContent=alertPreview;pill.classList.add('preview');
@@ -134,23 +134,25 @@ async function doShot(idx){const b=document.getElementById(island?'shot2':'shot'
  H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
  if(b)b.disabled=false}
 /* island behavior */
-let pillMode='mini',unread=false;
+let pillMode='mini',unread=false,readUpTo=0;
 function setUnread(v){unread=v;dot.style.display=v?'':'none'}
-function openPill(){pillMode='open';setUnread(false);alertPreview='';clearTimeout(prevT);pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.add('open');pill.classList.remove('alert','preview');render(pillBodyLog());api.chatPassthrough(false);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();if(api.chatReadSend)api.chatReadSend()}
-function closePill(){pillMode='mini';pill.classList.remove('open','alert','preview');api.chatPassthrough(true);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()}
+function markRead(){const u=H.lastReceived||0;if(!u)return;if(u>readUpTo)readUpTo=u;if(api.chatReadSend)api.chatReadSend(readUpTo);if(api.chatReadMark)api.chatReadMark(readUpTo);save()}
+function applyRead(upto){upto=+upto||0;if(!upto)return;if(upto>readUpTo)readUpTo=upto;if(pillMode!=='open'){clearTimeout(prevT);pillMode='mini';pill.classList.remove('alert','preview','bump');pillPrev.style.maxHeight='0';setUnread(false);alertPreview='';updatePillSt()}}
+function openPill(){pillMode='open';setUnread(false);alertPreview='';clearTimeout(prevT);pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.add('open');pill.classList.remove('alert','preview');render(pillBodyLog());api.chatPassthrough(false);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();markRead()}
+function closePill(){pillMode='mini';pill.classList.remove('open','alert','preview');markRead();api.chatPassthrough(true);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()}
 function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=document.createElement('div');l.className='log';l.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('#shot').id='shot2';comp.querySelector('#shot2').onclick=()=>doShot(scrIdx);comp.querySelector('#scr').id='scr2';comp.querySelector('#scr2').onclick=scrCycle;updScrBtn();comp.querySelector('#send').id='send2';comp.querySelector('#send2').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(l,comp)}return l}
 async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
  pillHead.onclick=()=>{pillMode==='open'?closePill():openPill()};
  pillPrev.onclick=()=>{if(pillMode==='alert')openPill()};
- if(api.onChatRead)api.onChatRead(()=>{if(pillMode!=='open'){clearTimeout(prevT);pillMode='mini';pill.classList.remove('alert','preview','bump');pillPrev.style.maxHeight='0';setUnread(false);alertPreview='';updatePillSt()}});
+ if(api.onChatRead)api.onChatRead(u=>applyRead(u));
  pill.addEventListener('mouseleave',()=>{if(pillMode!=='open')api.chatPassthrough(true)});
  document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode!=='open')api.chatPassthrough(true)});
  pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
  document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
-(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  if(api.onChatMsg)api.onChatMsg(incoming);
  window.__msg=incoming;
