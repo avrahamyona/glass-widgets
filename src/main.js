@@ -240,7 +240,7 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
   return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע'}}});
-async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}
+async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}
 ipcMain.handle('chat:poll',async(_,after)=>{try{return await chatPage(after)}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 // live push: one SSE stream in main, rows broadcast to every chat window; a catch-up page closes any gap on (re)connect
 const CHAT_STREAM_URL=process.env.GLASSWIDGETS_CHAT_STREAM_URL||CHAT_URL.replace(/\/chat$/,'/chat/stream');
@@ -261,16 +261,25 @@ async function runChatStream(){let backoff=1000;
    while(true){const{done,value}=await reader.read();if(done)break;poke();buf+=dec.decode(value,{stream:true});
     let i;while((i=buf.indexOf('\n\n'))>=0){const chunk=buf.slice(0,i);buf=buf.slice(i+2);
      const line=chunk.split('\n').find(l=>l.startsWith('data:'));if(!line)continue;
-     try{const m=JSON.parse(line.slice(5).trim());if(m&&typeof m.text==='string'){const row={id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')};if(row.received_at>chatStream.cursor)chatStream.cursor=row.received_at;broadcastChat(row)}}catch{}}}
+     try{const m=JSON.parse(line.slice(5).trim());if(m&&m.type==='read')broadcastRead(m.upto);else if(m&&typeof m.text==='string'){const row={id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')};if(row.received_at>chatStream.cursor)chatStream.cursor=row.received_at;broadcastChat(row)}}catch{}}}
    throw new Error('stream closed');
   }catch(e){clearTimeout(idleT);if(chatStream.stop)break;await new Promise(r=>setTimeout(r,backoff));backoff=Math.min(backoff*2,15000)}}}
 ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  if(!chatStream.started){chatStream.started=true;chatStream.cursor=c;chatStream.thread=callerInstance(e)||'chat';runChatStream()}
- else if(c&&c<chatStream.cursor)chatStream.cursor=c;
+ else if(c&&c>chatStream.cursor)chatStream.cursor=c;
  return {ok:true}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],seenHint:false,lastReceived:0}});
-ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};const messages=h.messages.slice(-200).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));wr('chat-'+id+'.json',{messages,seenHint:!!h.seenHint,lastReceived:+h.lastReceived||0});return {ok:true}});
-ipcMain.on('chat:read',e=>{for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:read')}});
+ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};
+ const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));
+ const prev=rd('chat-'+id+'.json',null),byId=new Map();
+ if(prev&&Array.isArray(prev.messages))for(const m of prev.messages)if(m&&m.id)byId.set(m.id,m);
+ for(const m of clean)byId.set(m.id,m);
+ const messages=[...byId.values()].sort((a,b)=>(a.at||a.received_at)-(b.at||b.received_at)).slice(-200);
+ wr('chat-'+id+'.json',{messages,seenHint:!!h.seenHint||(prev&&!!prev.seenHint),lastReceived:Math.max(+h.lastReceived||0,prev?(+prev.lastReceived||0):0),readUpTo:Math.max(+h.readUpTo||0,prev?(+prev.readUpTo||0):0)});return {ok:true}});
+function broadcastRead(upto){upto=+upto||0;if(!upto)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:read',upto)}}
+ipcMain.on('chat:read',(e,u)=>{for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:read',+u||0)}});
+ipcMain.handle('chat:read-mark',async(e,upto)=>{upto=Math.round(+upto||0);if(!upto)return {ok:false};
+ try{const r=await fetch(CHAT_URL+'/read',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,thread:callerInstance(e)||chatStream.thread,upto}),signal:AbortSignal.timeout(20000)});return {ok:r.ok}}catch{return {ok:false}}});
 ipcMain.on('chat:new',e=>{for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:new')}});
 ipcMain.on('chat:sent',(e,m)=>{if(!m||typeof m!=='object')return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:sent',m)}});
 ipcMain.handle('chat:passthrough',(e,on)=>{const id=callerInstance(e);const ws=[];if(id&&wins[id])ws.push(wins[id]);for(const w of chatCompanions.values())ws.push(w);if(!ws.length)return {ok:false};ws.forEach(w=>{if(!w.isDestroyed())w.setIgnoreMouseEvents(!!on,{forward:true})});return {ok:true}});
