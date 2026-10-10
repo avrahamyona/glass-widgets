@@ -5,7 +5,7 @@
 // folder, and every mutating/executing command lands in userData/agent-audit.log (JSON lines).
 const fs=require('fs'),path=require('path'),os=require('os');
 const {screen}=require('electron');
-const {execFile}=require('child_process');
+const {execFile,exec}=require('child_process');
 
 const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*1024*1024,resultLen:3500,noteLen:500,cmdTimeoutMs:300000};
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
@@ -60,6 +60,35 @@ function startAgent({app,rd,wr,chatKey}){
   try{await fs.promises.unlink(rp)}catch(e){return ack(id,'failed',String(e&&e.code||e))}
   audit({kind:'delete_file',path:rp,bytes:st.size,ok:true});
   return ack(id,'done','deleted '+path.basename(rp),{path:rp,bytes:st.size});
+ }
+
+ // open_path: open a file or folder with the default app; gated by the same resolved-folder allowlist as reads
+ async function openPathCmd(id,p){
+  const raw=String(p||'').trim();if(!raw)return ack(id,'failed','missing path');
+  const rp=await inAllowlist(raw)
+  if(!rp)return ack(id,'failed','outside allowlist - refused');
+  let err;
+  if(process.platform==='win32'){const {shell}=require('electron');err=await Promise.race([shell.openPath(rp),new Promise(r=>setTimeout(()=>r('open timed out'),10000))])}
+  else err=await new Promise(res=>{const t=setTimeout(()=>res('open timed out'),10000);execFile('xdg-open',[rp],{timeout:8000},e=>{clearTimeout(t);res(e?String(e.code||e.message||'open failed'):'')})}); // shell.openPath can wedge the main loop off-windows - always ack
+  audit({kind:'open_path',path:rp,ok:!err,error:err||undefined});
+  return err?ack(id,'failed',String(err).slice(0,200)):ack(id,'done','opened '+path.basename(rp),{path:rp});
+ }
+
+ // run_command: a shell command on the PC. Gated by the receiver key at the transport, a deny-list of
+ // destructive verbs, a 60s timeout and a 1MB output cap; every run is audited with its output.
+ const RUN_DENY=[/\bformat\s+[a-z]:/i,/\bshutdown\b/i,/\brestart-computer\b/i,/\brm\s+-[a-z]*r[a-z]*f\s+\//i,/\bdel\s+\/[a-z]*s/i,/\brd\s+\/[a-z]*s/i,/\brmdir\s+\/[a-z]*s/i,/\bdiskpart\b/i,/<\s*\w+\.(ps1|bat|cmd|exe)/i];
+ function runCommand(id,command){
+  const cmd=String(command||'').trim();
+  if(!cmd)return ack(id,'failed','missing command');
+  if(cmd.length>1000)return ack(id,'failed','command too long');
+  if(RUN_DENY.some(rx=>rx.test(cmd))){audit({kind:'run_command',command:cmd,ok:false,error:'denied'});return ack(id,'failed','command denied by guardrail')}
+  return new Promise(res=>{
+   exec(cmd,{timeout:60000,maxBuffer:1024*1024,windowsHide:true},async(e,so,se)=>{
+    const stdout=String(so||'').slice(0,3000),stderr=String(se||(e&&e.message||'')).slice(0,1000);
+    audit({kind:'run_command',command:cmd,ok:!e,exit:e?(e.code??null):0,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300)});
+    await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',{stdout,stderr,exit:e?(e.code??null):0});res();
+   });
+  });
  }
 
  async function ack(id,status,note,result){
@@ -184,6 +213,8 @@ function startAgent({app,rd,wr,chatKey}){
   const run=(async()=>{
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
+   if(m.kind==='open_path')return openPathCmd(m.id,m.path);
+   if(m.kind==='run_command')return runCommand(m.id,m.command);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
