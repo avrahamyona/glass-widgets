@@ -285,7 +285,7 @@ function cleanCard(c){return {id:String(c.id||'').slice(0,80),title:String(c.tit
  at:+c.at||+c.created_at||Date.now()}}
 function broadcastCard(c){const card=cleanCard(c);if(!card.id)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:card',card)}}
 ipcMain.handle('chat:card-action',async(e,p)=>{
- const cfg=rd('agent.json',{})||{};const cmdKey=process.env.GLASSWIDGETS_AGENT_CMD_KEY||cfg.cmdKey||'';
+ const cfg=rd('agent.json',{})||{};const cmdKey=process.env.GLASSWIDGETS_AGENT_CMD_KEY||cfg.cmdKey||CHAT_KEY;
  if(!cmdKey)return {ok:false,error:'no-key'};
  const body={key:cmdKey,card_id:String(p&&p.card_id||'').slice(0,80),button_id:String(p&&p.button_id||'').slice(0,40),label:String(p&&p.label||'').slice(0,40)};
  if(!body.card_id||!body.button_id)return {ok:false};
