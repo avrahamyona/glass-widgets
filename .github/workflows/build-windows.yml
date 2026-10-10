@@ -53,10 +53,5 @@ jobs:
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           V=$(node -p "require('./package.json').version")
-          TAG="v$V-build.${{ github.run_number }}"
-          gh release create "$TAG" dist/*.exe dist/latest.yml --title "GlassWidgets $TAG" --notes "## What's New in 0.4.22
-
-          **GlassWidgets 0.4.22**
-          - Live chat replies: new messages now arrive instantly over a live connection instead of being checked on a timer
-          - If the connection drops it reconnects on its own and catches up on anything missed
-          - Includes everything from 0.4.21"
+          TAG="v$V" # tag matches the version baked into latest.yml, so the updater, the tag and the UI never disagree
+          gh release create "$TAG" dist/*.exe dist/latest.yml --latest --title "GlassWidgets $TAG" --notes "$(git log -1 --pretty=%B)"
