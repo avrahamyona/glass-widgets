@@ -309,7 +309,7 @@ ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  return {ok:true}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],cards:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};
- const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80)}));
+ const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80),myReaction:String(m.myReaction||'').slice(0,8)}));
  const prev=rd('chat-'+id+'.json',null),byId=new Map();
  if(prev&&Array.isArray(prev.messages))for(const m of prev.messages)if(m&&m.id)byId.set(m.id,m);
  for(const m of clean)byId.set(m.id,m);
@@ -321,6 +321,7 @@ ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array
 function cleanCard(c){return {id:String(c.id||'').slice(0,80),title:String(c.title||'').slice(0,200),body:String(c.body||'').slice(0,2000),
  buttons:(Array.isArray(c.buttons)?c.buttons:[]).slice(0,4).map(b=>({id:String(b&&b.id||'').slice(0,40),label:String(b&&b.label||'').slice(0,40),style:['primary','danger','plain'].includes(b&&b.style)?b.style:'plain'})),
  graph:c.graph&&['bar','line'].includes(c.graph.type)?{type:c.graph.type,series:(Array.isArray(c.graph.series)?c.graph.series:[]).slice(0,24).map(p=>({label:String(p&&p.label||'').slice(0,40),value:+p&&+p.value||0}))}:undefined,
+ file:c.file&&typeof c.file==='object'?{name:String(c.file.name||'').slice(0,200),size:+c.file.size||0,mime:String(c.file.mime||'').slice(0,80),url:String(c.file.url||'').slice(0,600),path:String(c.file.path||'').slice(0,600)}:undefined,
  at:+c.at||+c.created_at||Date.now()}}
 function broadcastCard(c){const card=cleanCard(c);if(!card.id)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:card',card)}}
 ipcMain.handle('chat:card-action',async(e,p)=>{
@@ -331,6 +332,34 @@ ipcMain.handle('chat:card-action',async(e,p)=>{
  if(!body.card_id||!body.button_id)return {ok:false};
  try{const r=await fetch(CHAT_URL+'/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20000)});
   const j=await r.json().catch(()=>({}));return {ok:!!(r.ok&&j.ok),reason:String(j.reason||'')}}catch{return {ok:false,error:'offline'}}});
+// ---- file cards in the chat: a card with a `file` payload gets local פתח/שמור buttons in the island.
+// Local path wins (server and app usually share the machine - immediate, offline); otherwise download the worker URL.
+const FILE_CAP=25*1024*1024;
+function cleanFileName(n){n=String(n||'file').replace(/[\\/:*?"<>|]/g,'_').replace(/^\.+/,'_').trim();return n||'file'}
+function dedupePath(dir,name){const ext=path.extname(name),base=path.basename(name,ext);let p=path.join(dir,name),i=1;while(fs.existsSync(p))p=path.join(dir,base+' ('+(i++)+')'+ext);return p}
+async function downloadTo(url,dest){const r=await fetch(String(url),{signal:AbortSignal.timeout(60000)});if(!r.ok)throw new Error('ההורדה נכשלה ('+r.status+')');
+ const len=+r.headers.get('content-length')||0;if(len>FILE_CAP)throw new Error('הקובץ גדול מדי להורדה באי (מעל 25MB)');
+ const buf=Buffer.from(await r.arrayBuffer());if(buf.length>FILE_CAP)throw new Error('הקובץ גדול מדי להורדה באי (מעל 25MB)');fs.writeFileSync(dest,buf);return buf.length}
+ipcMain.handle('chat:react',async(e,p)=>{ // WhatsApp-style reaction on a chat bubble; emoji '' removes it
+ const body={key:CHAT_KEY,thread:callerInstance(e)||chatStream.thread,message_id:String(p&&p.message_id||'').slice(0,80),emoji:String(p&&p.emoji||'').slice(0,8)};
+ if(!body.message_id)return {ok:false};
+ try{const r=await fetch(CHAT_URL+'/react',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(20000)});return {ok:r.ok}}catch{return {ok:false,error:'offline'}}});
+ipcMain.handle('file:open',async(_,f)=>{
+ try{
+  let p=f&&f.path&&fs.existsSync(String(f.path))?String(f.path):null;
+  if(!p&&f&&f.url){const dir=path.join(app.getPath('temp'),'glasswidgets-files');fs.mkdirSync(dir,{recursive:true});p=dedupePath(dir,cleanFileName(f.name));await downloadTo(f.url,p)}
+  if(!p)return {ok:false,error:'הקובץ לא נמצא במחשב ואין קישור הורדה'};
+  if(process.env.GLASSWIDGETS_FILE_OPEN_ECHO)return {ok:true,echo:true,path:p}; // test seam: skip launching the viewer
+  const err=await shell.openPath(p);return err?{ok:false,error:err}:{ok:true,path:p}
+ }catch(e){return {ok:false,error:String(e&&e.message||e)}}});
+ipcMain.handle('file:save',async(_,f)=>{
+ try{
+  const dest=dedupePath(app.getPath('downloads'),cleanFileName(f&&f.name));
+  if(f&&f.path&&fs.existsSync(String(f.path)))fs.copyFileSync(String(f.path),dest);
+  else if(f&&f.url)await downloadTo(f.url,dest);
+  else return {ok:false,error:'הקובץ לא נמצא במחשב ואין קישור הורדה'};
+  return {ok:true,saved_to:dest}
+ }catch(e){return {ok:false,error:String(e&&e.message||e)}}});
 function broadcastRead(upto){upto=+upto||0;if(!upto)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:read',upto)}}
 ipcMain.on('chat:read',(e,u)=>{for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:read',+u||0)}});
 ipcMain.handle('chat:read-mark',async(e,upto)=>{upto=Math.round(+upto||0);if(!upto)return {ok:false};
