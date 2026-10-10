@@ -55,5 +55,5 @@ async function init(){
 }
 function paintUpd(u){if(!u)return;$('updSt').textContent=u.state==='ready'?'עדכון '+u.version+' מוכן - יותקן ביציאה':u.state==='downloading'?'מוריד... '+u.percent+'%':u.state==='checking'?'בודק...':u.state==='none'?'אתה מעודכן':(u.error||'')}
 init();
-</script><script>backHome.onclick=()=>{api.pickerOpen();window.close()};</script>
+</script><script>backHome.onclick=()=>{api.pickerOpen()};</script>
 </body></html>

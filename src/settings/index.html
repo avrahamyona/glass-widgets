@@ -1,4 +1,4 @@
-<!doctype html><meta charset=utf-8><html lang=he dir=rtl><link rel=stylesheet href="../shared/theme.css">
+<!doctype html><meta charset=utf-8><html lang=he dir=rtl><title>החיים שלי המחשבי</title><link rel=stylesheet href="../shared/theme.css">
 <style>
 html,body{overflow:auto;user-select:none}
 body{background:#f2f2f7;color:#000;padding:22px 20px 30px;font-size:14px}
@@ -122,4 +122,4 @@ updInstall.onclick=async()=>{updMsg.textContent='מתקין ומפעיל מחד�
 fbGo.onclick=async()=>{const t=fbText.value.trim();if(t.length<5){fbMsg.textContent='כתוב לפחות כמה מילים (5 תווים ומעלה)';return}fbGo.disabled=true;fbMsg.textContent='שולח…';try{const r=await api.feedbackSend(t);fbMsg.textContent=r.ok?'נשלח, תודה! הדיווח אצלנו לביצוע':(r.error||'השליחה נכשלה');if(r.ok)fbText.value=''}catch{fbMsg.textContent='אין חיבור כרגע. הדיווח לא נשלח'}finally{fbGo.disabled=false}};
 load();
  </script>
-<script>backHome.onclick=()=>{api.pickerOpen();window.close()};</script>
+<script>backHome.onclick=()=>{api.pickerOpen()};</script>

@@ -25,6 +25,8 @@
 @keyframes cardIn{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
 .meta.in{align-self:flex-end}
 .bub{cursor:pointer}
+.bub a,.cb a,#pillPrev a{color:#0a84ff;text-decoration:underline;cursor:pointer}
+.bub.out a{color:#cce4ff}
 #toast{position:absolute;bottom:64px;left:50%;transform:translateX(-50%);background:rgba(20,20,22,.92);color:#fff;font-size:10.5px;padding:5px 12px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
 .meta.fail{color:#ff453a}
 .hint{font-size:10px;color:var(--text2);text-align:center;padding:3px}
@@ -110,7 +112,7 @@ function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return
  if(!island)return;
  if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
  setUnread(true);chime();pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
- alertPreview=c.title||'כרטיס חדש';pillPrev.textContent=alertPreview;pill.classList.add('preview');
+ alertPreview=c.title||'כרטיס חדש';pillPrev.innerHTML=linkify(esc(alertPreview));wireLinks(pillPrev);pill.classList.add('preview');
  requestAnimationFrame(()=>{const lh=parseFloat(getComputedStyle(pillPrev).lineHeight)||17.4;const cap=Math.round(lh*10)+8;pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,cap)+'px';pillPrev.classList.toggle('more',pillPrev.scrollHeight-6>cap)});
  if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();
  clearTimeout(prevT);prevT=setTimeout(collapseAlert,4000)}
@@ -118,10 +120,12 @@ function lastMsg(){return H.messages[H.messages.length-1]}
 function awaitingHis(){const l=lastMsg();return !!l&&l.dir==='out'}
 function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!=='failed'}
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function linkify(escaped){return escaped.replace(/https?:\/\/[^\s<>"']+/g,u=>'<a href=# data-u="'+u+'">'+u+'</a>')}
+function wireLinks(el){for(const a of el.querySelectorAll('a[data-u]'))a.onclick=e=>{e.preventDefault();e.stopPropagation();if(window.api&&api.openExternal)api.openExternal(a.dataset.u)}}
 function statusText(m){if(m.dir!=='out')return'';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
-function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
+function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.innerHTML=linkify(esc(m.text));wireLinks(d);d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function timeline(){const items=H.messages.map(m=>({t:+m.at||+m.received_at||0,m}));for(const c of (H.cards||[]))items.push({t:+c.at||0,c});items.sort((a,b)=>a.t-b.t);return items.slice(-80)}
 function graphSvg(g){const w=210,h=64,pad=6,vals=g.series.map(p=>+p.value||0),max=Math.max(...vals,1);
@@ -135,7 +139,7 @@ function graphSvg(g){const w=210,h=64,pad=6,vals=g.series.map(p=>+p.value||0),ma
  return svg}
 function cardEl(c){const d=document.createElement('div');d.className='card nd'+(c.busy?' busy':'')+(c.acted?' acted':'');d.dir='auto';d.dataset.cid=c.id;
  const t=document.createElement('div');t.className='ct';t.textContent=c.title;d.append(t);
- if(c.body){const b=document.createElement('div');b.className='cb';b.textContent=c.body;d.append(b)}
+ if(c.body){const b=document.createElement('div');b.className='cb';b.innerHTML=linkify(esc(c.body));wireLinks(b);d.append(b)}
  if(c.graph&&c.graph.series&&c.graph.series.length)d.append(graphSvg(c.graph));
  if(c.buttons&&c.buttons.length){const row=document.createElement('div');row.className='cbtns';
   for(const b of c.buttons){const btn=document.createElement('button');btn.className=b.style==='primary'?'bp':b.style==='danger'?'bd':'bl';btn.textContent=b.label;
@@ -173,7 +177,7 @@ function collapseAlert(){if(pillMode!=='alert')return;pillMode='mini';pillPrev.s
 function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
  if(m)alertPreview=m.text;setUnread(true);chime();
  pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
- pillPrev.textContent=alertPreview;pill.classList.add('preview');
+ pillPrev.innerHTML=linkify(esc(alertPreview));wireLinks(pillPrev);pill.classList.add('preview');
  requestAnimationFrame(()=>{const lh=parseFloat(getComputedStyle(pillPrev).lineHeight)||17.4;const cap=Math.round(lh*10)+8;pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,cap)+'px';pillPrev.classList.toggle('more',pillPrev.scrollHeight-6>cap)});
  if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();
  clearTimeout(prevT);prevT=setTimeout(collapseAlert,4000)}

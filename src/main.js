@@ -111,17 +111,29 @@ const pendingTimerDemo={};
 function wq(id){const s=getSet(),c=instanceConfig(id),q={size:c.size,id:instance(id).type,instance:id,tz:c.timezone};const t=currentTheme();if(t)q.theme=t;else if(s.theme!=='auto'&&s.theme!=='system')q.theme=s.theme;if(c.style)q.style=c.style;if(pendingTimerDemo[id]){q.demo=pendingTimerDemo[id];delete pendingTimerDemo[id]}return q}
 ipcMain.handle('theme:get',()=>currentTheme()||'system');
 function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)})}
-let setWin=null;
-function openSettings(){
-  if(setWin){setWin.show();setWin.focus();return}
-  setWin=new BrowserWindow({width:520,height:720,minWidth:460,minHeight:520,title:'החיים שלי המחשבי',backgroundColor:'#f2f2f7',autoHideMenuBar:true,show:false,
+// one management window: picker, widget management and server settings are views navigated inside it - never stacked windows
+let mgmtWin=null,mgmtView=null;
+const MGMT_TITLE='החיים שלי המחשבי';
+const MGMT_VIEWS={picker:{file:'picker/index.html',w:480,h:340},settings:{file:'settings/index.html',w:520,h:720},server:{file:'server-settings/index.html',w:520,h:640}};
+function mgmtNav(view){
+  const v=MGMT_VIEWS[view]||MGMT_VIEWS.picker;
+  if(mgmtWin&&!mgmtWin.isDestroyed()){
+    if(mgmtView!==view){mgmtView=view;mgmtWin.loadFile(path.join(__dirname,v.file))}
+    mgmtWin.setSize(v.w,v.h);mgmtWin.center();mgmtWin.show();mgmtWin.focus();return;
+  }
+  mgmtView=view;
+  mgmtWin=new BrowserWindow({width:v.w,height:v.h,minWidth:460,minHeight:320,title:MGMT_TITLE,backgroundColor:'#f2f2f7',autoHideMenuBar:true,center:true,show:false,
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
-  setWin.setMenu(null);
-  setWin.once('ready-to-show',()=>{if(setWin&&!setWin.isDestroyed())setWin.show()});
-  setTimeout(()=>{if(setWin&&!setWin.isDestroyed()&&!setWin.isVisible())setWin.show()},3000);
-  setWin.loadFile(path.join(__dirname,'settings','index.html'));
-  setWin.on('closed',()=>{setWin=null}); // closing never touches the widgets
+  mgmtWin.setMenu(null);
+  mgmtWin.on('page-title-updated',e=>{e.preventDefault();if(mgmtWin&&!mgmtWin.isDestroyed())mgmtWin.setTitle(MGMT_TITLE)});
+  mgmtWin.once('ready-to-show',()=>{if(mgmtWin&&!mgmtWin.isDestroyed())mgmtWin.show()});
+  setTimeout(()=>{if(mgmtWin&&!mgmtWin.isDestroyed()&&!mgmtWin.isVisible())mgmtWin.show()},3000); // never leave the only startup UI hidden
+  mgmtWin.loadFile(path.join(__dirname,v.file));
+  mgmtWin.on('closed',()=>{mgmtWin=null;mgmtView=null}); // closing never touches the widgets
 }
+function openPicker(){mgmtNav('picker')}
+function openSettings(){mgmtNav('settings')}
+function openServerSettings(){mgmtNav('server')}
 ipcMain.handle('set:get',()=>{const en=rd('enabled.json',{});return {settings:getSet(),
   widgetTypes:Object.entries(WIDGETS).map(([type,w])=>({type,label:w.label})),widgets:instances().map((it,i)=>({id:it.id,type:it.type,label:WIDGETS[it.type].label+' '+(instances().filter(x=>x.type===it.type).findIndex(x=>x.id===it.id)+1),on:!!wins[it.id],...instanceConfig(it.id)})),
   autostart:app.getLoginItemSettings().openAtLogin,version:app.getVersion()}});
@@ -224,6 +236,7 @@ const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glas
 const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
 const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||'__GW_CHAT_KEY__'; // CI replaces the placeholder from the GW_CHAT_KEY secret; env override is for local tests
 const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastCard,chatUrl:CHAT_URL});
+ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https?:\/\/\S+$/i.test(u))return {ok:false};shell.openExternal(u);return {ok:true}});
 ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
  const linkQ=filelink.parseLinkQuery(text);if(linkQ){filelink.handle(linkQ);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
  try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now()}),signal:AbortSignal.timeout(20000)});
@@ -387,7 +400,7 @@ ipcMain.handle('icloud:forget',()=>{stopCloud();for(const f of ['cloud-session.b
 
 // ---- self update from GitHub Releases (manual check from the settings window)
 const upd={state:'idle',percent:0,version:null,error:null};
-let updWired=false;
+let updWired=false,quietCheck=false;
 function wireUpdater(){
  if(updWired)return true;if(!app.isPackaged)return false;
  try{
@@ -397,7 +410,9 @@ function wireUpdater(){
   autoUpdater.on('update-not-available',()=>{upd.state='none';upd.error=null});
   autoUpdater.on('download-progress',p=>{upd.state='downloading';upd.percent=Math.round(p.percent)});
   autoUpdater.on('update-downloaded',i=>{upd.state='ready';upd.version=i.version;upd.percent=100});
-  autoUpdater.on('error',e=>{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'});
+  autoUpdater.on('error',e=>{if(quietCheck){upd.state='idle';upd.error=null}else{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'}});
+  const quiet=()=>{quietCheck=true;autoUpdater.checkForUpdates().catch(()=>{}).finally(()=>{quietCheck=false})};
+  setTimeout(quiet,15000);setInterval(quiet,30*60*1000); // background re-checks: a stale "no update" self-heals, silently
   updWired=true;return true;
  }catch{return false}
 }
@@ -415,23 +430,8 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   screen.on('display-added',reconcileChatScreens);screen.on('display-removed',reconcileChatScreens);screen.on('display-metrics-changed',reconcileChatScreens);
   let lastThemeB;setInterval(()=>{const t=currentTheme()||'system';if(t!==lastThemeB){lastThemeB=t;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('theme:set',t)}}},15000);
   let batTok='';
-  let pickerWin=null,srvSetWin=null;
   function ensureChatInstance(){let list=instances();let it=list.find(x=>x.type==='chat');if(!it){it={id:'chat-main',type:'chat'};list.push(it);wr('instances.json',list)}const cfg=getSet();if(!cfg.sizes[it.id]){cfg.sizes[it.id]='island';wr('settings.json',cfg)}return it.id}
-  function openPicker(){if(pickerWin&&!pickerWin.isDestroyed()){pickerWin.focus();return}
-   pickerWin=new BrowserWindow({width:480,height:340,frame:false,transparent:true,hasShadow:false,resizable:false,center:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js')}});
-   pickerWin.loadFile(path.join(__dirname,'picker','index.html'));
-   pickerWin.once('ready-to-show',()=>{if(pickerWin&&!pickerWin.isDestroyed())pickerWin.show()});
-   setTimeout(()=>{if(pickerWin&&!pickerWin.isDestroyed()&&!pickerWin.isVisible())pickerWin.show()},3000); // never leave the only startup UI hidden
-   pickerWin.on('closed',()=>pickerWin=null);
-  }
-  function openServerSettings(){if(srvSetWin&&!srvSetWin.isDestroyed()){srvSetWin.focus();return}
-   srvSetWin=new BrowserWindow({width:520,height:640,minWidth:460,minHeight:520,title:'החיים שלי השרתי',backgroundColor:'#f2f2f7',autoHideMenuBar:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js')}});
-   srvSetWin.loadFile(path.join(__dirname,'server-settings','index.html'));
-   srvSetWin.once('ready-to-show',()=>{if(srvSetWin&&!srvSetWin.isDestroyed())srvSetWin.show()});
-   setTimeout(()=>{if(srvSetWin&&!srvSetWin.isDestroyed()&&!srvSetWin.isVisible())srvSetWin.show()},3000);
-   srvSetWin.on('closed',()=>srvSetWin=null);
-  }
-  ipcMain.handle('picker:choose',(_,m)=>{if(m==='server')openServerSettings();else openSettings();if(pickerWin&&!pickerWin.isDestroyed())pickerWin.close();return {ok:true}});
+  ipcMain.handle('picker:choose',(_,m)=>{if(m==='server')openServerSettings();else openSettings();return {ok:true}}); // navigate inside the one management window
   ipcMain.handle('picker:open',()=>{openPicker();return {ok:true}});
   ipcMain.handle('server-settings:open',()=>{openServerSettings();return {ok:true}});
   showPickerRef=openPicker;
@@ -450,6 +450,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
     {type:'separator'},{label:'יציאה',click:()=>app.quit()}]);
   tray.setContextMenu(menu());
   bootLog('tray');
+  try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // packaged only; starts the background checks
   try{const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};resumeCloudSession()}catch(e){bootLog('cloud '+(e&&e.message))}
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
