@@ -2,6 +2,8 @@
 // (receiver key) and runs allowlisted actions: find_files and get_file (upload via /file/upload).
 // Safety: a resolved-folder allowlist gates every file touch; nothing executes; failures ack cleanly.
 const fs=require('fs'),path=require('path'),os=require('os');
+const {screen}=require('electron');
+const {execFile}=require('child_process');
 
 const CAPS={maxDepth:8,maxScan:2000,contentBytes:2*1024*1024,uploadBytes:20*1024*1024,resultLen:3500,noteLen:500,cmdTimeoutMs:120000};
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config']);
@@ -68,6 +70,39 @@ function startAgent({app,rd,wr,chatKey}){
  }
 
  const MIME={'.pdf':'application/pdf','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.txt':'text/plain','.md':'text/markdown','.csv':'text/csv','.json':'application/json','.zip':'application/zip','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.mp3':'audio/mpeg','.mp4':'video/mp4'};
+ function fmtGB(n){return (n/1073741824).toFixed(1)+'GB'}
+ async function sysInfo(id,topic){
+  topic=String(topic||'all').toLowerCase();
+  const out={};const lines=[];
+  if(topic==='screens'||topic==='all'){
+   const ds=screen.getAllDisplays(),prim=screen.getPrimaryDisplay();
+   out.screens=ds.map(d=>({id:d.id,width:d.size.width,height:d.size.height,primary:d.id===prim.id}));
+   lines.push(ds.length+' מסכים מחוברים: '+out.screens.map(s=>s.width+'x'+s.height+(s.primary?' (ראשי)':'')).join(', '));
+  }
+  if(topic==='disk'||topic==='all'){
+   try{const root=process.platform==='win32'?(process.env.SystemDrive||'C:')+'\\':'/';
+    const st=fs.statfsSync(root);const free=st.bavail*st.bsize,total=st.blocks*st.bsize;
+    out.disk={free_bytes:free,total_bytes:total};
+    lines.push('מקום פנוי בכונן: '+fmtGB(free)+' מתוך '+fmtGB(total));
+   }catch{lines.push('לא הצלחתי לקרוא את מצב הדיסק')}
+  }
+  if(topic==='processes'||topic==='all'){
+   try{
+    const list=await new Promise((res,rej)=>{
+     if(process.platform==='win32')execFile('tasklist',['/fo','csv','/nh'],{timeout:8000},(e,so)=>{if(e)return rej(e);
+      res(so.split('\n').map(l=>{const m=l.match(/"([^"]*)","[^"]*","[^"]*","[^"]*","([\d.,]+) K"/);return m?{name:m[1],mem_mb:Math.round(parseFloat(m[2].replace(/[.,]/g,''))/1024)}:null}).filter(Boolean))});
+     else execFile('ps',['-eo','comm,rss','--sort=-rss'],{timeout:8000},(e,so)=>{if(e)return rej(e);
+      res(so.split('\n').slice(1).map(l=>{const p=l.trim().split(/\s+/);return p.length>=2?{name:p[0],mem_mb:Math.round(+p[1]/1024)}:null}).filter(Boolean))});
+    });
+    const top=list.filter(x=>x.mem_mb>0).sort((a,b)=>b.mem_mb-a.mem_mb).slice(0,10);
+    out.processes=top;
+    lines.push('תהליכים גדולים: '+top.map(p=>p.name+' '+p.mem_mb+'MB').join(', '));
+   }catch{lines.push('לא הצלחתי לקרוא את רשימת התהליכים')}
+  }
+  if(!lines.length)return ack(id,'failed','unknown topic');
+  await ack(id,'done',lines.join('\n'),out);
+ }
+
  async function getFile(id,p){
   const rp=await inAllowlist(String(p||''));
   if(!rp)return ack(id,'failed','denied');
@@ -89,6 +124,7 @@ function startAgent({app,rd,wr,chatKey}){
   if(!m||typeof m!=='object'||!m.id)return;
   const run=(async()=>{
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit);
+   if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
    return ack(m.id,'failed','unknown kind');
   })();
