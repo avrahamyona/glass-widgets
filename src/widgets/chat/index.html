@@ -117,7 +117,7 @@ async function chime(){if(q.get('companion')||!soundOn)return;try{actx=actx||new
 let prevT=null;
 function collapseAlert(){if(pillMode!=='alert')return;pillMode='mini';pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.remove('alert','preview','bump');alertPreview='';updatePillSt();
  setTimeout(()=>{if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()},400)}
-function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());markRead();return}
+function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());if(document.hasFocus()){markRead()}else{setUnread(true);chime()}focusComposer();return}
  if(m)alertPreview=m.text;setUnread(true);chime();
  pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
  pillPrev.textContent=alertPreview;pill.classList.add('preview');
@@ -137,11 +137,12 @@ async function doShot(idx){const b=document.getElementById(island?'shot2':'shot'
 let pillMode='mini',unread=false,readUpTo=0;
 function setUnread(v){unread=v;dot.style.display=v?'':'none'}
 function markRead(){const u=H.lastReceived||0;if(!u)return;if(u>readUpTo)readUpTo=u;if(api.chatReadSend)api.chatReadSend(readUpTo);if(api.chatReadMark)api.chatReadMark(readUpTo);save()}
-function applyRead(upto){upto=+upto||0;if(!upto)return;if(upto>readUpTo)readUpTo=upto;if(pillMode!=='open'){clearTimeout(prevT);pillMode='mini';pill.classList.remove('alert','preview','bump');pillPrev.style.maxHeight='0';setUnread(false);alertPreview='';updatePillSt()}}
-function openPill(){pillMode='open';setUnread(false);alertPreview='';clearTimeout(prevT);pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.add('open');pill.classList.remove('alert','preview');render(pillBodyLog());api.chatPassthrough(false);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();markRead()}
+function focusComposer(){if(!island||pillMode!=='open')return;const i=$('txt2');if(!i)return;requestAnimationFrame(()=>{i.focus();const l=i.value.length;try{i.setSelectionRange(l,l)}catch{}})}
+function applyRead(upto){upto=+upto||0;if(!upto)return;if(upto>readUpTo)readUpTo=upto;const hasUnread=H.messages.some(m=>m.received_at>0&&m.received_at>readUpTo);if(!hasUnread){if(pillMode!=='open'){clearTimeout(prevT);pillMode='mini';pill.classList.remove('alert','preview','bump');pillPrev.style.maxHeight='0';alertPreview='';updatePillSt()}setUnread(false)}else setUnread(true)}
+function openPill(){pillMode='open';setUnread(false);alertPreview='';clearTimeout(prevT);pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.add('open');pill.classList.remove('alert','preview');render(pillBodyLog());api.chatPassthrough(false);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();markRead();focusComposer()}
 function closePill(){pillMode='mini';pill.classList.remove('open','alert','preview');markRead();api.chatPassthrough(true);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()}
 function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=document.createElement('div');l.className='log';l.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('#shot').id='shot2';comp.querySelector('#shot2').onclick=()=>doShot(scrIdx);comp.querySelector('#scr').id='scr2';comp.querySelector('#scr2').onclick=scrCycle;updScrBtn();comp.querySelector('#send').id='send2';comp.querySelector('#send2').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(l,comp)}return l}
-async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog())}
+async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog());focusComposer()}
 if(island){document.body.classList.add('island');card.style.display='none';pill.style.display='';
  pillHead.onclick=()=>{pillMode==='open'?closePill():openPill()};
  pillPrev.onclick=()=>{if(pillMode==='alert')openPill()};
@@ -151,6 +152,7 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
  document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
+ window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
 (async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
