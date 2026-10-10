@@ -1,6 +1,8 @@
-// Local computer-actions agent (read-only v1). Consumes the /glasswidgets/cmd SSE stream
-// (receiver key) and runs allowlisted actions: find_files and get_file (upload via /file/upload).
-// Safety: a resolved-folder allowlist gates every file touch; nothing executes; failures ack cleanly.
+// Local computer-actions agent. Consumes the /glasswidgets/cmd SSE stream (receiver key) and runs
+// allowlisted actions: find_files, get_file (upload via /file/upload), index, sys_info, screenshot,
+// delete_file (Downloads folder only, files only), open_path, run_command.
+// Safety: a resolved-folder allowlist gates file reads, delete_file is pinned to the real Downloads
+// folder, and every mutating/executing command lands in userData/agent-audit.log (JSON lines).
 const fs=require('fs'),path=require('path'),os=require('os');
 const {screen}=require('electron');
 const {execFile}=require('child_process');
@@ -36,6 +38,28 @@ function startAgent({app,rd,wr,chatKey}){
    try{rp=path.join(await fs.promises.realpath(path.dirname(p)),path.basename(p))}catch{return null}
   }
   return folders.some(f=>rp===f||rp.startsWith(f+path.sep))?rp:null;
+ }
+
+ const auditFile=()=>path.join(app.getPath('userData'),'agent-audit.log');
+ function audit(entry){try{fs.appendFileSync(auditFile(),JSON.stringify({at:new Date().toISOString(),...entry})+'\n')}catch{}}
+
+ // delete_file: pinned to the REAL Downloads folder (realpath, traversal-proof), files only, never folders.
+ // the degenerate downloads==homedir fallback (bare systems without a Downloads known-folder) is never accepted as a root
+ async function downloadsRoots(){
+  const out=[];
+  for(const c of [app.getPath('downloads'),path.join(os.homedir(),'Downloads')]){
+   try{const rp=await fs.promises.realpath(c);if(rp!==os.homedir()&&!out.includes(rp))out.push(rp)}catch{}}
+  return out}
+ async function deleteFile(id,p){
+  const raw=String(p||'').trim();if(!raw)return ack(id,'failed','missing path');
+  const roots=await downloadsRoots();if(!roots.length)return ack(id,'failed','no downloads folder');
+  let rp;try{rp=await fs.promises.realpath(raw)}catch{return ack(id,'failed','not found')}
+  if(!roots.some(dl=>rp.startsWith(dl+path.sep)))return ack(id,'failed','outside downloads - refused');
+  let st;try{st=await fs.promises.lstat(rp)}catch{return ack(id,'failed','not found')}
+  if(!st.isFile())return ack(id,'failed','not a file - refused');
+  try{await fs.promises.unlink(rp)}catch(e){return ack(id,'failed',String(e&&e.code||e))}
+  audit({kind:'delete_file',path:rp,bytes:st.size,ok:true});
+  return ack(id,'done','deleted '+path.basename(rp),{path:rp,bytes:st.size});
  }
 
  async function ack(id,status,note,result){
@@ -159,6 +183,7 @@ function startAgent({app,rd,wr,chatKey}){
   if(!m||typeof m!=='object'||!m.id)return;
   const run=(async()=>{
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
+   if(m.kind==='delete_file')return deleteFile(m.id,m.path);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);

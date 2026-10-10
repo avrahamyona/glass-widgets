@@ -36,6 +36,13 @@
 [data-theme=dark] .reactpop{background:#2c2c2e}
 .reactb{position:absolute;bottom:-8px;inset-inline-end:2px;background:#fff;border-radius:10px;font-size:12px;line-height:1.5;padding:0 4px;box-shadow:0 1px 4px rgba(0,0,0,.25);z-index:2;pointer-events:none}
 [data-theme=dark] .reactb{background:#2c2c2e}
+.quote{border-inline-start:3px solid #0a84ff;background:rgba(128,128,128,.14);border-radius:6px;padding:4px 8px;margin-bottom:5px;font-size:11px;min-width:0}
+.quote .qw{font-weight:700;font-size:10.5px;color:#0a84ff;margin-bottom:1px}
+.quote .qt{opacity:.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.replybar{display:flex;align-items:center;gap:8px;background:rgba(128,128,128,.1);border-radius:10px;padding:6px 10px;margin:0 10px 6px}
+.replybar .quote{flex:1;margin:0}
+.replybar .qx{border:0;background:none;cursor:pointer;font-size:13px;opacity:.6;color:inherit;padding:2px 4px}
+.replybar .qx:hover{opacity:1}
 @keyframes cardIn{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
 .meta.in{align-self:flex-end}
 .bub{cursor:pointer}
@@ -156,7 +163,14 @@ function openReact(m,anchor){closeReact();
  reactPop.style.top=Math.max(4,r.top-46)+'px'}
 async function pickReact(m,em){const nv=m.myReaction===em?'':em;m.myReaction=nv;save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
  try{await api.chatReact({message_id:m.id,emoji:nv})}catch{}} // optimistic locally; offline keeps the local reaction
-function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.innerHTML=linkify(esc(m.text));wireLinks(d);d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);d.ondblclick=ev=>{ev.stopPropagation();openReact(m,wrap)};const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column;position:relative';wrap.append(d);
+function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.innerHTML=linkify(esc(m.text));wireLinks(d);d.title='לחץ להעתקה · דאבל-קליק לציטוט תשובה';d.onclick=()=>copyMsg(m.text);
+ d.ondblclick=ev=>{ev.stopPropagation();closeReact();setReplyTo(m)};
+ d.oncontextmenu=ev=>{ev.preventDefault();ev.stopPropagation();openReact(m,wrap)}; // reactions stay as a bonus on right-click
+ if(m.in_reply_to){const ref=H.messages.find(x=>x.id===m.in_reply_to);
+  const qd=document.createElement('div');qd.className='quote';
+  const qw=document.createElement('div');qw.className='qw';qw.textContent=ref?(ref.dir==='in'?'חיים':'אתה'):'';
+  const qt=document.createElement('div');qt.className='qt';qt.textContent=ref?String(ref.text||'').slice(0,120):'הודעה שכבר לא קיימת';
+  qd.append(qw,qt);d.prepend(qd)}const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column;position:relative';wrap.append(d);
  if(m.myReaction){const rb=document.createElement('span');rb.className='reactb';rb.textContent=m.myReaction;wrap.append(rb)}const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function timeline(){const items=H.messages.map(m=>({t:+m.at||+m.received_at||0,m}));for(const c of (H.cards||[]))items.push({t:+c.at||0,c});items.sort((a,b)=>a.t-b.t);return items.slice(-80)}
@@ -209,14 +223,28 @@ async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
+let replyTo=null;
+function setReplyTo(m){replyTo=m;paintReplyBar();focusComposer();if(!island)txt.focus()}
+function paintReplyBar(){for(const bar of document.querySelectorAll('.replybar'))bar.remove();
+ if(!replyTo)return;
+ for(const comp of document.querySelectorAll('.composer')){if(!comp.parentElement)continue;
+  const bar=document.createElement('div');bar.className='replybar nd';
+  const qd=document.createElement('div');qd.className='quote';
+  const qw=document.createElement('div');qw.className='qw';qw.textContent=replyTo.dir==='in'?'חיים':'אתה';
+  const qt=document.createElement('div');qt.className='qt';qt.textContent=String(replyTo.text||'').slice(0,200);
+  qd.append(qw,qt);
+  const x=document.createElement('button');x.className='qx';x.textContent='✕';x.title='בטל ציטוט';
+  x.onclick=()=>{replyTo=null;paintReplyBar()};
+  bar.append(qd,x);comp.parentElement.insertBefore(bar,comp)}}
 function paintChat(){render(log);if(island&&pillMode==='open')render(pillBodyLog())}
 async function doSend(){const t=txt.value.trim();if(!t)return;
- const tmp='local-'+Date.now(),m={id:tmp,dir:'out',text:t,at:Date.now(),status:'waiting'};
+ const ref=replyTo;replyTo=null;paintReplyBar();
+ const tmp='local-'+Date.now(),m={id:tmp,dir:'out',text:t,at:Date.now(),status:'waiting',in_reply_to:ref?String(ref.id||''):''};
  H.messages.push(m);txt.value='';grow(txt);paintChat();save();txt.focus(); // optimistic: the bubble lands before the network does
  if(!H.seenHint){H.seenHint=true;hint.style.display=''}
- const r=await api.chatSend(t);
+ const r=await api.chatSend(t,m.in_reply_to);
  const i=H.messages.findIndex(x=>x.id===tmp);if(i<0)return;
- if(r.ok)H.messages[i]={id:r.id,dir:'out',text:t,at:m.at,status:'sent'};else H.messages[i].status='failed';
+ if(r.ok)H.messages[i]={id:r.id,dir:'out',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to};else H.messages[i].status='failed';
  if(api.chatSentSend)api.chatSentSend(H.messages[i]);
  save();paintChat()}
 let alertPreview='';let soundOn=true;let actx=null;
@@ -251,7 +279,7 @@ function setUnread(v){unread=v;dot.style.display=v?'':'none'}
 function markRead(){const u=H.lastReceived||0;if(!u)return;if(u>readUpTo)readUpTo=u;if(api.chatReadSend)api.chatReadSend(readUpTo);if(api.chatReadMark)api.chatReadMark(readUpTo);save()}
 function focusComposer(){if(!island||pillMode!=='open')return;const i=$('txt2');if(!i)return;requestAnimationFrame(()=>{i.focus();const l=i.value.length;try{i.setSelectionRange(l,l)}catch{}})}
 function applyRead(upto){upto=+upto||0;if(!upto)return;if(upto>readUpTo)readUpTo=upto;const hasUnread=H.messages.some(m=>m.received_at>0&&m.received_at>readUpTo);if(!hasUnread){if(pillMode!=='open'){clearTimeout(prevT);pillMode='mini';pill.classList.remove('alert','preview','bump');pillPrev.style.maxHeight='0';alertPreview='';updatePillSt()}setUnread(false)}else setUnread(true)}
-function openPill(){pillMode='open';setUnread(false);alertPreview='';clearTimeout(prevT);pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.add('open');pill.classList.remove('alert','preview');render(pillBodyLog());api.chatPassthrough(false);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();markRead();focusComposer()}
+function openPill(){pillMode='open';setUnread(false);alertPreview='';clearTimeout(prevT);pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.add('open');pill.classList.remove('alert','preview');render(pillBodyLog());paintReplyBar();api.chatPassthrough(false);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();markRead();focusComposer()}
 function closePill(){pillMode='mini';pill.classList.remove('open','alert','preview');markRead();api.chatPassthrough(true);if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()}
 function pillBodyLog(){let l=$('pillLog');if(!l){pillBody.innerHTML='';l=document.createElement('div');l.className='log';l.id='pillLog';const comp=card.querySelector('.composer').cloneNode(true);comp.querySelector('textarea').id='txt2';comp.querySelector('#shot').id='shot2';comp.querySelector('#shot2').onclick=()=>doShot(scrIdx);comp.querySelector('#scr').id='scr2';comp.querySelector('#scr2').onclick=scrCycle;updScrBtn();comp.querySelector('#send').id='send2';comp.querySelector('#send2').onclick=()=>islandSend(comp);wireComposer(comp.querySelector('textarea'),()=>islandSend(comp));pillBody.append(l,comp)}return l}
 async function islandSend(comp){const inp=comp.querySelector('textarea');const t=inp.value.trim();if(!t)return;inp.value='';grow(inp);txt.value=t;await doSend();render(pillBodyLog());focusComposer()}
