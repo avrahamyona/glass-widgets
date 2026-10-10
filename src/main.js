@@ -278,13 +278,14 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
   return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע'}}});
-async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('v',app.getVersion());if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}
+async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('v',app.getVersion());if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')})),
+ cards:(Array.isArray(j.cards)?j.cards:[]).slice(0,50).filter(c=>c&&c.id).map(cleanCard)}}
 ipcMain.handle('chat:poll',async(_,after)=>{try{return await chatPage(after)}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 // live push: one SSE stream in main, rows broadcast to every chat window; a catch-up page closes any gap on (re)connect
 const CHAT_STREAM_URL=process.env.GLASSWIDGETS_CHAT_STREAM_URL||CHAT_URL.replace(/\/chat$/,'/chat/stream');
 const chatStream={started:false,cursor:0,thread:'chat',stop:false};
 function broadcastChat(row){for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}}
-async function chatCatchup(){for(let n=0;n<10;n++){const r=await chatPage(Math.max(0,chatStream.cursor-1));if(!r.ok)throw new Error('catchup');for(const m of r.messages){if(m.received_at>chatStream.cursor)chatStream.cursor=m.received_at;broadcastChat(m)}if(r.messages.length<50)break}}
+async function chatCatchup(){for(let n=0;n<10;n++){const r=await chatPage(Math.max(0,chatStream.cursor-1));if(!r.ok)throw new Error('catchup');for(const m of r.messages){if(m.received_at>chatStream.cursor)chatStream.cursor=m.received_at;broadcastChat(m)}for(const c of r.cards||[])broadcastCard(c);if(r.messages.length<50&&(!r.cards||r.cards.length<50))break}}
 async function runChatStream(){let backoff=1000;
  while(!chatStream.stop){
   let idleT=null;const ctl=new AbortController();
@@ -305,7 +306,7 @@ async function runChatStream(){let backoff=1000;
 ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  if(!chatStream.started){chatStream.started=true;chatStream.cursor=c;chatStream.thread=callerInstance(e)||'chat';runChatStream()}
  else{if(c&&c>chatStream.cursor)chatStream.cursor=c;
-  chatPage(c).then(r=>{if(r.ok&&e.sender&&!e.sender.isDestroyed())for(const m of r.messages)e.sender.send('chat:msg',m)}).catch(()=>{})} // a late-opening chat window gets its own catch-up
+  chatPage(c).then(r=>{if(r.ok&&e.sender&&!e.sender.isDestroyed()){for(const m of r.messages)e.sender.send('chat:msg',m);for(const cd of r.cards||[])e.sender.send('chat:card',cd)}}).catch(()=>{})} // a late-opening chat window gets its own catch-up
  return {ok:true}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],cards:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};
