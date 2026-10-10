@@ -235,10 +235,10 @@ const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glas
 // chat widget: messages go to the fixes-center worker; Chaim replies by poll.
 const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
 const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||'__GW_CHAT_KEY__'; // CI replaces the placeholder from the GW_CHAT_KEY secret; env override is for local tests
-const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastCard,chatUrl:CHAT_URL});
+const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastCard,chatUrl:CHAT_URL,chatKey:CHAT_KEY});
 ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https?:\/\/\S+$/i.test(u))return {ok:false};shell.openExternal(u);return {ok:true}});
 ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
- const linkQ=filelink.parseLinkQuery(text);if(linkQ){filelink.handle(linkQ);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
+ const fc=filelink.parseFileCommand(text);if(fc){filelink.handle(fc);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
  try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now()}),signal:AbortSignal.timeout(20000)});
   if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
@@ -324,7 +324,7 @@ function cleanCard(c){return {id:String(c.id||'').slice(0,80),title:String(c.tit
  at:+c.at||+c.created_at||Date.now()}}
 function broadcastCard(c){const card=cleanCard(c);if(!card.id)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:card',card)}}
 ipcMain.handle('chat:card-action',async(e,p)=>{
- if(p&&String(p.card_id||'').startsWith('local-link-'))return filelink.handleCardAction(p);
+ if(p&&String(p.card_id||'').startsWith('local-file-'))return filelink.handleCardAction(p);
  const cfg=rd('agent.json',{})||{};const cmdKey=process.env.GLASSWIDGETS_AGENT_CMD_KEY||cfg.cmdKey||CHAT_KEY;
  if(!cmdKey)return {ok:false,error:'no-key'};
  const body={key:cmdKey,card_id:String(p&&p.card_id||'').slice(0,80),button_id:String(p&&p.button_id||'').slice(0,40),label:String(p&&p.label||'').slice(0,40)};
