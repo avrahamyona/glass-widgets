@@ -237,9 +237,9 @@ const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-sta
 const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||'__GW_CHAT_KEY__'; // CI replaces the placeholder from the GW_CHAT_KEY secret; env override is for local tests
 const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastCard,chatUrl:CHAT_URL,chatKey:CHAT_KEY});
 ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https?:\/\/\S+$/i.test(u))return {ok:false};shell.openExternal(u);return {ok:true}});
-ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
+ipcMain.handle('chat:send',async(_,text,replyTo)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
  const fc=filelink.parseFileCommand(text);if(fc){filelink.handle(fc);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
- try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now()}),signal:AbortSignal.timeout(20000)});
+ try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80)}),signal:AbortSignal.timeout(20000)});
   if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
