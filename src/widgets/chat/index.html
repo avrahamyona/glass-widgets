@@ -180,6 +180,7 @@ async function shotInit(){if(!window.api)return;try{const r=await api.shotList()
 function scrCycle(){scrIdx=(scrIdx+1)%scrCount;updScrBtn()}
 async function doShot(idx){const b=document.getElementById(island?'shot2':'shot');if(b)b.disabled=true;
  const r=await api.chatScreenshot(idx);
+ if(!(r&&r.ok)&&r&&r.error){toast.textContent=r.error;toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,2600)}
  const m={id:(r&&r.id)||('local-'+Date.now()),dir:'out',text:'📷 צילום מסך '+(idx+1),at:Date.now(),status:r&&r.ok?'sent':'failed'};
  H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
  if(b)b.disabled=false}
