@@ -412,22 +412,7 @@ app.whenReady().then(()=>{
   require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY});
   clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);
   let pickerWin=null,srvSetWin=null;
-  const currentMode=()=>getSet().mode||'widgets';
-  const broadcastMode=()=>{const m=currentMode();for(const w of Object.values(wins)){if(!w.isDestroyed())w.webContents.send('gw:mode',m)}};
-  let trayRef=null;const refreshTray=()=>{if(trayRef)trayRef.setContextMenu(menu())};
   function ensureChatInstance(){let list=instances();let it=list.find(x=>x.type==='chat');if(!it){it={id:'chat-main',type:'chat'};list.push(it);wr('instances.json',list)}const cfg=getSet();if(!cfg.sizes[it.id]){cfg.sizes[it.id]='island';wr('settings.json',cfg)}return it.id}
-  function applyMode(mode){const s=getSet();s.mode=mode;wr('settings.json',s);
-   if(mode==='server'){
-    for(const id of Object.keys(wins)){const it=instance(id);if(it&&it.type!=='chat'&&wins[id]&&!wins[id].isDestroyed())wins[id].close()}
-    if(setWin&&!setWin.isDestroyed())setWin.close();
-    open(ensureChatInstance());
-   }else{
-    if(srvSetWin&&!srvSetWin.isDestroyed())srvSetWin.close();
-    const en2=rd('enabled.json',{});
-    instances().forEach(({id})=>{if(en2[id]!==false)open(id)});
-   }
-   broadcastMode();refreshTray();
-  }
   function openPicker(){if(pickerWin&&!pickerWin.isDestroyed()){pickerWin.focus();return}
    pickerWin=new BrowserWindow({width:480,height:340,frame:false,transparent:true,hasShadow:false,resizable:false,center:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js')}});
    pickerWin.loadFile('src/picker/index.html');
@@ -440,23 +425,23 @@ app.whenReady().then(()=>{
    srvSetWin.once('ready-to-show',()=>{if(srvSetWin&&!srvSetWin.isDestroyed())srvSetWin.show()});
    srvSetWin.on('closed',()=>srvSetWin=null);
   }
-  ipcMain.handle('mode:get',()=>currentMode());
-  ipcMain.handle('mode:set',(_,m)=>{if(m!=='widgets'&&m!=='server')return {ok:false};applyMode(m);if(pickerWin&&!pickerWin.isDestroyed())pickerWin.close();return {ok:true,mode:m}});
+  ipcMain.handle('picker:choose',(_,m)=>{if(m==='server')openServerSettings();else openSettings();if(pickerWin&&!pickerWin.isDestroyed())pickerWin.close();return {ok:true}});
   ipcMain.handle('picker:open',()=>{openPicker();return {ok:true}});
   ipcMain.handle('server-settings:open',()=>{openServerSettings();return {ok:true}});
   showPickerRef=openPicker;
   if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
-  if(process.env.GLASSWIDGETS_NO_PICKER){const startMode=getSet().mode;if(startMode==='server')applyMode('server');else{const en=rd('enabled.json',null);instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});openSettings()}} // test hook: legacy straight-to-mode startup
-  else openPicker(); // picker is the home screen: no mode UI opens before the user picks
+  ensureChatInstance(); // the dynamic island is part of the permanent background
+  const en=rd('enabled.json',null); // widgets + island always come up - after updates, after reboots, no matter what
+  instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
+  if(process.env.GLASSWIDGETS_NO_PICKER)openSettings(); // test hook: legacy straight-to-settings startup
+  else openPicker(); // the picker opens the chosen mode's management UI; the background keeps running either way
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
   tray.setToolTip('GlassWidgets');
   tray.on('click',openSettings);
   const menu=()=>Menu.buildFromTemplate([
-    {label:'הגדרות…',click:openSettings},
-    {label:'החיים שלי השרתי',type:'radio',checked:currentMode()==='server',click:()=>applyMode('server')},
-    {label:'ווידג׳טים',type:'radio',checked:currentMode()!=='server',click:()=>applyMode('widgets')},
     {label:'מסך בחירה…',click:openPicker},
-    {label:'הגדרות החיים שלי…',visible:currentMode()==='server',click:openServerSettings},{type:'separator'},
+    {label:'ניהול ווידג׳טים…',click:openSettings},
+    {label:'הגדרות החיים שלי…',click:openServerSettings},{type:'separator'},
     ...instances().map(({id,type})=>({label:WIDGETS[type].label+' · '+id.slice(-6),type:'checkbox',checked:!!wins[id],click:()=>{toggle(id);tray.setContextMenu(menu())}})),
     {type:'separator'},
     {label:'העתק כתובת סוללת אייפון (ל-Shortcut)',click:()=>clipboard.writeText('http://'+require('os').hostname()+':8765/iphone-battery?t='+batTok+'&level=<Battery Level>&charging=<1 or 0>')},
