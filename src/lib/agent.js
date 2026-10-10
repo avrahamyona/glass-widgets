@@ -11,7 +11,7 @@ const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*10
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
 const TEXT_EXT=new Set(['.txt','.md','.csv','.json','.log','.xml','.html','.htm','.js','.ts','.py','.yaml','.yml','.ini','.rtf']);
 
-function startAgent({app,rd,wr,chatKey,broadcastCard}){
+function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp}){
  const cfg={...(rd('agent.json',{})||{})};
  const base=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
  const cmdUrl=process.env.GLASSWIDGETS_AGENT_CMD_URL||cfg.cmdUrl||base.replace(/\/chat$/,'/cmd/stream');
@@ -112,6 +112,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard}){
   audit({kind:'run_command',stage:'denied',command:pend.command});
   ack(pend.cmdId,'failed','denied - המשתמש דחה מהאי');return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
+
+ // update_app: the ONLY pre-authorized mutating command (the user's standing grant: app updates install
+ // automatically, without asking). No island card - that would contradict the grant. Everything else
+ // that mutates stays behind the approval card / allowlists.
+ async function updateAppCmd(id){
+  audit({kind:'update_app',stage:'requested'});
+  if(!updateApp)return ack(id,'failed','no updater in this build');
+  try{
+   const r=await updateApp(); // {ok,note,version?} - main.js owns electron-updater
+   audit({kind:'update_app',stage:r.ok?'installing':'failed',note:String(r.note||'').slice(0,200),version:r.version||null});
+   return ack(id,r.ok?'done':'failed',String(r.note||'').slice(0,300),r.version?{version:r.version}:undefined);
+  }catch(e){audit({kind:'update_app',stage:'failed',error:String(e&&e.message||e)});return ack(id,'failed','updater error')}
+ }
 
  async function ack(id,status,note,result){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
@@ -237,6 +250,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard}){
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
    if(m.kind==='open_path')return openPathCmd(m.id,m.path);
    if(m.kind==='run_command')return runCommand(m.id,m.command);
+   if(m.kind==='update_app')return updateAppCmd(m.id);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
@@ -252,7 +266,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve'); // run_command flows only to clients advertising the island approval gate
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update'); // approve: run_command flows only to card-capable clients; update: update_app accepted (pre-authorized standing grant)
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;
