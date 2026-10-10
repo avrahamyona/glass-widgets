@@ -40,7 +40,7 @@ p.sub{font-size:12.5px;color:var(--text2);margin:0 0 20px}
 </div>
 <script>
 document.documentElement.dataset.theme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';
-server.onclick=()=>{api.modeSet('server')};
-widgets.onclick=()=>{api.modeSet('widgets')};
+server.onclick=()=>{api.pickerChoose('server')};
+widgets.onclick=()=>{api.pickerChoose('widgets')};
 x.onclick=()=>window.close();
 </script>
