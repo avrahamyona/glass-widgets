@@ -42,6 +42,9 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 #pillHead .who{font:600 9px var(--font);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
 #pillHead .st{font:400 7.5px var(--font);color:rgba(235,235,245,.55);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
 #pillHead .dot{width:4px;height:4px;border-radius:50%;background:#30d158;flex:none;box-shadow:0 0 5px rgba(48,209,88,.7);transition:width .28s,height .28s}
+#backBtn,#gearBtn{display:none;width:20px;height:20px;border-radius:10px;background:rgba(255,255,255,.14);color:rgba(235,235,245,.85);font-size:12px;line-height:20px;text-align:center;cursor:pointer;flex:none}
+#backBtn:hover,#gearBtn:hover{background:rgba(255,255,255,.26)}
+body.server #pill.open #backBtn,body.server #pill.open #gearBtn{display:block}
 #pillBody{display:block;overflow:hidden;max-height:0;opacity:0;padding:0 14px;transition:max-height .3s cubic-bezier(.32,.72,.35,1),opacity .22s ease,padding .3s cubic-bezier(.32,.72,.35,1)}
 #pill.alert{min-width:110px;max-height:40px;border-radius:20px}
 #pill.alert .st{max-width:190px;overflow:hidden;text-overflow:ellipsis}
@@ -82,7 +85,7 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 </style>
 <body><div class=widget>
 <div id=toast>הועתק</div>
-<div id=pill><div id=pillHead class=nd><span class=av>ח</span><span class=who>חיים שלי</span><span class=dot id=dot style="display:none"></span><span class=st id=pillSt></span></div><div id=pillPrev class=nd></div><div id=pillBody></div></div>
+<div id=pill><div id=pillHead class=nd><span id=backBtn title="חזור לווידג׳טים">‹</span><span class=av>ח</span><span class=who>חיים שלי</span><span class=dot id=dot style="display:none"></span><span class=st id=pillSt></span><span id=gearBtn title="הגדרות החיים שלי">⚙</span></div><div id=pillPrev class=nd></div><div id=pillBody></div></div>
 <div id=card style="display:none;flex:1;flex-direction:column;min-height:0">
  <div class=chdr>חיים</div>
  <div class=log id=log></div>
@@ -211,4 +214,9 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  if(api.onChatCard)api.onChatCard(incomingCard);
  window.__msg=incoming;
  render(island?pillBodyLog():log);shotInit();if(api.chatStream)api.chatStream(H.lastReceived||0)})();
+(async()=>{if(!window.api||!api.modeGet)return;
+ try{const m=await api.modeGet();if(m==='server')document.body.classList.add('server')}catch{}
+ if(api.onMode)api.onMode(m=>document.body.classList.toggle('server',m==='server'));
+ backBtn.onclick=e=>{e.stopPropagation();api.modeSet('widgets')};
+ gearBtn.onclick=e=>{e.stopPropagation();api.serverSettingsOpen()}})();
 </script>
