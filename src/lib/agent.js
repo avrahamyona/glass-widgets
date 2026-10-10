@@ -58,15 +58,22 @@ function startAgent({app,rd,wr,chatKey}){
   }
  }
 
- async function findFiles(id,query,limit){
+ async function findFiles(id,query,limit,folder){
   const terms=String(query||'').toLowerCase().split(/\s+/).filter(t=>t.length>=2).slice(0,5);
   if(!terms.length)return ack(id,'failed','bad query');
+  let roots=folders,scope='';
+  if(folder){
+   let rf=null;try{rf=await fs.promises.realpath(String(folder))}catch{}
+   if(!rf)return ack(id,'failed','folder not found');
+   try{if(!(await fs.promises.stat(rf)).isDirectory())return ack(id,'failed','not a folder')}catch{return ack(id,'failed','not a folder')}
+   roots=[rf];scope=' in '+rf;
+  }
   const hits=[],state={scanned:0,contentLeft:400};
-  for(const f of folders)await walk(f,0,terms,hits,state);
+  for(const f of roots)await walk(f,0,terms,hits,state);
   hits.sort((a,b)=>b.modified-a.modified);
   const lim=Math.min(Math.max(1,+limit||10),20);
   const matches=hits.slice(0,lim);
-  await ack(id,'done',matches.length?matches.length+' matches':'no matches',{matches});
+  await ack(id,'done',(matches.length?matches.length+' matches':'no matches')+scope,{matches});
  }
 
  const MIME={'.pdf':'application/pdf','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.txt':'text/plain','.md':'text/markdown','.csv':'text/csv','.json':'application/json','.zip':'application/zip','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.mp3':'audio/mpeg','.mp4':'video/mp4'};
@@ -123,7 +130,7 @@ function startAgent({app,rd,wr,chatKey}){
  async function handle(m){
   if(!m||typeof m!=='object'||!m.id)return;
   const run=(async()=>{
-   if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit);
+   if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
    return ack(m.id,'failed','unknown kind');
