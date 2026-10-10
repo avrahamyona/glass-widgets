@@ -22,6 +22,20 @@
 .card button:hover{opacity:.85}.card button:active{transform:scale(.96)}
 .card.busy button{pointer-events:none;opacity:.45}.card.busy button.sel{opacity:1}
 .card.acted{opacity:.55}.card.acted button{pointer-events:none;opacity:.45}.card.acted button.sel{opacity:1}
+.filebox{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:rgba(128,128,128,.12);border-radius:10px;padding:9px 11px}
+.filebox .fic{font-size:24px;line-height:1}
+.filebox .fmid{flex:1;min-width:120px}
+.filebox .fname{font:600 12.5px var(--font);word-break:break-all}
+.filebox .fsize{font:400 11px var(--font);opacity:.65;margin-top:1px}
+.filebox .cbtns{width:100%}
+.filebox.busy{opacity:.5;pointer-events:none}
+.reactpop{position:fixed;z-index:60;display:flex;gap:2px;background:#fff;border-radius:20px;box-shadow:0 6px 24px rgba(0,0,0,.25),0 0 0 .5px rgba(0,0,0,.08);padding:4px 6px;animation:cardIn .15s ease}
+.reactpop button{border:0;background:none;font-size:19px;padding:3px 5px;border-radius:14px;cursor:pointer;transition:transform .1s}
+.reactpop button:hover{transform:scale(1.25);background:rgba(128,128,128,.12)}
+.reactpop button.sel{background:rgba(10,132,255,.18)}
+[data-theme=dark] .reactpop{background:#2c2c2e}
+.reactb{position:absolute;bottom:-8px;inset-inline-end:2px;background:#fff;border-radius:10px;font-size:12px;line-height:1.5;padding:0 4px;box-shadow:0 1px 4px rgba(0,0,0,.25);z-index:2;pointer-events:none}
+[data-theme=dark] .reactb{background:#2c2c2e}
 @keyframes cardIn{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
 .meta.in{align-self:flex-end}
 .bub{cursor:pointer}
@@ -40,6 +54,9 @@ body.island{background:transparent}
 body.island .widget{position:static;inset:auto;background:transparent;backdrop-filter:none;box-shadow:none;padding:0;overflow:visible}
 #pill{position:absolute;top:0;left:50%;transform:translateX(-50%);min-width:70px;max-width:360px;border-radius:12px;background:rgba(12,12,14,.95);box-shadow:0 4px 18px rgba(0,0,0,.35),0 0 0 .5px rgba(255,255,255,.08) inset;color:#fff;overflow:hidden;transition:min-width .28s cubic-bezier(.32,.72,.35,1),max-height .32s cubic-bezier(.32,.72,.35,1),border-radius .3s;max-height:24px;cursor:pointer;backdrop-filter:blur(30px) saturate(160%)}
 #pillHead{display:flex;align-items:center;gap:4px;height:24px;padding:0 8px;white-space:nowrap;transition:height .28s cubic-bezier(.32,.72,.35,1),padding .28s cubic-bezier(.32,.72,.35,1),gap .28s}
+#brandBtn{display:inline-flex;align-items:center;gap:4px;cursor:pointer;border-radius:8px;padding:1px 3px;margin-right:-3px}
+#brandBtn:hover{background:rgba(255,255,255,.1)}
+#pill.open #brandBtn{gap:8px}
 #pillHead .av{width:13px;height:13px;border-radius:50%;background:linear-gradient(135deg,#0a84ff,#5e5ce6);display:grid;place-items:center;font-size:7px;transition:width .28s cubic-bezier(.32,.72,.35,1),height .28s cubic-bezier(.32,.72,.35,1),font-size .28s}
 #pillHead .who{font:600 9px var(--font);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
 #pillHead .st{font:400 7.5px var(--font);color:rgba(235,235,245,.55);transition:font-size .28s cubic-bezier(.32,.72,.35,1)}
@@ -87,7 +104,7 @@ body.island .widget{position:static;inset:auto;background:transparent;backdrop-f
 </style>
 <body><div class=widget>
 <div id=toast>הועתק</div>
-<div id=pill><div id=pillHead class=nd><span class=av>ח</span><span class=who>חיים שלי</span><span class=dot id=dot style="display:none"></span><span class=st id=pillSt></span><span id=gearBtn title="הגדרות החיים שלי">⚙</span></div><div id=pillPrev class=nd></div><div id=pillBody></div></div>
+<div id=pill><div id=pillHead class=nd><span id=brandBtn title="החיים שלי המחשבי - ניהול"><span class=av>ח</span></span><span class=who>חיים שלי</span><span class=dot id=dot style="display:none"></span><span class=st id=pillSt></span><span id=gearBtn title="הגדרות החיים שלי">⚙</span></div><div id=pillPrev class=nd></div><div id=pillBody></div></div>
 <div id=card style="display:none;flex:1;flex-direction:column;min-height:0">
  <div class=chdr>חיים</div>
  <div class=log id=log></div>
@@ -107,7 +124,7 @@ function incoming(m){if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
  save();render(log);if(island&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
 function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return;
- H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,at:+c.at||Date.now(),acted:false,actedButton:''});
+ H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,file:c.file&&typeof c.file==='object'?{name:String(c.file.name||''),size:+c.file.size||0,mime:String(c.file.mime||''),url:String(c.file.url||''),path:String(c.file.path||'')}:undefined,at:+c.at||Date.now(),acted:false,actedButton:''});
  save();render(log);
  if(!island)return;
  if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
@@ -125,7 +142,22 @@ function wireLinks(el){for(const a of el.querySelectorAll('a[data-u]'))a.onclick
 function statusText(m){if(m.dir!=='out')return'';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
-function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.innerHTML=linkify(esc(m.text));wireLinks(d);d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
+const REACTS=['👍','❤️','😂','😮','😢','🙏'];let reactPop=null;
+function closeReact(){if(reactPop){reactPop.remove();reactPop=null}}
+document.addEventListener('click',ev=>{if(reactPop&&!reactPop.contains(ev.target))closeReact()},true);
+document.addEventListener('keydown',ev=>{if(ev.key==='Escape')closeReact()});
+function openReact(m,anchor){closeReact();
+ reactPop=document.createElement('div');reactPop.className='reactpop nd';
+ for(const em of REACTS){const b=document.createElement('button');b.textContent=em;if(m.myReaction===em)b.classList.add('sel');b.title=em;
+  b.onclick=ev=>{ev.stopPropagation();closeReact();pickReact(m,em)};reactPop.append(b)}
+ document.body.append(reactPop);
+ const r=anchor.getBoundingClientRect(),pw=reactPop.offsetWidth||220;
+ reactPop.style.left=Math.max(4,Math.min(window.innerWidth-pw-4,r.left+r.width/2-pw/2))+'px';
+ reactPop.style.top=Math.max(4,r.top-46)+'px'}
+async function pickReact(m,em){const nv=m.myReaction===em?'':em;m.myReaction=nv;save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
+ try{await api.chatReact({message_id:m.id,emoji:nv})}catch{}} // optimistic locally; offline keeps the local reaction
+function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.innerHTML=linkify(esc(m.text));wireLinks(d);d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);d.ondblclick=ev=>{ev.stopPropagation();openReact(m,wrap)};const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column;position:relative';wrap.append(d);
+ if(m.myReaction){const rb=document.createElement('span');rb.className='reactb';rb.textContent=m.myReaction;wrap.append(rb)}const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
 function timeline(){const items=H.messages.map(m=>({t:+m.at||+m.received_at||0,m}));for(const c of (H.cards||[]))items.push({t:+c.at||0,c});items.sort((a,b)=>a.t-b.t);return items.slice(-80)}
 function graphSvg(g){const w=210,h=64,pad=6,vals=g.series.map(p=>+p.value||0),max=Math.max(...vals,1);
@@ -141,12 +173,31 @@ function cardEl(c){const d=document.createElement('div');d.className='card nd'+(
  const t=document.createElement('div');t.className='ct';t.textContent=c.title;d.append(t);
  if(c.body){const b=document.createElement('div');b.className='cb';b.innerHTML=linkify(esc(c.body));wireLinks(b);d.append(b)}
  if(c.graph&&c.graph.series&&c.graph.series.length)d.append(graphSvg(c.graph));
- if(c.buttons&&c.buttons.length){const row=document.createElement('div');row.className='cbtns';
+ if(c.file&&c.file.name)d.append(fileBox(c));
+ if(!c.file&&c.buttons&&c.buttons.length){const row=document.createElement('div');row.className='cbtns';
   for(const b of c.buttons){const btn=document.createElement('button');btn.className=b.style==='primary'?'bp':b.style==='danger'?'bd':'bl';btn.textContent=b.label;
    if(c.actedButton===b.id||c.busyButton===b.id)btn.classList.add('sel');
    btn.onclick=()=>cardClick(c,b,d);row.append(btn)}
   d.append(row)}
  return d}
+const fmtSize=n=>n>1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round((+n||0)/1024))+' KB';
+const FILE_ICONS={pdf:'\u{1F4C4}',doc:'\u{1F4DD}',docx:'\u{1F4DD}',txt:'\u{1F4DD}',rtf:'\u{1F4DD}',odt:'\u{1F4DD}',png:'\u{1F5BC}\uFE0F',jpg:'\u{1F5BC}\uFE0F',jpeg:'\u{1F5BC}\uFE0F',gif:'\u{1F5BC}\uFE0F',webp:'\u{1F5BC}\uFE0F',heic:'\u{1F5BC}\uFE0F',mp3:'\u{1F3B5}',m4a:'\u{1F3B5}',wav:'\u{1F3B5}',mp4:'\u{1F3AC}',mov:'\u{1F3AC}',avi:'\u{1F3AC}',xls:'\u{1F4CA}',xlsx:'\u{1F4CA}',csv:'\u{1F4CA}',ppt:'\u{1F4FD}\uFE0F',pptx:'\u{1F4FD}\uFE0F',zip:'\u{1F5DC}\uFE0F',rar:'\u{1F5DC}\uFE0F'};
+const fileIcon=n=>FILE_ICONS[(String(n||'').split('.').pop()||'').toLowerCase()]||'\u{1F4CE}';
+function fileBox(c){const f=c.file,box=document.createElement('div');box.className='filebox';box.dir='auto';
+ const ic=document.createElement('div');ic.className='fic';ic.textContent=fileIcon(f.name);
+ const mid=document.createElement('div');mid.className='fmid';
+ const nm=document.createElement('div');nm.className='fname';nm.textContent=f.name;
+ const sz=document.createElement('div');sz.className='fsize';sz.textContent=[f.size?fmtSize(f.size):'',f.mime||''].filter(Boolean).join(' · ');
+ mid.append(nm,sz);
+ const row=document.createElement('div');row.className='cbtns';
+ const flash=t=>{toast.textContent=t;toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,2200)};
+ const mk=(label,cls,fn)=>{const b=document.createElement('button');b.className=cls;b.textContent=label;
+  b.onclick=async()=>{if(box.classList.contains('busy'))return;box.classList.add('busy');let r=null;try{r=await fn()}catch{}box.classList.remove('busy');
+   flash(r&&r.ok?(r.saved_to?'נשמר להורדות: '+r.saved_to.split(/[\\/]/).pop():'נפתח'):('לא הצלחתי - '+(r&&r.error||'אין חיבור')))};
+  return b};
+ row.append(mk('פתח','bp',()=>api.fileOpen(f)),mk('שמור','bl',()=>api.fileSave(f)));
+ box.append(ic,mid,row);
+ return box}
 async function cardClick(c,b,el){if(c.acted||c.busy)return;c.busy=true;c.busyButton=b.id;
  const fresh=cardEl(c);el.replaceWith(fresh);
  let r={ok:false};try{r=await api.chatCardAction({card_id:c.id,button_id:b.id,label:b.label})}catch{}
@@ -219,4 +270,5 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  window.__msg=incoming;
  render(island?pillBodyLog():log);shotInit();if(api.chatStream)api.chatStream(H.lastReceived||0)})();
 gearBtn.onclick=e=>{e.stopPropagation();api.serverSettingsOpen()};
+brandBtn.onclick=e=>{e.stopPropagation();api.pickerOpen()}; // the branded island area opens the management app
 </script>
