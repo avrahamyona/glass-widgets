@@ -114,7 +114,7 @@ function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widget
 let setWin=null;
 function openSettings(){
   if(setWin){setWin.show();setWin.focus();return}
-  setWin=new BrowserWindow({width:520,height:720,minWidth:460,minHeight:520,title:'GlassWidgets',backgroundColor:'#f2f2f7',autoHideMenuBar:true,show:false,
+  setWin=new BrowserWindow({width:520,height:720,minWidth:460,minHeight:520,title:'החיים שלי המחשבי',backgroundColor:'#f2f2f7',autoHideMenuBar:true,show:false,
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
   setWin.setMenu(null);
   setWin.once('ready-to-show',()=>{if(setWin&&!setWin.isDestroyed())setWin.show()});
@@ -436,7 +436,7 @@ app.whenReady().then(()=>{
   if(process.env.GLASSWIDGETS_NO_PICKER)openSettings(); // test hook: legacy straight-to-settings startup
   else openPicker(); // the picker opens the chosen mode's management UI; the background keeps running either way
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
-  tray.setToolTip('GlassWidgets');
+  tray.setToolTip('החיים שלי המחשבי');
   tray.on('click',openSettings);
   const menu=()=>Menu.buildFromTemplate([
     {label:'מסך בחירה…',click:openPicker},
