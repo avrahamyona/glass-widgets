@@ -118,6 +118,7 @@ function openSettings(){
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
   setWin.setMenu(null);
   setWin.once('ready-to-show',()=>{if(setWin&&!setWin.isDestroyed())setWin.show()});
+  setTimeout(()=>{if(setWin&&!setWin.isDestroyed()&&!setWin.isVisible())setWin.show()},3000);
   setWin.loadFile(path.join(__dirname,'settings','index.html'));
   setWin.on('closed',()=>{setWin=null}); // closing never touches the widgets
 }
@@ -400,42 +401,38 @@ function wireUpdater(){
 ipcMain.handle('update:check',()=>{if(!wireUpdater())return {state:'unavailable',error:'בדיקת עדכונים פועלת רק בגרסה המותקנת, לא בפיתוח'};upd.state='checking';upd.error=null;require('electron-updater').autoUpdater.checkForUpdates().catch(()=>{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'});return upd});
 ipcMain.handle('update:state',()=>upd);
 ipcMain.handle('update:install',()=>{if(upd.state==='ready'&&updWired){require('electron-updater').autoUpdater.quitAndInstall();return {ok:true}}return {ok:false}});
-let showPickerRef=null;
-const lock=app.requestSingleInstanceLock();if(!lock)app.quit();
-app.on('second-instance',()=>{if(showPickerRef)showPickerRef()});
-app.whenReady().then(()=>{
-  if(!lock)return;
+function bootLog(step){try{const f=path.join(app.getPath('userData'),'boot.log');fs.appendFileSync(f,new Date().toISOString()+' v'+app.getVersion()+' '+String(step).slice(0,400)+'\n');const lines=fs.readFileSync(f,'utf8').split('\n');if(lines.length>80)fs.writeFileSync(f,lines.slice(-80).join('\n'))}catch{}}
+process.on('uncaughtException',e=>bootLog('CRASH '+(e&&e.stack||e)));
+process.on('unhandledRejection',e=>bootLog('REJECT '+(e&&e.stack||e)));
+let showPickerRef=null,lock=app.requestSingleInstanceLock(),booted=false;
+app.on('second-instance',()=>{bootLog('second-instance');if(showPickerRef)showPickerRef()});
+app.whenReady().then(()=>boot());
+if(!lock){bootLog('lock busy - retrying');const rt=setInterval(()=>{lock=app.requestSingleInstanceLock();if(lock){clearInterval(rt);bootLog('lock acquired on retry');boot()}},2000);setTimeout(()=>{clearInterval(rt);if(!lock)app.quit()},30000)} // updater/shortcut can race a dying old process
+function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boot');
   screen.on('display-added',reconcileChatScreens);screen.on('display-removed',reconcileChatScreens);screen.on('display-metrics-changed',reconcileChatScreens);
   let lastThemeB;setInterval(()=>{const t=currentTheme()||'system';if(t!==lastThemeB){lastThemeB=t;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('theme:set',t)}}},15000);
-  const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};resumeCloudSession();
-  startMedia();startScan();const batTok=startBatteryServer();
-  require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY});
-  clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);
+  let batTok='';
   let pickerWin=null,srvSetWin=null;
   function ensureChatInstance(){let list=instances();let it=list.find(x=>x.type==='chat');if(!it){it={id:'chat-main',type:'chat'};list.push(it);wr('instances.json',list)}const cfg=getSet();if(!cfg.sizes[it.id]){cfg.sizes[it.id]='island';wr('settings.json',cfg)}return it.id}
   function openPicker(){if(pickerWin&&!pickerWin.isDestroyed()){pickerWin.focus();return}
    pickerWin=new BrowserWindow({width:480,height:340,frame:false,transparent:true,hasShadow:false,resizable:false,center:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js')}});
-   pickerWin.loadFile('src/picker/index.html');
+   pickerWin.loadFile(path.join(__dirname,'picker','index.html'));
    pickerWin.once('ready-to-show',()=>{if(pickerWin&&!pickerWin.isDestroyed())pickerWin.show()});
+   setTimeout(()=>{if(pickerWin&&!pickerWin.isDestroyed()&&!pickerWin.isVisible())pickerWin.show()},3000); // never leave the only startup UI hidden
    pickerWin.on('closed',()=>pickerWin=null);
   }
   function openServerSettings(){if(srvSetWin&&!srvSetWin.isDestroyed()){srvSetWin.focus();return}
    srvSetWin=new BrowserWindow({width:520,height:640,minWidth:460,minHeight:520,title:'החיים שלי השרתי',backgroundColor:'#f2f2f7',autoHideMenuBar:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js')}});
-   srvSetWin.loadFile('src/server-settings/index.html');
+   srvSetWin.loadFile(path.join(__dirname,'server-settings','index.html'));
    srvSetWin.once('ready-to-show',()=>{if(srvSetWin&&!srvSetWin.isDestroyed())srvSetWin.show()});
+   setTimeout(()=>{if(srvSetWin&&!srvSetWin.isDestroyed()&&!srvSetWin.isVisible())srvSetWin.show()},3000);
    srvSetWin.on('closed',()=>srvSetWin=null);
   }
   ipcMain.handle('picker:choose',(_,m)=>{if(m==='server')openServerSettings();else openSettings();if(pickerWin&&!pickerWin.isDestroyed())pickerWin.close();return {ok:true}});
   ipcMain.handle('picker:open',()=>{openPicker();return {ok:true}});
   ipcMain.handle('server-settings:open',()=>{openServerSettings();return {ok:true}});
   showPickerRef=openPicker;
-  if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
-  ensureChatInstance(); // the dynamic island is part of the permanent background
-  const en=rd('enabled.json',null); // widgets + island always come up - after updates, after reboots, no matter what
-  instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
-  if(process.env.GLASSWIDGETS_NO_PICKER)openSettings(); // test hook: legacy straight-to-settings startup
-  else openPicker(); // the picker opens the chosen mode's management UI; the background keeps running either way
-  const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
+  const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png'))); // tray first: access survives any later startup failure
   tray.setToolTip('החיים שלי המחשבי');
   tray.on('click',openSettings);
   const menu=()=>Menu.buildFromTemplate([
@@ -448,7 +445,20 @@ app.whenReady().then(()=>{
     {label:'תמיד מעל חלונות אחרים',type:'checkbox',checked:getSet().onTop,click:i=>{const s=getSet();s.onTop=i.checked;wr('settings.json',s);Object.values(wins).forEach(w=>w.setAlwaysOnTop(i.checked,'screen-saver'))}},
     {label:'הפעל עם ווינדוס',type:'checkbox',checked:app.getLoginItemSettings().openAtLogin,click:i=>app.setLoginItemSettings({openAtLogin:i.checked})},
     {type:'separator'},{label:'יציאה',click:()=>app.quit()}]);
-  trayRef=tray;
   tray.setContextMenu(menu());
-});
+  bootLog('tray');
+  try{const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};resumeCloudSession()}catch(e){bootLog('cloud '+(e&&e.message))}
+  try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
+  try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
+  try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
+  if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
+  ensureChatInstance(); // the dynamic island is part of the permanent background
+  const en=rd('enabled.json',null); // widgets + island always come up - after updates, after reboots, no matter what
+  instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
+  if(process.env.GLASSWIDGETS_NO_PICKER)openSettings(); // test hook: legacy straight-to-settings startup
+  else openPicker(); // the picker opens the chosen mode's management UI; the background keeps running either way
+  bootLog('done');
+}
 app.on('window-all-closed',e=>e.preventDefault());
