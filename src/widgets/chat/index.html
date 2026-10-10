@@ -176,7 +176,7 @@ function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog(
  clearTimeout(prevT);prevT=setTimeout(collapseAlert,4000)}
 let scrIdx=0,scrCount=1;
 function updScrBtn(){for(const b of[document.getElementById('scr'),document.getElementById('scr2')]){if(b){b.style.display=scrCount>1?'':'none';b.textContent='מסך '+(scrIdx+1)}}}
-async function shotInit(){if(!window.api)return;try{const r=await api.shotList();if(r&&r.ok&&r.screens&&r.screens.length)scrCount=r.screens.length}catch{}updScrBtn()}
+async function shotInit(){if(!window.api)return;try{const r=await api.shotList();if(r&&r.ok&&r.screens&&r.screens.length){scrCount=r.screens.length;if(Number.isInteger(r.current)&&r.current>=0&&r.current<scrCount)scrIdx=r.current}}catch{}updScrBtn()}
 function scrCycle(){scrIdx=(scrIdx+1)%scrCount;updScrBtn()}
 async function doShot(idx){const b=document.getElementById(island?'shot2':'shot');if(b)b.disabled=true;
  const r=await api.chatScreenshot(idx);

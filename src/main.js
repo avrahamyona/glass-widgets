@@ -114,9 +114,10 @@ function reload(id){const w=wins[id];if(w)w.loadFile(path.join(__dirname,'widget
 let setWin=null;
 function openSettings(){
   if(setWin){setWin.show();setWin.focus();return}
-  setWin=new BrowserWindow({width:520,height:720,minWidth:460,minHeight:520,title:'GlassWidgets',backgroundColor:'#f2f2f7',autoHideMenuBar:true,
+  setWin=new BrowserWindow({width:520,height:720,minWidth:460,minHeight:520,title:'GlassWidgets',backgroundColor:'#f2f2f7',autoHideMenuBar:true,show:false,
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false}});
   setWin.setMenu(null);
+  setWin.once('ready-to-show',()=>{if(setWin&&!setWin.isDestroyed())setWin.show()});
   setWin.loadFile(path.join(__dirname,'settings','index.html'));
   setWin.on('closed',()=>{setWin=null}); // closing never touches the widgets
 }
@@ -228,7 +229,12 @@ ipcMain.handle('chat:send',async(_,text)=>{text=String(text||'').trim();if(!text
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע. ההודעה לא נשלחה'}}});
 const SHOT_URL=process.env.GLASSWIDGETS_SHOT_URL||CHAT_URL.replace(/\/chat$/,'/screenshot');
-ipcMain.handle('shot:list',async()=>{try{const srcs=await desktopCapturer.getSources({types:['screen']});return {ok:true,screens:srcs.map((sc,i)=>({index:i,name:sc.name||('מסך '+(i+1))}))}}catch{return {ok:false,error:'לא ניתן לגשת למסכים'}}});
+ipcMain.handle('shot:list',async(e)=>{try{const srcs=await desktopCapturer.getSources({types:['screen']});
+ const screens=srcs.map((sc,i)=>({index:i,name:sc.name||('מסך '+(i+1)),displayId:String(sc.display_id||'')}));
+ let current=0;const w=[...Object.values(wins),...chatCompanions.values()].find(x=>x&&!x.isDestroyed()&&x.webContents===e.sender);
+ if(w&&screens.length>1){const bd=w.getBounds(),d=screen.getDisplayNearestPoint({x:bd.x+Math.round(bd.width/2),y:bd.y+Math.round(bd.height/2)});
+  const si=screens.findIndex(s=>s.displayId&&s.displayId===String(d.id));if(si>=0)current=si}
+ return {ok:true,screens:screens.map(({index,name})=>({index,name})),current}}catch{return {ok:false,error:'לא ניתן לגשת למסכים'}}});
 ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));const id=crypto.randomUUID();
  try{const srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:1920,height:1080}});
   const src=srcs[idx];if(!src)return {ok:false,error:'המסך לא נמצא'};
