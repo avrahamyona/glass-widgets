@@ -16,6 +16,16 @@ jobs:
           if (-not $s.Contains('__GW_CHAT_KEY__')) { throw 'chat key placeholder not found in src/main.js' }
           [System.IO.File]::WriteAllText($p, $s.Replace('__GW_CHAT_KEY__', $env:GW_CHAT_KEY))
           if ([System.IO.File]::ReadAllText($p).Contains('__GW_CHAT_KEY__')) { throw 'chat key placeholder still present after injection' }
+      - name: Inject agent command key
+        shell: pwsh
+        env: { GW_CMD_KEY: '${{ secrets.GW_CMD_KEY }}' }
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GW_CMD_KEY)) { Write-Host 'GW_CMD_KEY secret not set - agent module stays dormant'; exit 0 }
+          $p = 'src/lib/agent.js'
+          $s = [System.IO.File]::ReadAllText($p)
+          if (-not $s.Contains('__GW_CMD_KEY__')) { throw 'cmd key placeholder not found in src/lib/agent.js' }
+          [System.IO.File]::WriteAllText($p, $s.Replace('__GW_CMD_KEY__', $env:GW_CMD_KEY.Trim()))
+          if ([System.IO.File]::ReadAllText($p).Contains('__GW_CMD_KEY__')) { throw 'cmd key placeholder still present after injection' }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-dotnet@v4
