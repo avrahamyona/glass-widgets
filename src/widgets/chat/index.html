@@ -9,6 +9,20 @@
 .bub.in{align-self:flex-end;background:#e9e9eb;color:#1c1c1e;border-bottom-right-radius:5px}
 [data-theme=dark] .bub.in{background:#3a3a3c;color:#fff}
 .meta{font-size:9.5px;color:var(--text2);align-self:flex-start;margin-top:1px}
+.card{align-self:stretch;max-width:95%;background:#e9e9eb;color:#1c1c1e;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;animation:cardIn .3s cubic-bezier(.32,.72,.35,1)}
+[data-theme=dark] .card{background:#3a3a3c;color:#fff}
+.card .ct{font:600 12.5px var(--font)}
+.card .cb{font:400 12px var(--font);white-space:pre-wrap;word-break:break-word;opacity:.85}
+.card .cbtns{display:flex;gap:6px;flex-wrap:wrap}
+.card button{border:0;border-radius:9px;font:600 11.5px var(--font);padding:6px 12px;cursor:pointer;transition:opacity .15s,transform .1s}
+.card button.bp{background:#0a84ff;color:#fff}
+.card button.bd{background:#ff453a;color:#fff}
+.card button.bl{background:rgba(128,128,128,.18);color:#1c1c1e}
+[data-theme=dark] .card button.bl{color:#fff}
+.card button:hover{opacity:.85}.card button:active{transform:scale(.96)}
+.card.busy button{pointer-events:none;opacity:.45}.card.busy button.sel{opacity:1}
+.card.acted{opacity:.55}.card.acted button{pointer-events:none;opacity:.45}.card.acted button.sel{opacity:1}
+@keyframes cardIn{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
 .meta.in{align-self:flex-end}
 .bub{cursor:pointer}
 #toast{position:absolute;bottom:64px;left:50%;transform:translateX(-50%);background:rgba(20,20,22,.92);color:#fff;font-size:10.5px;padding:5px 12px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
@@ -87,6 +101,16 @@ function incoming(m){if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;
  H.messages.push({id:m.id,dir:'in',text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
  save();render(log);if(island&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
+function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return;
+ H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,at:+c.at||Date.now(),acted:false,actedButton:''});
+ save();render(log);
+ if(!island)return;
+ if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
+ setUnread(true);chime();pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
+ alertPreview=c.title||'כרטיס חדש';pillPrev.textContent=alertPreview;pill.classList.add('preview');
+ requestAnimationFrame(()=>{const lh=parseFloat(getComputedStyle(pillPrev).lineHeight)||17.4;const cap=Math.round(lh*10)+8;pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,cap)+'px';pillPrev.classList.toggle('more',pillPrev.scrollHeight-6>cap)});
+ if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh();
+ clearTimeout(prevT);prevT=setTimeout(collapseAlert,4000)}
 function lastMsg(){return H.messages[H.messages.length-1]}
 function awaitingHis(){const l=lastMsg();return !!l&&l.dir==='out'}
 function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!=='failed'}
@@ -96,7 +120,33 @@ let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearT
 function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 function bubble(m){const d=document.createElement('div');d.className='bub nd '+m.dir;d.dir='auto';d.textContent=m.text;d.title='לחץ להעתקה';d.onclick=()=>copyMsg(m.text);const wrap=document.createElement('div');wrap.style.cssText='display:flex;flex-direction:column';wrap.append(d);const t=[statusText(m),fmtT(m.at||m.received_at)].filter(Boolean).join(' · ');if(t){const mt=document.createElement('div');mt.className='meta'+(m.status==='failed'?' fail':'')+(m.dir==='in'?' in':'');mt.textContent=t;wrap.append(mt)}return wrap}
 function updatePillSt(netErr){if(netErr){pillSt.textContent='אין חיבור';return}pillSt.textContent=unread&&pillMode==='alert'?'יש תשובה':''}
-function render(into){into.innerHTML='';for(const m of H.messages.slice(-60))into.append(bubble(m));into.scrollTop=into.scrollHeight;updatePillSt()}
+function timeline(){const items=H.messages.map(m=>({t:+m.at||+m.received_at||0,m}));for(const c of (H.cards||[]))items.push({t:+c.at||0,c});items.sort((a,b)=>a.t-b.t);return items.slice(-80)}
+function graphSvg(g){const w=210,h=64,pad=6,vals=g.series.map(p=>+p.value||0),max=Math.max(...vals,1);
+ const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox','0 0 '+w+' '+h);svg.style.width='100%';svg.style.height='auto';
+ if(g.type==='bar'){const bw=(w-pad*2)/vals.length;vals.forEach((v,i)=>{const bh=Math.max(2,(h-pad*2-12)*(v/max));const r=document.createElementNS(ns,'rect');
+  r.setAttribute('x',pad+i*bw+2);r.setAttribute('y',h-pad-10-bh);r.setAttribute('width',Math.max(2,bw-4));r.setAttribute('height',bh);r.setAttribute('rx',2.5);r.setAttribute('fill','#0a84ff');svg.append(r);
+  if(g.series[i].label){const t=document.createElementNS(ns,'text');t.setAttribute('x',pad+i*bw+bw/2);t.setAttribute('y',h-1);t.setAttribute('text-anchor','middle');t.setAttribute('font-size','7');t.setAttribute('fill','currentColor');t.setAttribute('opacity','.6');t.textContent=String(g.series[i].label).slice(0,8);svg.append(t)}})}
+ else{const pts=vals.map((v,i)=>[pad+i*(w-pad*2)/Math.max(1,vals.length-1),h-pad-(h-pad*2)*(v/max)]);
+  const pl=document.createElementNS(ns,'polyline');pl.setAttribute('points',pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' '));pl.setAttribute('fill','none');pl.setAttribute('stroke','#0a84ff');pl.setAttribute('stroke-width','2');pl.setAttribute('stroke-linejoin','round');svg.append(pl);
+  for(const p of pts){const c=document.createElementNS(ns,'circle');c.setAttribute('cx',p[0]);c.setAttribute('cy',p[1]);c.setAttribute('r','2.4');c.setAttribute('fill','#0a84ff');svg.append(c)}}
+ return svg}
+function cardEl(c){const d=document.createElement('div');d.className='card nd'+(c.busy?' busy':'')+(c.acted?' acted':'');d.dir='auto';d.dataset.cid=c.id;
+ const t=document.createElement('div');t.className='ct';t.textContent=c.title;d.append(t);
+ if(c.body){const b=document.createElement('div');b.className='cb';b.textContent=c.body;d.append(b)}
+ if(c.graph&&c.graph.series&&c.graph.series.length)d.append(graphSvg(c.graph));
+ if(c.buttons&&c.buttons.length){const row=document.createElement('div');row.className='cbtns';
+  for(const b of c.buttons){const btn=document.createElement('button');btn.className=b.style==='primary'?'bp':b.style==='danger'?'bd':'bl';btn.textContent=b.label;
+   if(c.actedButton===b.id||c.busyButton===b.id)btn.classList.add('sel');
+   btn.onclick=()=>cardClick(c,b,d);row.append(btn)}
+  d.append(row)}
+ return d}
+async function cardClick(c,b,el){if(c.acted||c.busy)return;c.busy=true;c.busyButton=b.id;
+ const fresh=cardEl(c);el.replaceWith(fresh);
+ let r={ok:false};try{r=await api.chatCardAction({card_id:c.id,button_id:b.id,label:b.label})}catch{}
+ c.busy=false;c.busyButton='';
+ if(r.ok||r.reason==='already_acted'||r.reason==='expired'){c.acted=true;c.actedButton=b.id;save()}
+ if(document.contains(fresh))fresh.replaceWith(cardEl(c));else{render(log);if(island&&pillMode==='open')render(pillBodyLog())}}
+function render(into){into.innerHTML='';for(const it of timeline())into.append(it.m?bubble(it.m):cardEl(it.c));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
@@ -154,9 +204,10 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
-(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  if(api.onChatMsg)api.onChatMsg(incoming);
+ if(api.onChatCard)api.onChatCard(incomingCard);
  window.__msg=incoming;
  render(island?pillBodyLog():log);shotInit();if(api.chatStream)api.chatStream(H.lastReceived||0)})();
 </script>
