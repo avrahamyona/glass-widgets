@@ -11,7 +11,7 @@ const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*10
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
 const TEXT_EXT=new Set(['.txt','.md','.csv','.json','.log','.xml','.html','.htm','.js','.ts','.py','.yaml','.yml','.ini','.rtf']);
 
-function startAgent({app,rd,wr,chatKey}){
+function startAgent({app,rd,wr,chatKey,broadcastCard}){
  const cfg={...(rd('agent.json',{})||{})};
  const base=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
  const cmdUrl=process.env.GLASSWIDGETS_AGENT_CMD_URL||cfg.cmdUrl||base.replace(/\/chat$/,'/cmd/stream');
@@ -77,19 +77,41 @@ function startAgent({app,rd,wr,chatKey}){
  // run_command: a shell command on the PC. Gated by the receiver key at the transport, a deny-list of
  // destructive verbs, a 60s timeout and a 1MB output cap; every run is audited with its output.
  const RUN_DENY=[/\bformat\s+[a-z]:/i,/\bshutdown\b/i,/\brestart-computer\b/i,/\brm\s+-[a-z]*r[a-z]*f\s+\//i,/\bdel\s+\/[a-z]*s/i,/\brd\s+\/[a-z]*s/i,/\brmdir\s+\/[a-z]*s/i,/\bdiskpart\b/i,/<\s*\w+\.(ps1|bat|cmd|exe)/i];
+ function execRun(id,cmd){return new Promise(res=>{
+  exec(cmd,{timeout:60000,maxBuffer:1024*1024,windowsHide:true},async(e,so,se)=>{
+   const stdout=String(so||'').slice(0,3000),stderr=String(se||(e&&e.message||'')).slice(0,1000);
+   audit({kind:'run_command',stage:'executed',command:cmd,ok:!e,exit:e?(e.code??null):0,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300)});
+   await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',{stdout,stderr,exit:e?(e.code??null):0});res();
+  });
+ })}
+
+ // run_command NEVER executes on worker say-so: it parks as a pending approval, the island pops an
+ // unmissable card with the exact command, and only the user's אשר tap runs it. Default deny after ~2 min.
+ const pendingApprovals=new Map(); // cardId -> {cmdId,command,timer}
+ const APPROVAL_TTL=+process.env.GLASSWIDGETS_APPROVAL_TTL_MS||120000;
  function runCommand(id,command){
   const cmd=String(command||'').trim();
   if(!cmd)return ack(id,'failed','missing command');
   if(cmd.length>1000)return ack(id,'failed','command too long');
-  if(RUN_DENY.some(rx=>rx.test(cmd))){audit({kind:'run_command',command:cmd,ok:false,error:'denied'});return ack(id,'failed','command denied by guardrail')}
-  return new Promise(res=>{
-   exec(cmd,{timeout:60000,maxBuffer:1024*1024,windowsHide:true},async(e,so,se)=>{
-    const stdout=String(so||'').slice(0,3000),stderr=String(se||(e&&e.message||'')).slice(0,1000);
-    audit({kind:'run_command',command:cmd,ok:!e,exit:e?(e.code??null):0,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300)});
-    await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',{stdout,stderr,exit:e?(e.code??null):0});res();
-   });
-  });
+  if(RUN_DENY.some(rx=>rx.test(cmd))){audit({kind:'run_command',stage:'denied',command:cmd,error:'guardrail'});return ack(id,'failed','command denied by guardrail')}
+  if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
+  if(!broadcastCard)return ack(id,'failed','no UI for approvals');
+  const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
+  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   audit({kind:'run_command',stage:'expired',command:p.command});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+  timer.unref&&timer.unref();
+  pendingApprovals.set(cardId,{cmdId:id,command:cmd,timer});
+  audit({kind:'run_command',stage:'requested',command:cmd});
+  broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
+ async function handleCardAction(p){
+  const cardId=String(p&&p.card_id||''),pend=pendingApprovals.get(cardId);
+  if(!pend)return {ok:false,reason:'expired'};
+  pendingApprovals.delete(cardId);clearTimeout(pend.timer);
+  if(p.button_id==='approve'){audit({kind:'run_command',stage:'approved',command:pend.command});execRun(pend.cmdId,pend.command);return {ok:true}}
+  audit({kind:'run_command',stage:'denied',command:pend.command});
+  ack(pend.cmdId,'failed','denied - המשתמש דחה מהאי');return {ok:true}}
+ module.exports.handleCardAction=handleCardAction;
 
  async function ack(id,status,note,result){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
@@ -220,7 +242,9 @@ function startAgent({app,rd,wr,chatKey}){
    if(m.kind==='get_file')return getFile(m.id,m.path);
    return ack(m.id,'failed','unknown kind');
   })();
-  await Promise.race([run,new Promise(r=>setTimeout(()=>ack(m.id,'failed','timeout').then(r,r),CAPS.cmdTimeoutMs))]);
+  let tOut=null;
+  await Promise.race([run,new Promise(r=>{tOut=setTimeout(()=>ack(m.id,'failed','timeout').then(r,r),CAPS.cmdTimeoutMs);tOut.unref&&tOut.unref()})]);
+  clearTimeout(tOut); // the watchdog must not ack after the command already answered (incl. parked approvals)
  }
 
  let stop=false;
@@ -228,7 +252,7 @@ function startAgent({app,rd,wr,chatKey}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve'); // run_command flows only to clients advertising the island approval gate
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;

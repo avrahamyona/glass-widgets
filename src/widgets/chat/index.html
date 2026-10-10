@@ -135,6 +135,7 @@ function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return
  save();render(log);
  if(!island)return;
  if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
+ if(String(c.id).startsWith('local-approve-')){chime();setUnread(true);openPill();return} // run_command approvals open the pill front-and-center: unmissable, never auto-collapse
  setUnread(true);chime();pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
  alertPreview=c.title||'כרטיס חדש';pillPrev.innerHTML=linkify(esc(alertPreview));wireLinks(pillPrev);pill.classList.add('preview');
  requestAnimationFrame(()=>{const lh=parseFloat(getComputedStyle(pillPrev).lineHeight)||17.4;const cap=Math.round(lh*10)+8;pillPrev.style.maxHeight=Math.min(pillPrev.scrollHeight+6,cap)+'px';pillPrev.classList.toggle('more',pillPrev.scrollHeight-6>cap)});
