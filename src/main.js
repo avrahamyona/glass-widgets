@@ -405,7 +405,7 @@ function wireUpdater(){
  if(updWired)return true;if(!app.isPackaged)return false;
  try{
   const {autoUpdater}=require('electron-updater');
-  autoUpdater.autoDownload=true;autoUpdater.autoInstallOnAppQuit=true;
+  autoUpdater.autoDownload=true;autoUpdater.autoInstallOnAppQuit=false; // a quit stays quit: a downloaded update installs silently, the new version starts on the user's next explicit launch
   autoUpdater.on('update-available',i=>{upd.state='downloading';upd.version=i.version;upd.percent=0;upd.error=null});
   autoUpdater.on('update-not-available',()=>{upd.state='none';upd.error=null});
   autoUpdater.on('download-progress',p=>{upd.state='downloading';upd.percent=Math.round(p.percent)});
@@ -417,16 +417,25 @@ function wireUpdater(){
  }catch{return false}
 }
 ipcMain.handle('update:check',()=>{if(!wireUpdater())return {state:'unavailable',error:'בדיקת עדכונים פועלת רק בגרסה המותקנת, לא בפיתוח'};upd.state='checking';upd.error=null;require('electron-updater').autoUpdater.checkForUpdates().catch(()=>{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'});return upd});
-ipcMain.handle('update:state',()=>upd);
-ipcMain.handle('update:install',()=>{if(upd.state==='ready'&&updWired){require('electron-updater').autoUpdater.quitAndInstall();return {ok:true}}return {ok:false}});
+ipcMain.handle('update:state',()=>({...upd,current:app.getVersion()}));
+ipcMain.handle('update:install',()=>{if(upd.state==='ready'&&updWired){
+ try{fs.writeFileSync(path.join(app.getPath('userData'),'pending-update-relaunch'),String(Date.now()))}catch{}
+ require('electron-updater').autoUpdater.quitAndInstall(false,true);return {ok:true}}return {ok:false}});
 function bootLog(step){try{const f=path.join(app.getPath('userData'),'boot.log');fs.appendFileSync(f,new Date().toISOString()+' v'+app.getVersion()+' '+String(step).slice(0,400)+'\n');const lines=fs.readFileSync(f,'utf8').split('\n');if(lines.length>80)fs.writeFileSync(f,lines.slice(-80).join('\n'))}catch{}}
 process.on('uncaughtException',e=>bootLog('CRASH '+(e&&e.stack||e)));
 process.on('unhandledRejection',e=>bootLog('REJECT '+(e&&e.stack||e)));
 let showPickerRef=null,lock=app.requestSingleInstanceLock(),booted=false;
-app.on('second-instance',()=>{bootLog('second-instance');if(showPickerRef)showPickerRef()});
+app.on('second-instance',()=>{bootLog('second-instance');
+  if(mgmtWin&&!mgmtWin.isDestroyed()){mgmtWin.show();mgmtWin.focus();return} // a stray relaunch must not yank the user out of the view they are in
+  if(showPickerRef)showPickerRef()});
 app.whenReady().then(()=>boot());
-if(!lock){bootLog('lock busy - retrying');const rt=setInterval(()=>{lock=app.requestSingleInstanceLock();if(lock){clearInterval(rt);bootLog('lock acquired on retry');boot()}},2000);setTimeout(()=>{clearInterval(rt);if(!lock)app.quit()},30000)} // updater/shortcut can race a dying old process
+if(!lock){
+ const marked=fs.existsSync(path.join(app.getPath('userData'),'pending-update-relaunch'));
+ if(!marked){bootLog('lock busy - running instance takes it, exiting');app.quit()} // explicit relaunch: the running instance pops the picker via second-instance
+ else{bootLog('update relaunch - retrying lock');const rt=setInterval(()=>{lock=app.requestSingleInstanceLock();if(lock){clearInterval(rt);bootLog('lock acquired on retry');boot()}},2000);setTimeout(()=>{clearInterval(rt);if(!lock)app.quit()},30000)}
+}
 function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boot');
+  try{fs.unlinkSync(path.join(app.getPath('userData'),'pending-update-relaunch'))}catch{} // consumed: no relaunch-retry again until the next explicit update
   screen.on('display-added',reconcileChatScreens);screen.on('display-removed',reconcileChatScreens);screen.on('display-metrics-changed',reconcileChatScreens);
   let lastThemeB;setInterval(()=>{const t=currentTheme()||'system';if(t!==lastThemeB){lastThemeB=t;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('theme:set',t)}}},15000);
   let batTok='';
@@ -456,6 +465,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
   try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
   if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
   ensureChatInstance(); // the dynamic island is part of the permanent background

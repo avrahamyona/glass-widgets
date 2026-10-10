@@ -5,8 +5,8 @@ const fs=require('fs'),path=require('path'),os=require('os');
 const {screen}=require('electron');
 const {execFile}=require('child_process');
 
-const CAPS={maxDepth:8,maxScan:2000,contentBytes:2*1024*1024,uploadBytes:20*1024*1024,resultLen:3500,noteLen:500,cmdTimeoutMs:120000};
-const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config']);
+const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*1024*1024,resultLen:3500,noteLen:500,cmdTimeoutMs:300000};
+const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
 const TEXT_EXT=new Set(['.txt','.md','.csv','.json','.log','.xml','.html','.htm','.js','.ts','.py','.yaml','.yml','.ini','.rtf']);
 
 function startAgent({app,rd,wr,chatKey}){
@@ -22,7 +22,10 @@ function startAgent({app,rd,wr,chatKey}){
  let folders=[];
  async function resolveFolders(){
   const list=process.env.GLASSWIDGETS_AGENT_FOLDERS?process.env.GLASSWIDGETS_AGENT_FOLDERS.split(',').map(s=>s.trim()).filter(Boolean)
-   :(Array.isArray(cfg.folders)&&cfg.folders.length?cfg.folders:['Documents','Desktop','Downloads'].map(d=>path.join(os.homedir(),d)));
+   :(Array.isArray(cfg.folders)&&cfg.folders.length?cfg.folders:defaultRoots());
+  function defaultRoots(){const r=[os.homedir()];
+   if(process.platform==='win32')for(const c of 'CDEFGHIJKLMNOPQRSTUVWXYZ'){const d=c+':\\';try{if(fs.existsSync(d)&&!r.includes(d))r.push(d)}catch{}}
+   return r}
   const out=[];
   for(const f of list){try{out.push(await fs.promises.realpath(f))}catch{}}
   folders=out;
@@ -42,10 +45,10 @@ function startAgent({app,rd,wr,chatKey}){
  }
 
  async function walk(dir,depth,terms,hits,state){
-  if(depth>CAPS.maxDepth||state.scanned>=CAPS.maxScan)return;
+  if(depth>CAPS.maxDepth||state.scanned>=CAPS.maxScan||Date.now()>state.deadline)return;
   let ents;try{ents=await fs.promises.readdir(dir,{withFileTypes:true})}catch{return}
   for(const e of ents){
-   if(state.scanned>=CAPS.maxScan)return;
+   if(state.scanned>=CAPS.maxScan||Date.now()>state.deadline)return;
    const full=path.join(dir,e.name);
    if(e.isDirectory()){if(!SKIP_DIRS.has(e.name)&&!e.name.startsWith('.'))await walk(full,depth+1,terms,hits,state);continue}
    if(!e.isFile())continue;
@@ -62,6 +65,10 @@ function startAgent({app,rd,wr,chatKey}){
  async function findFiles(id,query,limit,folder){
   const terms=String(query||'').toLowerCase().split(/\s+/).filter(t=>t.length>=2).slice(0,5);
   if(!terms.length)return ack(id,'failed','bad query');
+  const lim=Math.min(Math.max(1,+limit||10),20);
+  if(!folder){try{const fi=require('./fileindex');if(fi.ready()){
+   const hits=fi.search(query,lim);if(hits.length)return ack(id,'done',hits.length+' matches',{matches:hits.map(m=>({path:m.path,name:m.name,size:m.size,modified:m.modified}))});
+  }}catch{}}
   let roots=folders,scope='';
   if(folder){
    let rf=null;try{rf=await fs.promises.realpath(String(folder))}catch{}
@@ -69,10 +76,9 @@ function startAgent({app,rd,wr,chatKey}){
    try{if(!(await fs.promises.stat(rf)).isDirectory())return ack(id,'failed','not a folder')}catch{return ack(id,'failed','not a folder')}
    roots=[rf];scope=' in '+rf;
   }
-  const hits=[],state={scanned:0,contentLeft:400};
+  const hits=[],state={scanned:0,contentLeft:400,deadline:Date.now()+60000};
   for(const f of roots)await walk(f,0,terms,hits,state);
   hits.sort((a,b)=>b.modified-a.modified);
-  const lim=Math.min(Math.max(1,+limit||10),20);
   const matches=hits.slice(0,lim);
   await ack(id,'done',(matches.length?matches.length+' matches':'no matches')+scope,{matches});
  }
@@ -128,10 +134,32 @@ function startAgent({app,rd,wr,chatKey}){
   }catch{await ack(id,'failed','upload error')}
  }
 
+ async function buildIndex(id){
+  try{
+   const fi=require('./fileindex');
+   let roots=['Desktop','Documents','Downloads'].map(d=>path.join(os.homedir(),d));
+   if(process.platform==='win32')for(const c of 'CDEFGHIJKLMNOPQRSTUVWXYZ'){const d=c+':\\';try{if(fs.existsSync(d)&&!roots.includes(d))roots.push(d)}catch{}}
+   if(process.env.GLASSWIDGETS_AGENT_INDEX_ROOTS)roots=process.env.GLASSWIDGETS_AGENT_INDEX_ROOTS.split(',').map(x=>x.trim()).filter(Boolean);
+   const scanned=await fi.scan(roots); // skips Windows/Program Files/AppData etc, capped
+   let entries=[...scanned].map(([p,[size,mtime]])=>({path:p,name:path.basename(p),size,mtime}));
+   entries.sort((a,b)=>a.path.localeCompare(b.path));
+   let json=JSON.stringify({version:1,built_at:Date.now(),entries});
+   let truncated=false;
+   while(Buffer.byteLength(json)>CAPS.uploadBytes&&entries.length){entries.length=Math.floor(entries.length*0.8);truncated=true;json=JSON.stringify({version:1,built_at:Date.now(),truncated:true,entries})}
+   const u=new URL(uploadUrl);u.searchParams.set('name','index.json');
+   const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':cmdKey},body:json,signal:AbortSignal.timeout(90000)});
+   if(!r.ok)return ack(id,'failed','upload '+r.status);
+   const j=await r.json().catch(()=>({}));
+   if(!j.file_id)return ack(id,'failed','upload bad response');
+   await ack(id,'done','indexed '+entries.length+' files from '+roots.length+' roots'+(truncated?' (truncated)':''),{file_id:String(j.file_id),files:entries.length,roots:roots.length,bytes:Buffer.byteLength(json),truncated});
+  }catch(e){await ack(id,'failed','index error')}
+ }
+
  async function handle(m){
   if(!m||typeof m!=='object'||!m.id)return;
   const run=(async()=>{
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
+   if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
    return ack(m.id,'failed','unknown kind');
