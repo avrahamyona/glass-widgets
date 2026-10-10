@@ -370,6 +370,7 @@ app.whenReady().then(()=>{
   let lastThemeB;setInterval(()=>{const t=currentTheme()||'system';if(t!==lastThemeB){lastThemeB=t;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('theme:set',t)}}},15000);
   const cached=encryptedRead('cloud-cache.bin');if(cached)cloudData={...cached,connected:false,state:'cached'};resumeCloudSession();
   startMedia();startScan();const batTok=startBatteryServer();
+  require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY});
   clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800);
   const en=rd('enabled.json',null);
   instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
