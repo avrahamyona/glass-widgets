@@ -139,7 +139,7 @@ function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!==
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function linkify(escaped){return escaped.replace(/https?:\/\/[^\s<>"']+/g,u=>'<a href=# data-u="'+u+'">'+u+'</a>')}
 function wireLinks(el){for(const a of el.querySelectorAll('a[data-u]'))a.onclick=e=>{e.preventDefault();e.stopPropagation();if(window.api&&api.openExternal)api.openExternal(a.dataset.u)}}
-function statusText(m){if(m.dir!=='out')return'';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
+function statusText(m){if(m.dir!=='out')return'';if(m.status==='waiting')return'שולח…';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 const REACTS=['👍','❤️','😂','😮','😢','🙏'];let reactPop=null;
@@ -209,13 +209,16 @@ async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
 function wireComposer(el,fn){el.addEventListener('input',()=>grow(el));el.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();fn(el)}})}
-async function doSend(){const t=txt.value.trim();if(!t)return;send.disabled=true;txt.disabled=true;
+function paintChat(){render(log);if(island&&pillMode==='open')render(pillBodyLog())}
+async function doSend(){const t=txt.value.trim();if(!t)return;
+ const tmp='local-'+Date.now(),m={id:tmp,dir:'out',text:t,at:Date.now(),status:'waiting'};
+ H.messages.push(m);txt.value='';grow(txt);paintChat();save();txt.focus(); // optimistic: the bubble lands before the network does
+ if(!H.seenHint){H.seenHint=true;hint.style.display=''}
  const r=await api.chatSend(t);
- if(r.ok){const m={id:r.id,dir:'out',text:t,at:Date.now(),status:'sent'};H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);txt.value='';grow(txt);
-  if(!H.seenHint){H.seenHint=true;hint.style.display=''}
-  await save();render(log)}
- else{const m={id:'local-'+Date.now(),dir:'out',text:t,at:Date.now(),status:'failed'};H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log)}
- send.disabled=false;txt.disabled=false;txt.focus()}
+ const i=H.messages.findIndex(x=>x.id===tmp);if(i<0)return;
+ if(r.ok)H.messages[i]={id:r.id,dir:'out',text:t,at:m.at,status:'sent'};else H.messages[i].status='failed';
+ if(api.chatSentSend)api.chatSentSend(H.messages[i]);
+ save();paintChat()}
 let alertPreview='';let soundOn=true;let actx=null;
 async function chime(){if(q.get('companion')||!soundOn)return;try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();
  if(actx.state==='suspended'&&actx.resume){await actx.resume().catch(()=>{});if(actx.state==='suspended'){setTimeout(chime,300);return}}
