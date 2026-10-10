@@ -19,7 +19,11 @@ button.act{border:0;border-radius:9px;background:#0a84ff;color:#fff;font:600 12p
 button.act:disabled{opacity:.5}
 textarea{width:100%;border:0;border-radius:10px;background:#f2f2f7;padding:9px 11px;font:400 12px var(--font);resize:none;min-height:64px;outline:0}
 #fbSt{font-size:10.5px;color:var(--text2);margin-top:6px}
-</style></head><body>
+
+#backHome{position:absolute;top:14px;right:14px;z-index:9;width:26px;height:26px;border-radius:13px;border:0;background:rgba(128,128,128,.16);color:var(--text,#1c1c1e);font-size:15px;line-height:1;cursor:pointer}
+#backHome:hover{background:rgba(128,128,128,.3)}
+</style></head><body style="position:relative">
+<button id=backHome title="חזרה למסך הבחירה">‹</button>
 <h1>החיים שלי השרתי</h1><div class="sub" id="ver"></div>
 <div class="card">
  <div class="row"><div><div class="lbl">צליל כשמגיעה תשובה</div></div><div class="tgl" id="tSound"></div></div>
@@ -51,4 +55,5 @@ async function init(){
 }
 function paintUpd(u){if(!u)return;$('updSt').textContent=u.state==='ready'?'עדכון '+u.version+' מוכן - יותקן ביציאה':u.state==='downloading'?'מוריד... '+u.percent+'%':u.state==='checking'?'בודק...':u.state==='none'?'אתה מעודכן':(u.error||'')}
 init();
-</script></body></html>
+</script><script>backHome.onclick=()=>{api.pickerOpen();window.close()};</script>
+</body></html>

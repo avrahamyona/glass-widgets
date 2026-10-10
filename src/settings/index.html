@@ -20,8 +20,12 @@ input.t{border:0;background:#e9e9ee;border-radius:8px;padding:7px 10px;font:500 
 button.b{border:0;background:#0a84ff;color:#fff;border-radius:8px;padding:7px 14px;font:600 12.5px var(--font);cursor:pointer}
 .res{width:100%;display:flex;flex-direction:column}.res div{padding:8px 4px;color:#0a84ff;cursor:pointer;font-size:13px}
 .foot{text-align:center;color:#8e8e93;font-size:11px;margin-top:22px;line-height:1.6}
+
+#backHome{position:absolute;top:14px;right:14px;z-index:9;width:26px;height:26px;border-radius:13px;border:0;background:rgba(128,128,128,.16);color:var(--text,#1c1c1e);font-size:15px;line-height:1;cursor:pointer}
+#backHome:hover{background:rgba(128,128,128,.3)}
 </style>
-<body>
+<body style="position:relative">
+<button id=backHome title="חזרה למסך הבחירה">‹</button>
 <h1>החיים שלי המחשבי</h1><div class=sub>בחר אילו ווידג׳טים יופיעו ואיך הם ייראו. סגירת החלון הזה לא סוגרת את הווידג׳טים.</div>
 <h2>iCloud</h2><div class=card>
 <div class=row><div class=n>חשבון iCloud אחד · ניסיוני<div class=d>פתקים, תזכורות ולוח שנה בחיבור נתונים אחד. קריאה בלבד דרך ממשק לא רשמי. אין כתיבה בחשבון. עדכון ידני בלבד, בלי סנכרון אוטומטי. Apple עשויה לשנות או לחסום את החיבור.</div></div></div>
@@ -118,3 +122,4 @@ updInstall.onclick=async()=>{updMsg.textContent='מתקין ומפעיל מחד�
 fbGo.onclick=async()=>{const t=fbText.value.trim();if(t.length<5){fbMsg.textContent='כתוב לפחות כמה מילים (5 תווים ומעלה)';return}fbGo.disabled=true;fbMsg.textContent='שולח…';try{const r=await api.feedbackSend(t);fbMsg.textContent=r.ok?'נשלח, תודה! הדיווח אצלנו לביצוע':(r.error||'השליחה נכשלה');if(r.ok)fbText.value=''}catch{fbMsg.textContent='אין חיבור כרגע. הדיווח לא נשלח'}finally{fbGo.disabled=false}};
 load();
  </script>
+<script>backHome.onclick=()=>{api.pickerOpen();window.close()};</script>
