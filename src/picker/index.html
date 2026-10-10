@@ -19,6 +19,21 @@ p.sub{font-size:12.5px;color:var(--text2);margin:0 0 20px}
 .x{position:absolute;top:10px;left:12px;-webkit-app-region:no-drag;border:0;background:rgba(128,128,128,.16);color:var(--text2);width:22px;height:22px;border-radius:11px;font-size:12px;cursor:pointer;line-height:1}
 .x:hover{background:rgba(128,128,128,.3)}
 .panel{position:relative}
+.upd{margin-top:16px;border-top:1px solid rgba(128,128,128,.25);padding-top:12px}
+.updr{display:flex;align-items:center;gap:10px}
+.ubtn{-webkit-app-region:no-drag;border:0;border-radius:9px;background:#0a84ff;color:#fff;font-size:12.5px;font-weight:600;padding:7px 14px;cursor:pointer;font-family:var(--font)}
+.ubtn:hover{background:#0077ed}
+.ubtn.big{font-size:14px;padding:10px 22px;margin-top:12px;width:100%}
+.ust{font-size:12px;color:var(--text2);flex:1;text-align:right}
+.uver{font-size:11px;color:var(--text2);opacity:.75}
+.pop{position:fixed;inset:0;background:rgba(0,0,0,.45);display:grid;place-items:center;z-index:50}
+.pop[hidden]{display:none} /* author display:grid beats the hidden attribute - without this the hidden popup swallows every click */
+.popc{width:320px;background:var(--panel,#fff);border-radius:18px;box-shadow:0 24px 70px rgba(0,0,0,.4);padding:24px 22px;text-align:center}
+[data-theme=dark] .popc{background:#2c2c2e}
+.pt{font-size:15px;font-weight:700;color:var(--text);margin-bottom:14px}
+.bar{height:8px;border-radius:4px;background:rgba(128,128,128,.22);overflow:hidden}
+.fill{height:100%;width:0;background:linear-gradient(90deg,#0a84ff,#5e5ce6);border-radius:4px;transition:width .4s ease}
+.pp{font-size:12px;color:var(--text2);margin-top:8px}
 </style>
 <body>
 <div class=panel>
@@ -37,10 +52,39 @@ p.sub{font-size:12.5px;color:var(--text2);margin:0 0 20px}
    <span class=d>שעון, מזג אוויר, פתקים וכל הדש</span>
   </button>
  </div>
+ <div class=upd>
+  <div class=updr>
+   <button class=ubtn id=updCheck>בדוק עדכון</button>
+   <span class=ust id=updSt></span>
+   <span class=uver id=updVer></span>
+  </div>
+ </div>
+</div>
+<div class=pop id=updPop hidden>
+ <div class=popc>
+  <div class=pt id=updPopT>מוריד עדכון…</div>
+  <div class=bar><div class=fill id=updBar></div></div>
+  <div class=pp id=updPct></div>
+  <button class="ubtn big" id=updInstall hidden>עדכן עכשיו</button>
+ </div>
 </div>
 <script>
 document.documentElement.dataset.theme=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';
 server.onclick=()=>{api.pickerChoose('server')};
 widgets.onclick=()=>{api.pickerChoose('widgets')};
 x.onclick=()=>window.close();
+let updT=null;
+function updPaint(s){if(!s)return;
+ if(s.current)updVer.textContent='גרסה '+s.current;
+ const st=s.state;
+ if(st==='checking'){updSt.textContent='בודק…';updPop.hidden=true}
+ else if(st==='downloading'){updSt.textContent='מוריד…';updPop.hidden=false;updPopT.textContent='מוריד עדכון'+(s.version?' לגרסה '+s.version:'')+'…';updBar.style.width=(s.percent||0)+'%';updPct.textContent=(s.percent||0)+'%';updInstall.hidden=true}
+ else if(st==='ready'){updSt.textContent='מוכן להתקנה';updPop.hidden=false;updPopT.textContent='גרסה '+(s.version||'')+' מוכנה';updBar.style.width='100%';updPct.textContent='ההורדה הושלמה';updInstall.hidden=false}
+ else if(st==='none'){updSt.textContent='הגרסה עדכנית ✅';updPop.hidden=true}
+ else if(st==='error'){updSt.textContent=s.error||'שגיאה';updPop.hidden=true}
+ else if(st==='unavailable'){updSt.textContent=s.error||'לא זמין';updPop.hidden=true}}
+async function updRefresh(){try{updPaint(await api.updateState())}catch{}}
+updCheck.onclick=async()=>{updSt.textContent='בודק…';try{updPaint(await api.updateCheck())}catch{updSt.textContent='שגיאה'}clearInterval(updT);updT=setInterval(updRefresh,1500)};
+updInstall.onclick=()=>{updPopT.textContent='מתקין ומפעיל מחדש…';api.updateInstall()};
+updRefresh(); // reflects a background-downloaded update the moment the picker opens
 </script>
