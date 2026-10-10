@@ -240,7 +240,7 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
   return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע'}}});
-async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}
+async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('v',app.getVersion());if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')}))}}
 ipcMain.handle('chat:poll',async(_,after)=>{try{return await chatPage(after)}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 // live push: one SSE stream in main, rows broadcast to every chat window; a catch-up page closes any gap on (re)connect
 const CHAT_STREAM_URL=process.env.GLASSWIDGETS_CHAT_STREAM_URL||CHAT_URL.replace(/\/chat$/,'/chat/stream');
@@ -252,7 +252,7 @@ async function runChatStream(){let backoff=1000;
   let idleT=null;const ctl=new AbortController();
   try{
    await chatCatchup();
-   const u=new URL(CHAT_STREAM_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('thread',chatStream.thread);
+   const u=new URL(CHAT_STREAM_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('thread',chatStream.thread);u.searchParams.set('v',app.getVersion());
    const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
    if(!r.ok||!r.body)throw new Error('stream '+r.status);
    backoff=1000;
