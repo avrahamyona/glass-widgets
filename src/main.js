@@ -288,7 +288,8 @@ async function runChatStream(){let backoff=1000;
   }catch(e){clearTimeout(idleT);if(chatStream.stop)break;await new Promise(r=>setTimeout(r,backoff));backoff=Math.min(backoff*2,15000)}}}
 ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  if(!chatStream.started){chatStream.started=true;chatStream.cursor=c;chatStream.thread=callerInstance(e)||'chat';runChatStream()}
- else if(c&&c>chatStream.cursor)chatStream.cursor=c;
+ else{if(c&&c>chatStream.cursor)chatStream.cursor=c;
+  chatPage(c).then(r=>{if(r.ok&&e.sender&&!e.sender.isDestroyed())for(const m of r.messages)e.sender.send('chat:msg',m)}).catch(()=>{})} // a late-opening chat window gets its own catch-up
  return {ok:true}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],cards:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};
@@ -399,8 +400,9 @@ function wireUpdater(){
 ipcMain.handle('update:check',()=>{if(!wireUpdater())return {state:'unavailable',error:'בדיקת עדכונים פועלת רק בגרסה המותקנת, לא בפיתוח'};upd.state='checking';upd.error=null;require('electron-updater').autoUpdater.checkForUpdates().catch(()=>{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'});return upd});
 ipcMain.handle('update:state',()=>upd);
 ipcMain.handle('update:install',()=>{if(upd.state==='ready'&&updWired){require('electron-updater').autoUpdater.quitAndInstall();return {ok:true}}return {ok:false}});
+let showPickerRef=null;
 const lock=app.requestSingleInstanceLock();if(!lock)app.quit();
-app.on('second-instance',()=>openSettings());
+app.on('second-instance',()=>{if(showPickerRef)showPickerRef()});
 app.whenReady().then(()=>{
   if(!lock)return;
   screen.on('display-added',reconcileChatScreens);screen.on('display-removed',reconcileChatScreens);screen.on('display-metrics-changed',reconcileChatScreens);
@@ -423,7 +425,6 @@ app.whenReady().then(()=>{
     if(srvSetWin&&!srvSetWin.isDestroyed())srvSetWin.close();
     const en2=rd('enabled.json',{});
     instances().forEach(({id})=>{if(en2[id]!==false)open(id)});
-    openSettings();
    }
    broadcastMode();refreshTray();
   }
@@ -443,13 +444,10 @@ app.whenReady().then(()=>{
   ipcMain.handle('mode:set',(_,m)=>{if(m!=='widgets'&&m!=='server')return {ok:false};applyMode(m);if(pickerWin&&!pickerWin.isDestroyed())pickerWin.close();return {ok:true,mode:m}});
   ipcMain.handle('picker:open',()=>{openPicker();return {ok:true}});
   ipcMain.handle('server-settings:open',()=>{openServerSettings();return {ok:true}});
-  const en=rd('enabled.json',null);
-  const startMode=getSet().mode;
-  if(startMode==='server'){applyMode('server')}
-  else{instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
-  openSettings(); // every launch opens the management window
-  }
-  openPicker(); // picker on every launch; the saved mode only drives background startup
+  showPickerRef=openPicker;
+  if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
+  if(process.env.GLASSWIDGETS_NO_PICKER){const startMode=getSet().mode;if(startMode==='server')applyMode('server');else{const en=rd('enabled.json',null);instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});openSettings()}} // test hook: legacy straight-to-mode startup
+  else openPicker(); // picker is the home screen: no mode UI opens before the user picks
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
   tray.setToolTip('GlassWidgets');
   tray.on('click',openSettings);
