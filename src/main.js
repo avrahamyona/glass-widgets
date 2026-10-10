@@ -448,7 +448,8 @@ app.whenReady().then(()=>{
   if(startMode==='server'){applyMode('server')}
   else{instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
   openSettings(); // every launch opens the management window
-  if(!startMode)openPicker()}
+  }
+  openPicker(); // picker on every launch; the saved mode only drives background startup
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png')));
   tray.setToolTip('GlassWidgets');
   tray.on('click',openSettings);
