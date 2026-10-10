@@ -41,11 +41,15 @@ function roots(){const r=[os.homedir()];
  if(process.platform==='win32'){for(const c of 'CDEFGHIJKLMNOPQRSTUVWXYZ'){const d=c+':\\';try{if(fs.existsSync(d)&&d.toUpperCase()!==(process.env.SystemDrive||'C:').toUpperCase()+'\\')r.push(d)}catch{}}
   const sd=(process.env.SystemDrive||'C:')+'\\';if(!r.includes(sd))r.push(sd)}
  return r}
-async function searchFiles(query){const gs=groups(query);if(!gs.length)return[];
+async function liveSearchFiles(query){const gs=groups(query);if(!gs.length)return[];
  const hits=[],state={scanned:0,maxScan:60000,deadline:Date.now()+12000};
  for(const r of roots())await walk(r,0,gs,query,hits,state);
  hits.sort((a,b)=>b.score-a.score||b.modified-a.modified);
  return hits.slice(0,8)}
+const fileindex=require('./fileindex');
+async function searchFiles(query){
+ if(fileindex.ready()){const h=fileindex.search(query);if(h.length)return h} // index first; a miss falls through to a live walk in case the file is newer than the index
+ return liveSearchFiles(query)}
 const MIME={'.pdf':'application/pdf','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.txt':'text/plain','.md':'text/markdown','.csv':'text/csv','.json':'application/json','.zip':'application/zip','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.mp3':'audio/mpeg','.mp4':'video/mp4'};
 function cmdKey(){const k=process.env.GLASSWIDGETS_AGENT_CMD_KEY||require('./agent').cmdKey;return k&&String(k).slice(0,5)!=='__GW_'?k:''}
 function senderKey(){const k=deps.chatKey;return k&&String(k).slice(0,5)!=='__GW_'?k:''}
