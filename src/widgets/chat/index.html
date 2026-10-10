@@ -117,7 +117,7 @@ async function chime(){if(q.get('companion')||!soundOn)return;try{actx=actx||new
 let prevT=null;
 function collapseAlert(){if(pillMode!=='alert')return;pillMode='mini';pillPrev.style.maxHeight='0';pillPrev.classList.remove('more');pill.classList.remove('alert','preview','bump');alertPreview='';updatePillSt();
  setTimeout(()=>{if(window.api&&api.winNudge)api.winNudge();window.gwDragRefresh&&gwDragRefresh()},400)}
-function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());if(document.hasFocus()){markRead()}else{setUnread(true);chime()}focusComposer();return}
+function newReply(m){if(!island)return;if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
  if(m)alertPreview=m.text;setUnread(true);chime();
  pillMode='alert';pill.classList.add('alert','bump');updatePillSt();setTimeout(()=>pill.classList.remove('bump'),700);
  pillPrev.textContent=alertPreview;pill.classList.add('preview');
