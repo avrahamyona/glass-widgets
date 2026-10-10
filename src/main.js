@@ -235,10 +235,16 @@ ipcMain.handle('shot:list',async(e)=>{try{const srcs=await desktopCapturer.getSo
  if(w&&screens.length>1){const bd=w.getBounds(),d=screen.getDisplayNearestPoint({x:bd.x+Math.round(bd.width/2),y:bd.y+Math.round(bd.height/2)});
   const si=screens.findIndex(s=>s.displayId&&s.displayId===String(d.id));if(si>=0)current=si}
  return {ok:true,screens:screens.map(({index,name})=>({index,name})),current}}catch{return {ok:false,error:'לא ניתן לגשת למסכים'}}});
+function isBlackImage(img){try{const tiny=img.resize({width:16,height:9});const buf=tiny.toBitmap();let max=0;for(let i=0;i<buf.length;i+=4){const v=Math.max(buf[i],buf[i+1],buf[i+2]);if(v>max)max=v;if(max>14)return false}return true}catch{return false}}
 ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));const id=crypto.randomUUID();
- try{const srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:1920,height:1080}});
-  const src=srcs[idx];if(!src)return {ok:false,error:'המסך לא נמצא'};
-  const img=src.thumbnail;if(!img||img.isEmpty())return {ok:false,error:'הצילום נכשל'};
+ try{let srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:1920,height:1080}});
+  let src=srcs[idx];if(!src)return {ok:false,error:'המסך לא נמצא'};
+  let img=src.thumbnail;if(!img||img.isEmpty())return {ok:false,error:'הצילום נכשל'};
+  if(isBlackImage(img)){ // secondary-GPU displays can yield solid-black thumbnails: retry at the display's native size
+   const d=screen.getAllDisplays().find(x=>String(x.id)===String(src.display_id));
+   if(d){srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:d.size.width,height:d.size.height}});
+    src=srcs[idx];img=src&&src.thumbnail}
+   if(!img||img.isEmpty()||isBlackImage(img))return {ok:false,error:'הצילום יצא שחור - המסך כבוי או לא נגיש כרגע'}}
   const jpeg=img.toJPEG(82),sz=img.getSize();
   if(jpeg.length>3500000)return {ok:false,error:'התמונה גדולה מדי'};
   const r=await fetch(SHOT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,image:jpeg.toString('base64'),at:Date.now(),width:sz.width,height:sz.height}),signal:AbortSignal.timeout(20000)});
