@@ -1,0 +1,54 @@
+<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="utf-8"><title>החיים שלי השרתי</title>
+<style>
+@font-face{font-family:Inter;src:url('../shared/fonts/Inter-Variable.woff2')}
+@font-face{font-family:Heebo;src:url('../shared/fonts/Heebo-Hebrew.woff2')}
+:root{--font:Heebo,Inter,system-ui;--text:#1c1c1e;--text2:#6e6e73}
+*{box-sizing:border-box;margin:0}
+body{font-family:var(--font);background:#f2f2f7;color:var(--text);padding:18px;font-size:13px}
+h1{font-size:17px;font-weight:700}
+.sub{color:var(--text2);font-size:11px;margin-top:2px}
+.card{background:#fff;border-radius:12px;padding:14px;margin-top:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.row{display:flex;align-items:center;justify-content:space-between;padding:7px 0}
+.row+.row{border-top:.5px solid #e5e5ea}
+.lbl{font-weight:600}
+.hint{font-size:10.5px;color:var(--text2)}
+.tgl{width:44px;height:26px;border-radius:13px;background:#e5e5ea;position:relative;cursor:pointer;transition:background .2s;flex:none}
+.tgl:after{content:'';position:absolute;top:2px;right:2px;width:22px;height:22px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2);transition:transform .2s}
+.tgl.on{background:#34c759}.tgl.on:after{transform:translateX(-18px)}
+button.act{border:0;border-radius:9px;background:#0a84ff;color:#fff;font:600 12px var(--font);padding:7px 14px;cursor:pointer}
+button.act:disabled{opacity:.5}
+textarea{width:100%;border:0;border-radius:10px;background:#f2f2f7;padding:9px 11px;font:400 12px var(--font);resize:none;min-height:64px;outline:0}
+#fbSt{font-size:10.5px;color:var(--text2);margin-top:6px}
+</style></head><body>
+<h1>החיים שלי השרתי</h1><div class="sub" id="ver"></div>
+<div class="card">
+ <div class="row"><div><div class="lbl">צליל כשמגיעה תשובה</div></div><div class="tgl" id="tSound"></div></div>
+ <div class="row"><div><div class="lbl">איילנד בכל המסכים</div></div><div class="tgl" id="tMulti"></div></div>
+ <div class="row"><div><div class="lbl">תמיד מעל חלונות אחרים</div></div><div class="tgl" id="tTop"></div></div>
+ <div class="row"><div><div class="lbl">הפעל עם ווינדוס</div></div><div class="tgl" id="tStart"></div></div>
+</div>
+<div class="card">
+ <div class="row"><div><div class="lbl">עדכונים</div><div class="hint" id="updSt"></div></div><button class="act" id="updBtn">בדוק עדכון</button></div>
+</div>
+<div class="card">
+ <div class="lbl" style="margin-bottom:8px">דיווח על בעיה</div>
+ <textarea id="fb" placeholder="כתוב מה לא עובד..."></textarea>
+ <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px"><div id="fbSt"></div><button class="act" id="fbBtn">שלח</button></div>
+</div>
+<script>
+const $=i=>document.getElementById(i);
+async function init(){
+ const r=await api.setGet();const s=r.settings;
+ $('ver').textContent='גרסה '+(r.version||'');
+ const bind=(id,get,set)=>{const el=$(id);const paint=()=>el.classList.toggle('on',!!get());el.onclick=async()=>{await set(!get());paint()};paint()};
+ bind('tSound',()=>s.chatSound!==false,v=>{s.chatSound=v;return api.setSave({chatSound:v})});
+ bind('tMulti',()=>s.chatMultiScreen!==false,v=>{s.chatMultiScreen=v;return api.setSave({chatMultiScreen:v})});
+ bind('tTop',()=>!!s.onTop,v=>{s.onTop=v;return api.setSave({onTop:v})});
+ bind('tStart',()=>!!r.autostart,v=>{s._a=v;return api.setSave({autostart:v})});
+ const upd=await api.updateState();paintUpd(upd);
+ $('updBtn').onclick=async()=>{$('updBtn').disabled=true;const r2=await api.updateCheck();paintUpd(r2);$('updBtn').disabled=false};
+ $('fbBtn').onclick=async()=>{const t=$('fb').value.trim();if(!t)return;$('fbBtn').disabled=true;const r3=await api.feedbackSend(t);$('fbSt').textContent=r3.ok?'נשלח, תודה!':(r3.error||'נכשל');if(r3.ok)$('fb').value='';$('fbBtn').disabled=false};
+}
+function paintUpd(u){if(!u)return;$('updSt').textContent=u.state==='ready'?'עדכון '+u.version+' מוכן - יותקן ביציאה':u.state==='downloading'?'מוריד... '+u.percent+'%':u.state==='checking'?'בודק...':u.state==='none'?'אתה מעודכן':(u.error||'')}
+init();
+</script></body></html>
