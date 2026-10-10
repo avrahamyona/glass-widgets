@@ -327,6 +327,7 @@ function cleanCard(c){return {id:String(c.id||'').slice(0,80),title:String(c.tit
 function broadcastCard(c){const card=cleanCard(c);if(!card.id)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:card',card)}}
 ipcMain.handle('chat:card-action',async(e,p)=>{
  if(p&&String(p.card_id||'').startsWith('local-file-'))return filelink.handleCardAction(p);
+ if(p&&String(p.card_id||'').startsWith('local-approve-')){const ag=require('./lib/agent');return ag.handleCardAction?ag.handleCardAction(p):{ok:false,reason:'expired'}}
  const cfg=rd('agent.json',{})||{};const cmdKey=process.env.GLASSWIDGETS_AGENT_CMD_KEY||cfg.cmdKey||CHAT_KEY;
  if(!cmdKey)return {ok:false,error:'no-key'};
  const body={key:cmdKey,card_id:String(p&&p.card_id||'').slice(0,80),button_id:String(p&&p.button_id||'').slice(0,40),label:String(p&&p.label||'').slice(0,40)};
@@ -494,7 +495,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard})}catch(e){bootLog('agent '+(e&&e.message))}
   try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
   if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
