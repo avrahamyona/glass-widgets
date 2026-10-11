@@ -119,7 +119,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // only verifies. Strict field formats, freshness AND an explicit expires_at (checked at receipt and
  // again before the auto-run timer fires). ANY anomaly -> ordinary blocking card (fail-closed).
  const SKEW_MS=60000; // small clock-skew allowance; ts further in the future is rejected
- function validPreapproval(m,payload){
+ function validPreapproval(m,payload,device){
   try{
    if(!signPub||!seenOk||!m||m.ts==null||m.exp==null)return false;
    const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false; // strict hex - never feed arbitrary bytes to verify
@@ -127,7 +127,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
    if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return false; // not from the future, not stale
    if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return false; // a sane, live validity window
-   return crypto.verify(null,Buffer.from([String(m.id),String(m.kind),String(ts),String(exp),payload].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
+   // v2 envelopes bind the TARGET DEVICE into the signature (device\nid\nkind...); v1 (stage A, single device) has no device field
+   const fields=device!=null?[String(device),String(m.id),String(m.kind),String(ts),String(exp),payload]:[String(m.id),String(m.kind),String(ts),String(exp),payload];
+   return crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
   }catch{return false}
  }
  // replay guard: signed command ids are remembered (persisted) with their decision until their exp,
@@ -159,6 +161,11 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return false;
  }
  function execPending(p){
+  // execution-time transport authority, one gate for EVERY branch (auto-run, approval tap,
+  // media session grant): the effect dies if either the signed exp or the transport expiry passed
+  const expA=[+p.exp,+p.texp].filter(x=>Number.isFinite(x)&&x>0);
+  if(expA.length&&Date.now()>=Math.min(...expA)){audit({kind:p.kind||'run_command',stage:'transport_expired',id:String(p.cmdId||'').slice(0,40),command:p.command,action:p.action});ack(p.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני הביצוע');return}
+  if(ledger.transition(p.cmdId,'running')!==true){audit({kind:p.kind||'run_command',stage:'running_gate_fail',id:String(p.cmdId||'').slice(0,40)});ack(p.cmdId,'failed','ledger transition failed - effect blocked');return} // no durable running mark -> NO effect
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
@@ -181,7 +188,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
      if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
      markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
     timer.unref&&timer.unref();
-    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
+    const cardExp=[+msg.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+msg.exp); // the card's private expiry is min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:cardExp});
     audit({kind:'run_command',stage:'preapprove_card',command:cmd});
     broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',expiresAt:+msg.exp,body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
     return;
@@ -223,7 +231,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  function mediaControl(id,action,intake){
   const a=String(action||'').trim().toLowerCase();
   if(!MEDIA_ACTIONS.includes(a))return ack(id,'failed','bad action');
-  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execMedia(id,a)}
+  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execPending({cmdId:id,kind:'media_control',action:a,texp:intake&&+intake.exp||0})} // session grant is NOT a gate bypass: the same durable running transition decides, and the shared expiry gate gets the transport authority
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
@@ -420,7 +428,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
+   const cardExp=[+task.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+task.exp); // min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:cardExp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+task.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
@@ -547,7 +556,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'ui_automation',stage:'preapproved',steps:p.task.steps.length});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:+m.exp});
+   const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:cardExp});
    audit({kind:'ui_automation',stage:'preapprove_card',steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע לחיצות שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
@@ -588,7 +598,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:+m.exp});
+   const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:cardExp});
    audit({kind:'island_control',stage:'preapprove_card',action});
    broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
@@ -664,8 +675,33 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return JSON.stringify(body);
  }
  async function ack(id,status,note,result){
+  // ONE canonical result for BOTH the durable record and the wire: matches-trim (entry loss
+  // always marked) bounded to RESULT_CAP bytes, stdout/stderr shrink with metadata preserved,
+  // capResult as the backstop. A cached replay therefore serves EXACTLY what the original ack
+  // carried - no dual fidelity.
+  let canon;
+  if(result!==undefined){
+   let r,ser=true;try{r=JSON.parse(JSON.stringify(result))}catch{ser=false} // cycles / BigInt / throwing toJSON never crash the ack path
+   if(!ser)r={unserializable:true};
+   else if(r===null||typeof r!=='object')r={value:r}; // null and primitives get a stable object shape
+   if(Array.isArray(r.matches)){const m=[...r.matches],fullCount=m.length; // trim WITH the loss metadata counted in, so the final object still fits the cap
+    let sj=JSON.stringify({...r,matches:m,truncated:true,matches_full:fullCount});
+    while(m.length&&Buffer.byteLength(sj)>RESULT_CAP){m.pop();sj=JSON.stringify({...r,matches:m,truncated:true,matches_full:fullCount})}
+    r={...r,matches:m};if(m.length<fullCount){r.truncated=true;r.matches_full=fullCount}}
+   if(typeof r.stdout==='string'||typeof r.stderr==='string'){ // stdout/stderr shrink, metadata preserved
+    if(r.stdout_full==null)r.stdout_full=String(r.stdout||'').length;
+    if(r.stderr_full==null)r.stderr_full=String(r.stderr||'').length;
+    let sj=JSON.stringify(r);
+    while(Buffer.byteLength(sj)>RESULT_CAP&&((r.stdout||'').length||(r.stderr||'').length)){
+     if(String(r.stdout||'').length>=String(r.stderr||'').length)r.stdout=r.stdout.slice(0,Math.floor(r.stdout.length*0.7));
+     else r.stderr=r.stderr.slice(0,Math.floor(r.stderr.length*0.7));
+     r.truncated=true;sj=JSON.stringify(r)}
+   }
+   canon=capResult(r); // backstop for any other oversize shape
+  }
+  try{if(ledger.has(id)&&ledger.put(id,{status,note,result:canon})!==true)audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status})}catch(e){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status})} // a terminal that cannot persist is AUDITED (evidence for reconciliation), never silently dropped
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
-  if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
+  if(canon!==undefined)body.result=canon;
   const wire=fitAckBody(body);
   if(wire==null)return; // fitAckBody already audited envelope_fail - the fetch must not happen
   try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
@@ -787,8 +823,43 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }catch(e){await ack(id,'failed','index error')}
  }
 
+ const SSE_UNSIGNED_WINDOW_MS=10*60*1000; // unsigned SSE commands carry no signed expiry: their dedup window is bounded, never "at-most-once forever"
+ const PARKED_KINDS=new Set(['run_command','web_task','media_control','ui_automation','island_control']); // effect starts at approval (execPending), not at dispatch
  async function handle(m,intake){
   if(!m||typeof m!=='object'||!m.id)return;
+  const id=String(m.id);
+  // ONE command-id ledger across BOTH transports (SSE + tunnel): the tunnel intake already
+  // committed 'accepted' (intake.committed); the SSE leg commits HERE. Whatever the channel, an
+  // id runs AT MOST ONCE: a live record blocks dispatch (incl. after a restart, where
+  // crashed records reload as unknown), a terminal record replays its CACHED result
+  // (idempotent re-ack, never re-executed), an unknown record is never auto-retried.
+  if(!(intake&&intake.committed)){
+   // transport authority window: signed exp (m.exp) AND the worker's private transport expiry
+   // (expires_at - SSE envelope metadata, never a sender field) bound the effect. An unsigned
+   // command without either gets a BOUNDED dedup window (not an at-most-once-forever claim);
+   // a fallback resend of the same command keeps the SAME id inside that window.
+   const prev=ledger.get(id); // duplicate resolution FIRST - a replay (expired or not) never rewrites a live record and never contradicts the original outcome
+   if(prev){
+    audit({kind:String(m.kind||'').slice(0,40),stage:'cross_transport_duplicate',id:id.slice(0,40),status:prev.status});
+    if(prev.status==='done'||prev.status==='failed')ack(id,prev.status,prev.note||'cached result',prev.result||undefined); // cached terminal result - the effect NEVER re-runs; accepted/running/unknown stay silent (no ack race)
+    return;
+   }
+   const wins=[+m.exp,+m.expires_at].filter(x=>Number.isFinite(x)&&x>0);
+   const winEnd=wins.length?Math.min(...wins):Date.now()+SSE_UNSIGNED_WINDOW_MS;
+   if(winEnd<=Date.now()){audit({kind:String(m.kind||'').slice(0,40),stage:'transport_expired',id:id.slice(0,40)});try{ledger.put(id,{status:'failed',note:'transport expired before effect',exp:Date.now()})}catch{}return ack(id,'failed','expired - תוקף התעבורה פג לפני הביצוע')} // authority expired BEFORE any effect - only a NEW intake gets the refusal record
+   intake={...(intake||{}),exp:winEnd}; // execution-time expiry for parked cards, same as the tunnel leg
+   if(!ledger.ok()){audit({kind:String(m.kind||'').slice(0,40),stage:'ledger_down',id:id.slice(0,40)});return ack(id,'failed','ledger unavailable')}
+   const putR=ledger.put(id,{status:'accepted',exp:winEnd}); // the dedup tombstone lives exactly as long as the command's authority window
+   if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:id.slice(0,40)});return ack(id,'failed','ledger full - retry later')}
+   if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:id.slice(0,40)});return ack(id,'failed','ledger commit failed')}
+  }
+  // running gate: an immediate effect NEVER starts unless the running transition is durable.
+  // transition returns false on a down store / missing record / final record - no permit, no effect.
+  if(!PARKED_KINDS.has(m.kind)&&ledger.transition(id,'running')!==true){
+   audit({kind:'server',stage:'running_gate_fail',id:id.slice(0,40)});
+   try{ledger.put(id,{status:'failed',note:'running gate failed'})}catch{}
+   return ack(id,'failed','ledger transition failed - effect blocked');
+  }
   // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
   // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
   if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return;
@@ -838,21 +909,34 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // own-server leg (stage 1): the same command intake, served locally and reached through the tunnel.
  // the worker SSE loop keeps running as fallback until cutover; checkDup dedups a command that
  // somehow arrives on both channels, and every terminal state still acks over the existing leg.
- // intake replay store: durable, signed-exp, covers EVERY tunnel kind. Deliberately separate from
- // the downstream seen/pendingApprovals guards so the first command is never rejected by its own
- // record and the regular approval flow keeps its own semantics. Corrupt/unwritable = tunnel
- // intake closed (503), never a pretend guard.
- const tSeenFile=()=>path.join(app.getPath('userData'),'agent-tunnel-seen.json');
- const tSeen={};let tSeenOk=true;
- try{const j=JSON.parse(fs.readFileSync(tSeenFile(),'utf8'));for(const k of Object.keys(j))if(+j[k].exp>Date.now())tSeen[k]=j[k]}
- catch(e){if(!e||e.code!=='ENOENT')tSeenOk=false}
- function tMark(id,exp){
-  const sid=String(id),now=Date.now();
-  for(const k of Object.keys(tSeen))if(!(+tSeen[k].exp>now))delete tSeen[k];
-  const prev=tSeen[sid];tSeen[sid]={at:now,exp:+exp||now};
-  try{fs.writeFileSync(tSeenFile(),JSON.stringify(tSeen))}catch{
-   if(prev)tSeen[sid]=prev;else delete tSeen[sid];tSeenOk=false;return false}
-  return true}
+ // ONE transactional ledger per tunnel command (intake -> accepted -> terminal): replay guard AND
+ // task-result polling from the same durable record, so no crash window can strand a command
+ // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
+ const{createLedger,RESULT_TTL_MS,RESULT_CAP,capResult}=require('./ledger');
+ const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
+ // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
+ // must never gate private results. Reads carry X-GW-Read-Ts/Nonce/Sig - Ed25519 with the worker
+ // key over method\npath\nquery\nts\nnonce (request-bound), ts within 60s, nonce replay-cached
+ // in memory until ts+120s (read-only, so an in-memory horizon is sufficient; documented).
+ const STRICT_ENVELOPES=process.env.GLASSWIDGETS_STRICT_ENVELOPES==='1'; // v2 device-bound envelopes mandatory (set before tunnel-first multi-device)
+ const READ_SKEW_MS=60000,readNonces=new Map();
+ function verifyReadAuth(method,pathName,query,headers){
+  if(!signPub)return false;
+  const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
+  const device=String(headers['x-gw-read-device']||'');
+  // the signed request is bound to the TARGET DEVICE: a read captured on one device never
+  // authorizes another (multi-device safe); '-' addresses a not-yet-enrolled device.
+  if(devId){if(device!==devId)return false}else if(device!=='-')return false;
+  if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
+  if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
+  const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
+  const key=String(ts)+'|'+nonce;
+  if(readNonces.has(key))return false; // replay
+  let okV=false;
+  try{okV=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce,device].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{okV=false}
+  if(okV)readNonces.set(key,ts+120000);
+  return okV;
+ }
  const srvCfg={enabled:true,port:47631,...((cfg.localServer&&typeof cfg.localServer==='object')?cfg.localServer:{})};
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED!==undefined)srvCfg.enabled=process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED==='1';
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
@@ -862,7 +946,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const{startLocalServer}=require('./localserver');
   const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
    getDevice:()=>devKey&&devId?{deviceId:devId,deviceSign:(t)=>deviceSign(t)}:null,
-   log:(lvl,o)=>audit({lvl,...o}),
+   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
+   getInfo:()=>({envelopeVersions:['v1','v2'],strict:!!STRICT_ENVELOPES,...(devId?{deviceId:devId,pubkey:devPubB64}:{})}),
+   verifyReadAuth,log:(lvl,o)=>audit({lvl,...o}),
    onCommand:(m)=>{
     // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
     // and proves nothing about the sender. Every tunnel command must arrive as a signed envelope
@@ -874,13 +960,31 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
     // reserved fields: signed data must never smuggle identity/envelope fields past the intake
     for(const k of ['id','kind','ts','exp','sig','__tunnel'])if(k in data){audit({kind:'server',stage:'reserved_field',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});return {accepted:false,status:400,reason:'reserved_field'}}
-    if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
-     audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
-     return {accepted:false,status:403,reason:'unsigned'}}
-    if(!tSeenOk)return {accepted:false,status:503,reason:'replay_store'};
-    if(tSeen[String(m.id)]){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}}
-    if(!tMark(m.id,m.exp))return {accepted:false,status:503,reason:'replay_store'};
-    handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
+    // v2 device binding: when the envelope carries a device field, the signature must cover it
+    // AND it must name THIS enrolled device - the same worker-signed envelope can never be
+    // collected at another device. v1 (no device field) stays accepted in stage A (single
+    // device); the worker starts sending device-bound envelopes before tunnel-first multi-device.
+    if(m.device!=null){
+     if(!devId||String(m.device)!==String(devId)){audit({kind:'server',stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
+     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data),String(m.device))){
+      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
+      return {accepted:false,status:403,reason:'unsigned'}}
+    }else{
+     // v1 (no device field) is a BOOTSTRAP/single-device path only. With strict envelopes on
+     // (required before tunnel-first multi-device), an enrolled device refuses v1 outright -
+     // never a strip-device fallback.
+     if(STRICT_ENVELOPES&&devId){audit({kind:'server',stage:'device_required',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'device_required'}}
+     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
+      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
+      return {accepted:false,status:403,reason:'unsigned'}}}
+    if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
+    if(ledger.has(m.id)){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}} // a replayed envelope gets a stable 409 AND its terminal record stays pollable
+    // durable commit BEFORE any effect: the accepted record IS the dispatch permit. If it cannot
+    // be committed, nothing runs and the sender may retry the same envelope (it was not consumed).
+    const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
+    if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:String(m.id).slice(0,40)});return {accepted:false,status:429,reason:'ledger_full'}} // live window saturated - retry later; NO live tombstone was evicted
+    if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:String(m.id).slice(0,40)});return {accepted:false,status:503,reason:'ledger'}}
+    handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp,committed:true}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
     return {accepted:true};
    }});
   if(stop){if(r.started)r.stop();return} // stop() raced the listen() call - tear it back down

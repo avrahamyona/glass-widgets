@@ -31,12 +31,14 @@ const launch=async()=>{
 (async()=>{
  await new Promise(r=>srv.listen(0,'127.0.0.1',r));port=srv.address().port;
  cfg=fs.mkdtempSync('/tmp/gw-ui-');fs.mkdirSync(cfg+'/glasswidgets',{recursive:true});
+ const fold=cfg+'/fold';fs.mkdirSync(fold,{recursive:true});
+ fs.writeFileSync(fold+'/alpha-report.txt','hello cross-transport');fs.writeFileSync(fold+'/victim-file.txt','delete me');
  fs.writeFileSync(cfg+'/glasswidgets/instances.json',JSON.stringify([{id:'chat',type:'chat'}]));
  fs.writeFileSync(cfg+'/glasswidgets/settings.json',JSON.stringify({instanceConfigs:{chat:{size:'island'}}}));
  env={...process.env,XDG_CONFIG_HOME:cfg,GLASSWIDGETS_NO_PICKER:'1',PYTHONPATH:'/tmp/pystub',GLASSWIDGETS_CLOUD_PYTHON:'/usr/bin/python3',
   GLASSWIDGETS_CHAT_URL:'http://127.0.0.1:'+port+'/chat',GLASSWIDGETS_CHAT_STREAM_URL:'http://127.0.0.1:'+port+'/chat/stream',
   GLASSWIDGETS_CHAT_KEY:'chat-key',GLASSWIDGETS_AGENT_CMD_KEY:'cmd-key',GLASSWIDGETS_AGENT_CMD_URL:'http://127.0.0.1:'+port+'/cmd/stream',GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack',
-  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1',GLASSWIDGETS_LOCAL_SERVER_PORT:'47731',GLASSWIDGETS_TUNNEL_ENABLED:'0'};
+  GLASSWIDGETS_AGENT_FOLDERS:fold,GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1',GLASSWIDGETS_LOCAL_SERVER_PORT:'47731',GLASSWIDGETS_TUNNEL_ENABLED:'0'};
  global.cmdRes=null;
  let {a,A}=await launch();
  assert(CMDQS[0].includes('ui')&&CMDQS[0].includes('shot')&&CMDQS[0].includes('island'),'caps advertise ui+shot+island: '+CMDQS[0]);
@@ -69,11 +71,13 @@ const launch=async()=>{
  const a3=await waitAck('u3','done');
  assert(a3.result.steps.length===2&&a3.result.steps[0].do==='move','auto-ran signed plan');
 
- // 3b) replay: same signed id again -> duplicate is audit-only, NO ack (a dup ack would clobber the real result)
+ // 3b) replay of a TERMINAL id: the cached result is re-acked (idempotent - identical content,
+ // NO second effect). An IN-FLIGHT replay stays audit-only (no ack race with the real result).
  ACK=ACK.filter(x=>x.id!=='u3');
  pushCmd({id:'u3',kind:'ui_automation',steps:steps3,ts,exp,sig:sign('u3','ui_automation',ts,exp,JSON.stringify(steps3))});
- await sleep(1500);
- assert(!ACK.some(x=>x.id==='u3'),'replay produces no ack: '+JSON.stringify(ACK.filter(x=>x.id==='u3')));
+ let a3b=null;for(let i=0;i<50;i++){a3b=ACK.find(x=>x.id==='u3');if(a3b)break;await sleep(200)}
+ assert(a3b&&a3b.status==='done'&&a3b.note===a3.note,'terminal replay re-acks the CACHED result: '+JSON.stringify(a3b));
+ assert(a3b.result.steps.length===2&&a3b.result.steps[0].x===500,'cached result identical - the effect did NOT re-run');
 
  // 4) bad sig -> blocking card, no auto-run
  ts=Date.now();exp=EX();
@@ -157,7 +161,7 @@ const launch=async()=>{
  assert(/renderer confirmed open/.test(ACK.find(x=>x.id==='i4').note||''),'done ack means renderer-confirmed state: '+ACK.find(x=>x.id==='i4').note);
  assert(await pillOpen(),'dup delivery: the real execution still ran');
  const log11=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
- assert(log11.includes('"stage":"duplicate"'),'audit records the duplicate delivery');
+ assert(log11.includes('"stage":"cross_transport_duplicate"'),'audit records the duplicate delivery (single-ledger stage)');
 
  // 11b) close ack wording: 'closed', not the raw action string
  assert(/renderer confirmed closed/.test(ACK.find(x=>x.id==='i2').note||''),'closed wording: '+ACK.find(x=>x.id==='i2').note);
@@ -381,6 +385,100 @@ const launch=async()=>{
  const aE5=await waitAck('e5','done');
  assert(aE5.result.deviceId===aE1.result.deviceId&&aE5.result.pubkey===aE1.result.pubkey,'enroll after restart returns the persisted identity');
 
+ // 15g) /task + /info on the own server: PRIVATE reads (worker-signed, request-bound, replay-safe)
+ // over durable ledger records - the direct-mode ack semantics. Records survive the 15e restart.
+ const signRead=(p,q,dev,ts0)=>{const rts=ts0||Date.now(),rnonce=crypto.randomBytes(12).toString('base64url');
+  const rsig=crypto.sign(null,Buffer.from(['GET',p,q,String(rts),rnonce,dev].join('\n'),'utf8'),PRIV).toString('hex');
+  return {headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Device':dev,'X-GW-Read-Sig':rsig},rts,rnonce}};
+ const devPub=()=>crypto.createPublicKey({key:Buffer.from(aE1.result.pubkey,'base64'),format:'der',type:'spki'});
+ const DEV_ID=aE1.result.deviceId;
+ const shaH=t=>crypto.createHash('sha256').update(t,'utf8').digest('hex');
+ const readJson=async(p,q)=>{const sr=signRead(p,q,DEV_ID);const r=await fetch('http://127.0.0.1:47731'+p+(q?'?'+q:''),{headers:sr.headers});const t=await r.text();
+  const dsig=r.headers.get('x-gw-device-sig');
+  return {status:r.status,body:(()=>{try{return JSON.parse(t)}catch{return null}})(),raw:t,dev:r.headers.get('x-gw-device'),dsig,
+   // response verification: the device signature binds the RESPONSE to THIS REQUEST (device, method,
+   // path, query, read ts+nonce, HTTP status, body hash) - a signed body can never be replayed
+   verified:!!dsig&&r.headers.get('x-gw-device')===DEV_ID&&crypto.verify(null,Buffer.from([DEV_ID,'GET',p,q,String(sr.rts),sr.rnonce,String(r.status),shaH(t)].join('\n'),'utf8'),devPub(),Buffer.from(dsig,'hex'))}};
+ // the public baked key alone is NOT enough for private reads
+ assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key'}})).status===403,'/task with only the public key -> 403');
+ assert((await fetch('http://127.0.0.1:47731/info',{headers:{'X-GW-Key':'cmd-key'}})).status===403,'/info with only the public key -> 403');
+ assert((await fetch('http://127.0.0.1:47731/task?id=t2')).status===403,'no key at all -> 403');
+ const inf=await readJson('/info','');
+ assert(inf.status===200&&inf.body.deviceId===aE1.result.deviceId&&inf.body.pubkey===aE1.result.pubkey,'/info self-describes the enrolled device');
+ assert(inf.dev===aE1.result.deviceId&&inf.verified,'/info response is DEVICE-SIGNED over the request-bound canonical (device+method+path+query+ts+nonce+status+body hash)');
+ const tT2=await readJson('/task','id=t2');
+ assert(tT2.body.status==='done'&&tT2.body.terminal===true&&tT2.body.result&&Array.isArray(tT2.body.result.matches),'t2 terminal record via /task (survived restart)');
+ assert(tT2.verified,'/task response is DEVICE-SIGNED over the request-bound canonical');
+ // UNKNOWN-AFTER-RESTART: t6 was accepted (parked card) when the app last exited; the crash-safe
+ // load marks it unknown - a final EVIDENCE state, never auto-retried
+ const tT6=await readJson('/task','id=t6');
+ assert(tT6.body.ok&&tT6.body.status==='unknown'&&tT6.body.terminal===true,'crashed-accepted t6 -> unknown (final): '+JSON.stringify(tT6.body));
+ assert(tT6.verified,'unknown record response is device-signed too');
+ // an unknown id still dedups: a signed replay of the SAME envelope -> 409, never re-executed
+ {ts=Date.now();exp=EX();
+  const dup=await tunPost({id:'t6',kind:'run_command',ts,exp,sig:sign('t6','run_command',ts,exp,JSON.stringify(dataC)),data:dataC});
+  assert(dup.status===409,'replay of an unknown-record id -> 409 (never retried): '+dup.status)}
+ // a 404 means the id was NEVER accepted: only then is it safe for the sender to create a NEW id
+ {const nf=await readJson('/task','id=never');
+  assert(nf.status===404&&nf.verified,'unknown task -> 404, device-signed (404 cannot be replayed onto another id)')}
+ // device binding: a read signed for a DIFFERENT device -> 403
+ {const sr=signRead('/task','id=t2','otherdevice0000');
+  const r=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
+  assert(r.status===403,'read bound to a different device -> 403 (cross-device collection closed)')}
+
+ // 15h) v2 device-bound COMMAND envelopes: the signature covers device\nid\nkind\nts\nexp\npayload
+ // and the device must name THIS enrolled device (PC-side ready before tunnel-first multi-device)
+ const signDev=(dev,id,kind,ts0,exp0,payload)=>crypto.sign(null,Buffer.from([dev,id,kind,String(ts0),String(exp0),payload].join('\n'),'utf8'),PRIV).toString('hex');
+ {ts=Date.now();exp=EX();const dD={query:'__none__'};
+  const okD=await tunPost({id:'dv1',kind:'find_files',device:DEV_ID,ts,exp,sig:signDev(DEV_ID,'dv1','find_files',ts,exp,JSON.stringify(dD)),data:dD});
+  assert(okD.status===202,'v2 device-bound envelope accepted for the right device: '+okD.status);
+  await waitAck('dv1','done');
+  ts=Date.now();exp=EX();
+  const wrong=await tunPost({id:'dv2',kind:'find_files',device:'otherdevice0000',ts,exp,sig:signDev('otherdevice0000','dv2','find_files',ts,exp,JSON.stringify(dD)),data:dD});
+  assert(wrong.status===403,'envelope bound to ANOTHER device -> 403 (same worker key cannot collect at the wrong device)');
+  ts=Date.now();exp=EX();
+  const leg=await tunPost({id:'dv3',kind:'find_files',ts,exp,sig:sign('dv3','find_files',ts,exp,JSON.stringify(dD)),data:dD});
+  assert(leg.status===202,'v1 (no device field) still accepted in stage A single-device');
+  await waitAck('dv3','done')}
+
+ // 15i) ONE command-id ledger across BOTH transports: an id runs AT MOST ONCE no matter which
+ // channel it arrives on - SSE then tunnel, tunnel then SSE, incl. unsafe delete_file/get_file
+ {const dlDir=os.homedir()+'/Downloads';fs.mkdirSync(dlDir,{recursive:true});const victim=dlDir+'/victim-file.txt'; // delete_file is Downloads-gated
+  fs.writeFileSync(victim,'delete me');
+  pushCmd({id:'x-del',kind:'delete_file',path:victim}); // SSE first (unsafe)
+  const aDel=await waitAck('x-del','done');assert(!fs.existsSync(victim),'delete_file ran once via SSE');
+  fs.writeFileSync(victim,'bait'); // if ANY replay re-runs the effect, the bait would be deleted
+  ts=Date.now();exp=EX();const dX={path:victim};
+  const dupT=await tunPost({id:'x-del',kind:'delete_file',ts,exp,sig:sign('x-del','delete_file',ts,exp,JSON.stringify(dX)),data:dX});
+  assert(dupT.status===409,'tunnel replay of an SSE-executed id -> 409');
+  pushCmd({id:'x-del',kind:'delete_file',path:victim}); // SSE replay
+  let cached=null;for(let i=0;i<50;i++){const cs=ACK.filter(x=>x.id==='x-del'&&x.status==='done');if(cs.length>=2){cached=cs[1];break}await sleep(200)}
+  assert(cached,'SSE replay gets the CACHED terminal result re-acked');
+  assert(fs.existsSync(victim)&&fs.readFileSync(victim,'utf8')==='bait','the effect NEVER re-ran (bait file intact)');
+  fs.unlinkSync(victim)}
+ {ts=Date.now();exp=EX();const dF={path:fold+'/alpha-report.txt'}; // tunnel first (get_file -> upload)
+  const okF=await tunPost({id:'x-get',kind:'get_file',ts,exp,sig:sign('x-get','get_file',ts,exp,JSON.stringify(dF)),data:dF});
+  assert(okF.status===202,'get_file accepted via tunnel');await waitAck('x-get','done');
+  const upBefore=UPLOADS.length;
+  pushCmd({id:'x-get',kind:'get_file',path:fold+'/alpha-report.txt'}); // SSE replay of a tunnel id
+  let cached=null;for(let i=0;i<50;i++){const cs=ACK.filter(x=>x.id==='x-get'&&x.status==='done');if(cs.length>=2){cached=cs[1];break}await sleep(200)}
+  assert(cached&&UPLOADS.length===upBefore,'SSE replay of a tunnel id -> cached result, NO second upload')}
+ {pushCmd({id:'x-sys',kind:'sys_info',topic:'all'});await waitAck('x-sys','done'); // read-only kind, SSE then SSE
+  pushCmd({id:'x-sys',kind:'sys_info',topic:'all'});
+  let cached=null;for(let i=0;i<50;i++){const cs=ACK.filter(x=>x.id==='x-sys'&&x.status==='done');if(cs.length>=2){cached=cs[1];break}await sleep(200)}
+  assert(cached,'same-transport replay -> cached terminal result')}
+ // read replay: the SAME signed read twice -> 403 (nonce replay-cached)
+ {const sr=signRead('/task','id=t2',DEV_ID);
+  const r1=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
+  const r2=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
+  assert(r1.status===200&&r2.status===403,'read replay with the same nonce -> 403')}
+ // stale read ts -> 403
+ {const sr=signRead('/task','id=t2',DEV_ID,Date.now()-120000);
+  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers})).status===403,'stale read ts -> 403')}
+ // request binding: a signature for /info does not authorize /task
+ {const sr=signRead('/info','',DEV_ID);
+  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers})).status===403,'signature bound to a different path -> 403')}
+
  // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
  // envelope expired is refused - the command never runs
  ts=Date.now();exp=Date.now()+1500; // live at intake, dead by approval time
@@ -398,6 +496,73 @@ const launch=async()=>{
  assert(!ACK.find(x=>x.id==='t7'&&x.status==='done'),'expired-transport command NEVER executed');
  logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert(/"stage":"transport_expired"/.test(logA),'transport expiry audited at execution time');
+
+ // 15j) SSE authority window: a command whose transport expiry (expires_at) already passed is
+ // refused BEFORE any effect; the refusal is a durable terminal record
+ {pushCmd({id:'x-exp',kind:'delete_file',path:os.homedir()+'/Downloads/never.txt',expires_at:Date.now()-1000});
+  const aE=await waitAck('x-exp','failed');assert(/expired/.test(aE.note||''),'stale SSE command refused before effect: '+aE.note);
+  const tX=await readJson('/task','id=x-exp');assert(tX.body.status==='failed'&&tX.body.terminal===true,'expiry refusal is a terminal record')}
+
+ // 15k) strict envelopes: an enrolled device refuses v1 (device_required), accepts v2
+ {await a.close();global.cmdRes=null;
+  env.GLASSWIDGETS_STRICT_ENVELOPES='1';
+  ({a,A}=await launch());
+  ts=Date.now();exp=EX();const dS={query:'__none__'};
+  const v1=await tunPost({id:'sv1',kind:'find_files',ts,exp,sig:sign('sv1','find_files',ts,exp,JSON.stringify(dS)),data:dS});
+  assert(v1.status===403&&v1.body.reason==='device_required','strict: v1 refused on an enrolled device: '+JSON.stringify(v1.body));
+  ts=Date.now();exp=EX();
+  const v2=await tunPost({id:'sv2',kind:'find_files',device:DEV_ID,ts,exp,sig:signDev(DEV_ID,'sv2','find_files',ts,exp,JSON.stringify(dS)),data:dS});
+  assert(v2.status===202,'strict: v2 device-bound envelope accepted');
+  await waitAck('sv2','done')}
+
+ // 15l) execution-time expiry: the signed exp is valid for 60s but the transport authority
+ // (expires_at) dies in 400ms - the parked preapproved card refuses at the shared execution gate
+ {const cmd='touch /tmp/gw-15l-marker';try{fs.unlinkSync('/tmp/gw-15l-marker')}catch{}
+  ts=Date.now();const expL=Date.now()+60000;
+  pushCmd({id:'x-exec-exp',kind:'run_command',command:cmd,ts,exp:expL,sig:sign('x-exec-exp','run_command',ts,expL,cmd),expires_at:Date.now()+400});
+  const aX=await waitAck('x-exec-exp','failed');assert(/expired/.test(aX.note||''),'execution-time expiry refused: '+aX.note);
+  assert(!fs.existsSync('/tmp/gw-15l-marker'),'effect blocked at the execution gate: marker absent');
+  const tL=await readJson('/task','id=x-exec-exp');assert(tL.body.status==='failed','execution-expiry refusal recorded failed')}
+
+ // 15m) expired replays resolve as duplicates FIRST - a stale replay never rewrites a live
+ // record and never contradicts the original outcome
+ {const logP=cfg+'/glasswidgets/agent-audit.log';
+  const expLines=()=>fs.readFileSync(logP,'utf8').split('\n').filter(l=>l.includes('x-exp')&&l.includes('transport_expired')).length;
+  const before=expLines();const acksBefore=ACK.filter(x=>x.id==='x-exp').length;
+  pushCmd({id:'x-exp',kind:'delete_file',path:os.homedir()+'/Downloads/never.txt',expires_at:Date.now()-1000}); // stale replay of a terminal id
+  await sleep(1500);
+  assert(expLines()===before,'stale replay of a terminal id writes NO new expiry record');
+  assert(ACK.filter(x=>x.id==='x-exp').length>acksBefore,'terminal replay gets the cached result ack');
+  pushCmd({id:'x-park',kind:'run_command',command:'echo parked',ts:Date.now(),exp:Date.now()+60000}); // unsigned -> approval card parks (accepted)
+  await sleep(800);
+  const tP=await readJson('/task','id=x-park');assert(tP.body.status==='accepted','parked card recorded accepted, got '+tP.body.status);
+  pushCmd({id:'x-park',kind:'run_command',command:'echo parked',expires_at:Date.now()-1000}); // expired replay of the live intake
+  await sleep(1500);
+  const tP2=await readJson('/task','id=x-park');assert(tP2.body.status==='accepted','expired replay of a live intake does NOT rewrite the record');
+  assert(!ACK.some(x=>x.id==='x-park'),'no wire ack at all for the live intake')}
+
+ // 15n) the min-expiry pre-card rule covers web_task, ui_automation AND island_control: signed
+ // exp valid 60s, transport authority (expires_at) dead in 400ms - all three auto-run timers
+ // refuse before any effect
+ {const expL=Date.now()+60000,dead=Date.now()+400,t0=Date.now();
+  const wUrl='https://example.com/',wSteps=[{do:'goto',url:'https://example.com/'}],uSteps=[{do:'click',x:10,y:10}];
+  pushCmd({id:'x-web-exp',kind:'web_task',url:wUrl,steps:wSteps,ts:t0,exp:expL,sig:sign('x-web-exp','web_task',t0,expL,wUrl+'\n'+JSON.stringify(wSteps)),expires_at:dead});
+  pushCmd({id:'x-ui-exp',kind:'ui_automation',steps:uSteps,ts:t0,exp:expL,sig:sign('x-ui-exp','ui_automation',t0,expL,JSON.stringify(uSteps)),expires_at:dead});
+  pushCmd({id:'x-isl-exp',kind:'island_control',action:'open',ts:t0,exp:expL,sig:sign('x-isl-exp','island_control',t0,expL,'open'),expires_at:dead});
+  for(const xid of ['x-web-exp','x-ui-exp','x-isl-exp']){
+   const aN=await waitAck(xid,'failed');assert(/expired/.test(aN.note||''),xid+' preapproved auto-run refused before effect: '+aN.note);
+   const tN=await readJson('/task','id='+xid);assert(tN.body.status==='failed',xid+' recorded failed');
+   assert(!ACK.some(x=>x.id===xid&&x.status==='done'),xid+' NEVER executed')}}
+
+ // 15o) media_control carries transport expiry into the shared gate: a parked card approved
+ // AFTER expires_at died is refused before the media bridge is touched
+ {pushCmd({id:'x-med-exp',kind:'media_control',action:'play',expires_at:Date.now()+1500}); // parked card; authority dies at 1500ms, card TTL is 4000ms
+  await card('שליטה בניגון');
+  await sleep(2200);
+  await clickBtn('שליטה בניגון','אשר');
+  const aM=await waitAck('x-med-exp','failed');assert(/expired/.test(aM.note||''),'media card approved after transport expiry refused: '+aM.note);
+  assert(!ACK.some(x=>x.id==='x-med-exp'&&x.status==='done'),'media bridge never touched');
+  assert(/"kind":"media_control","stage":"transport_expired"/.test(fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8')),'media gate refusal audited')}
 
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
