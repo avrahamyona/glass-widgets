@@ -155,42 +155,76 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
 
  // web_task (stage 7 pilot): drive a HIDDEN Chromium window (the app's own Electron) on the PC -
  // no visible window, no physical mouse/keyboard, isolated persistent profile (persist:agent-web).
- // Hard bounds: https-only end to end (initial URL, gotos and redirects), private/local destinations
- // blocked, <=20 steps, per-step timeout and a hard 60s task timeout that tears the window down.
- // ALWAYS behind an island approval card (per task, no session grant) listing the real step plan;
- // every step and the final outcome are audited.
+ // Hard bounds: https-only end to end; private/local destinations blocked by STRING and by DNS
+ // RESOLUTION on every request of the task (main frame, redirects, subrequests); <=20 steps (a
+ // bigger plan is rejected outright - never truncated, he reviews the complete plan on the card);
+ // per-step timeouts + a hard 60s task timeout with teardown; the ack result is size-guaranteed.
+ // ALWAYS behind an island approval card (per task, no session grant); every step audited.
  const WEB_ALLOW_LOCAL=process.env.GLASSWIDGETS_WEB_TASK_ALLOW_LOCAL==='1'; // test hook only - production stays https-only + no local targets
+ function ipPublic(ip){
+  ip=String(ip||'').toLowerCase().replace(/^\[|\]$/g,'');
+  let mapped=ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/); // IPv4-mapped IPv6, dotted form
+  if(mapped)ip=mapped[1];
+  else{const hex=ip.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/); // normalized hex form (::ffff:7f00:1)
+   if(hex){const a=parseInt(hex[1],16),b=parseInt(hex[2],16);ip=(a>>8)+'.'+(a&255)+'.'+(b>>8)+'.'+(b&255)}}
+  const m=ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if(m){const a=+m[1],b=+m[2];
+   return !(a===0||a===10||a===127||(a===172&&b>=16&&b<=31)||(a===192&&b===168)||(a===169&&b===254)||a>=224)}
+  return !(ip==='::1'||ip==='::'||/^(fe8|fe9|fea|feb|fc|fd)/i.test(ip));
+ }
  function webUrlOk(u){
   if(typeof u!=='string'||u.length>500)return false;
   if(!/^https:\/\/\S+$/i.test(u)&&!(WEB_ALLOW_LOCAL&&/^http:\/\/\S+$/i.test(u)))return false;
   if(WEB_ALLOW_LOCAL)return true;
   let h;try{h=new URL(u).hostname.toLowerCase()}catch{return false}
   if(h==='localhost'||h.endsWith('.localhost')||h.endsWith('.local')||h.endsWith('.internal')||h.endsWith('.lan')||h.endsWith('.home'))return false;
-  const m=h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if(m){const a=+m[1],b=+m[2];
-   if(a===0||a===10||a===127||(a===172&&b>=16&&b<=31)||(a===192&&b===168)||(a===169&&b===254)||a>=224)return false}
-  const v6=h.replace(/[\[\]]/g,'');
-  if(v6==='::1'||v6==='::'||/^(fe8|fe9|fea|feb|fc|fd)/i.test(v6))return false;
-  return true;
+  if(/^[\d.]+$/.test(h)||h.includes(':'))return ipPublic(h);
+  return true; // a public-looking name still has to survive the DNS check before any request goes out
+ }
+ const dnsP=require('dns').promises;
+ async function resolvesPublic(u,cache){
+  if(WEB_ALLOW_LOCAL)return true;
+  let h;try{h=new URL(u).hostname.toLowerCase()}catch{return false}
+  if(/^[\d.]+$/.test(h)||h.includes(':'))return ipPublic(h); // literal already decided
+  if(cache.has(h))return cache.get(h);
+  let ok=false;
+  try{const addrs=await dnsP.lookup(h,{all:true});
+   ok=addrs.length>0&&addrs.every(a=>ipPublic(a.address))}catch{ok=false}
+  cache.set(h,ok);return ok;
+ }
+ // one webRequest guard per agent-web session; consults the live task windows map so main-frame
+ // loads, redirects AND subrequests of a task are all DNS-checked before they leave.
+ const webTaskWindows=new Map(); // webContents.id -> {taskId,dnsCache}
+ function ensureWebGuard(ses){
+  if(ses.__gwWebGuard)return;ses.__gwWebGuard=true;
+  ses.webRequest.onBeforeRequest({urls:['*://*/*']},(details,callback)=>{
+   const ent=webTaskWindows.get(details.webContentsId);
+   if(!ent)return callback({});
+   const u=String(details.url||'');
+   (async()=>webUrlOk(u)&&await resolvesPublic(u,ent.dnsCache))()
+    .then(ok=>{if(!ok)audit({kind:'web_task',stage:'request_blocked',task:ent.taskId,url:u.slice(0,200)});callback(ok?{}:{cancel:true})},
+          ()=>{audit({kind:'web_task',stage:'request_blocked',task:ent.taskId,url:u.slice(0,200),error:'guard error'});callback({cancel:true})});
+  });
  }
  function webTaskResultCap(out){
-  // the worker rejects acks over ~3,500 chars of result JSON - shrink extracts until it fits
-  let s=JSON.stringify(out);
-  if(s.length<=2800)return out;
-  const texts=out.steps.filter(x=>typeof x.text==='string');
-  for(const cap of [400,150,40]){
-   for(const t of texts)if(t.text.length>cap)t.text=t.text.slice(0,cap)+'…';
-   s=JSON.stringify(out);if(s.length<=2800){out.truncated=true;return out}
-  }
-  for(const t of texts)delete t.text;
+  // guarantee: the serialized ack result NEVER exceeds the worker's ~3,500-char limit
+  const fits=()=>JSON.stringify(out).length<=2800;
+  if(fits())return out;
   out.truncated=true;
-  return out;
+  const texts=out.steps.filter(x=>typeof x.text==='string');
+  for(const cap of [400,150,40]){for(const t of texts)if(t.text.length>cap)t.text=t.text.slice(0,cap)+'…';if(fits())return out}
+  for(const t of texts)delete t.text;
+  if(fits())return out;
+  for(const st of out.steps){delete st.url;delete st.error} // long goto urls / errors go next
+  if(fits())return out;
+  const total=out.steps.length,ok=out.steps.filter(x=>x.ok).length;
+  return {url:out.url,steps_total:total,steps_ok:ok,truncated:true}; // last resort: summary only, always small
  }
  async function execWebTask(id,task){
   const url=String(task.url||'').trim();
   if(!webUrlOk(url)){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'url refused (https-only, no local targets)'});return ack(id,'failed','url refused - https only, no private/local targets')}
-  const steps=(Array.isArray(task.steps)?task.steps:[]).slice(0,20);
-  const {BrowserWindow}=require('electron');
+  const steps=task.steps.slice(0,20);
+  const {BrowserWindow,session}=require('electron');
   let win=null,timedOut=false;
   const out={url:url.slice(0,300),steps:[]};
   const stepAudit=(i,d,ok,err)=>audit({kind:'web_task',stage:'step',task:String(id).slice(0,60),step:i,do:d,ok:!!ok,error:err?String(err).slice(0,150):undefined});
@@ -198,9 +232,11 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    win=new BrowserWindow({show:false,width:1100,height:800,webPreferences:{sandbox:true,partition:'persist:agent-web'}});
    win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
    win.webContents.session.on('will-download',e=>e.preventDefault());
-   const guard=(e,u)=>{if(!webUrlOk(u)){e.preventDefault();audit({kind:'web_task',stage:'navigation_blocked',task:String(id).slice(0,60),url:String(u).slice(0,200)})}};
-   win.webContents.on('will-navigate',guard);
-   win.webContents.on('will-redirect',guard);
+   ensureWebGuard(win.webContents.session);
+   const ent={taskId:String(id).slice(0,60),dnsCache:new Map()};
+   webTaskWindows.set(win.webContents.id,ent);
+   win.on('closed',()=>webTaskWindows.delete(win.webContents.id));
+   if(!WEB_ALLOW_LOCAL&&!(await resolvesPublic(url,ent.dnsCache)))throw new Error('destination resolves to a private/local address - refused');
    const js=(code)=>Promise.race([win.webContents.executeJavaScript(code),new Promise((_,rej)=>setTimeout(()=>rej(new Error('step timeout')),15000))]);
    const sel=x=>JSON.stringify(String(x||'').slice(0,200));
    await Promise.race([win.webContents.loadURL(url),new Promise((_,rej)=>setTimeout(()=>rej(new Error('load timeout')),20000))]);
@@ -209,6 +245,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
     const st=steps[i],d=String(st.do||'').toLowerCase();
     try{
      if(d==='goto'){const u=String(st.url||'').slice(0,500);if(!webUrlOk(u))throw new Error('goto url refused');
+      if(!WEB_ALLOW_LOCAL&&!(await resolvesPublic(u,ent.dnsCache)))throw new Error('goto destination resolves private - refused');
       await Promise.race([win.webContents.loadURL(u),new Promise((_,rej)=>setTimeout(()=>rej(new Error('goto timeout')),20000))]);out.steps.push({do:d,ok:true,url:u.slice(0,200)});}
      else if(d==='click'){const r=await js('(()=>{const el=document.querySelector('+sel(st.selector)+');if(!el)return false;el.click();return true})()');out.steps.push({do:d,ok:!!r});}
      else if(d==='type'){const r=await js('(()=>{const el=document.querySelector('+sel(st.selector)+');if(!el)return false;el.focus();el.value='+JSON.stringify(String(st.text||'').slice(0,500))+';el.dispatchEvent(new Event(\'input\',{bubbles:true}));el.dispatchEvent(new Event(\'change\',{bubbles:true}));return true})()');out.steps.push({do:d,ok:!!r});}
@@ -235,12 +272,29 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   }catch(e){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:String(e&&e.message||e).slice(0,200)});return ack(id,'failed',String(e&&e.message||'web task error').slice(0,200))}
   finally{if(win&&!win.isDestroyed())win.destroy()}
  }
- function webTask(id,task){
+ function webTaskPlan(url,steps){
+  // the COMPLETE effective plan he approves: full goto urls, full type text - never truncated
+  const lines=steps.map((st,i)=>{const d=String(st.do||'?').toLowerCase();
+   if(d==='goto')return (i+1)+'. goto '+String(st.url||'');
+   if(d==='click')return (i+1)+'. click '+String(st.selector||'');
+   if(d==='type')return (i+1)+'. type '+String(st.selector||'')+' ← "'+String(st.text||'').slice(0,500)+'"'; // the effective text - the executor caps at 500 too
+   if(d==='extract')return (i+1)+'. extract '+String(st.selector||'body');
+   if(d==='screenshot')return (i+1)+'. screenshot';
+   if(d==='wait')return (i+1)+'. wait '+Math.min(Math.max(+st.ms||1000,100),10000)+'ms';
+   return (i+1)+'. '+d});
+  return lines.join('\n');
+ }
+ async function webTask(id,task){
   const url=String(task&&task.url||'').trim();
   if(!webUrlOk(url))return ack(id,'failed','url refused - https only, no private/local targets');
-  const steps=(Array.isArray(task.steps)?task.steps:[]).slice(0,20);
+  if(!WEB_ALLOW_LOCAL&&!(await resolvesPublic(url,new Map()))){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'resolves private'});return ack(id,'failed','destination resolves to a private/local address - refused')}
+  const rawSteps=Array.isArray(task.steps)?task.steps:[];
+  if(rawSteps.length>20){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'plan too long',steps:rawSteps.length});return ack(id,'failed','plan too long to review safely (max 20 steps) - rejected')}
+  const plan=webTaskPlan(url,rawSteps);
+  if(plan.length>1400){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'plan too long',chars:plan.length});return ack(id,'failed','plan too long to review safely ('+plan.length+' chars) - rejected')}
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
+  const steps=rawSteps;
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
@@ -248,7 +302,6 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
   const label=String(task.label||'').slice(0,200);
-  const plan=steps.map((st,i)=>{const d=String(st.do||'?').toLowerCase();const t=d==='goto'?String(st.url||'').slice(0,60):['click','type','extract'].includes(d)?String(st.selector||'').slice(0,40):d==='wait'?Math.min(+st.ms||1000,10000)+'ms':'';return (i+1)+'. '+d+(t?' '+t:'')}).join('\n').slice(0,700);
   broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body:'השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url.slice(0,200)+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
