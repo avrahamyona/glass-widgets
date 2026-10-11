@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 4 (UTF-8 BOM, הודעות באנגלית, תיקון ציפיית fail-loud)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 5 (BOM + boot שלישי בתוך הסשן, ללא קבצי redirect)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -81,14 +81,16 @@ try{
   if($dev2 -eq $dev1){Say 'PASS 6: second boot - identical identity'}else{throw 'identity changed across boots'}
   Stop-Process -Id $b2.P.Id -Force -ErrorAction SilentlyContinue
   Add-Content -Path $devFile -Value 'corrupt'
-  $e3=Join-Path $base 'err-third.log'; $o3=Join-Path $base 'out-third.log'
-  $p3=Start-Process -FilePath 'node' -ArgumentList (Join-Path $root.FullName 'server\index.js') -WorkingDirectory $root.FullName -RedirectStandardOutput $o3 -RedirectStandardError $e3 -PassThru -Wait
-  $errTxt=(Get-Content $e3 -Raw -ErrorAction SilentlyContinue)
-  $outTxt=(Get-Content $o3 -Raw -ErrorAction SilentlyContinue)
+  # third boot runs IN-SESSION (synchronous): RedirectStandardError files can come back empty on PS 5.1
+  $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
+  $thirdOut=& node (Join-Path $root.FullName 'server\index.js') 2>&1 | Out-String
+  $exit3=$LASTEXITCODE
+  $ErrorActionPreference=$prevEap
+  Say ($thirdOut.Trim())
   # fail-loud = nonzero exit AND the server did NOT come up AND a real error was printed
   # (a corrupt JSON throws SyntaxError; a mismatched pair prints 'refusing to boot' - both are refusals)
-  if($p3.ExitCode -ne 0 -and $outTxt -notmatch 'server up' -and ($errTxt -match 'refusing to boot|SyntaxError|Unexpected|JSON|Error')){Say 'PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$p3.ExitCode+')'}
-  else{throw ('corrupt identity boot not refused: exit='+$p3.ExitCode)}
+  if($exit3 -ne 0 -and $thirdOut -notmatch 'server up' -and ($thirdOut -match 'refusing to boot|SyntaxError|Unexpected|JSON|Error')){Say ('PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$exit3+')')}
+  else{throw ('corrupt identity boot not refused: exit='+$exit3)}
   Say 'DONE - all checks passed'
 }catch{
   Say ('FAIL: '+$_.Exception.Message)

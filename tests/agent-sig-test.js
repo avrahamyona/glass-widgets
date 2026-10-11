@@ -173,6 +173,55 @@ const launch=async()=>{
  assert(rT2.status===200,'re-enroll: the NEW command id fetches under dash');
  assert((await read('-','/task','id=enr1')).status===403,'re-enroll: the OLD command id no longer passes under dash');
 
+ // 11) INTEGRATED fixture: the REAL sender client + REAL orchestrator against THIS live Electron
+ // process, with independent X-GW-Device-Sig verification and unknown/same-id reconciliation.
+ const{createSenderClient}=require(REPO+'/server/lib/sender-client.js');
+ const{createEnrollOrchestrator}=require(REPO+'/server/lib/enroll-orchestrator.js');
+ const{handleTunnel}=require(REPO+'/worker/tunnel-route.js');
+ class FStmt{constructor(db,sql,args){this.db=db;this.sql=sql;this.args=args}
+  async first(){const d=this.db,s=this.sql,a=this.args;
+   if(s.includes('SELECT pubkey FROM devices')){const pk=d.devices.get(a[0]);return pk?{pubkey:pk.pubkey}:null}
+   throw new Error('unexpected first: '+s)}
+  async run(){const d=this.db,s=this.sql,a=this.args;
+   if(s.startsWith('INSERT INTO devices')&&s.includes('WHERE (SELECT COUNT(*)')){
+    if(d.devices.size>=a[3])return{meta:{changes:0}};
+    d.devices.set(a[0],{pubkey:a[1],enrolled_at:a[2]});return{meta:{changes:1}}}
+   throw new Error('unexpected run: '+s)}}
+ class FDB{constructor(){this.devices=new Map()}
+  prepare(sql){const db=this;return{bind(...args){return new FStmt(db,sql,args)}}}}
+ const fdb=new FDB(),wEnv={AVI_ACCOUNT_DB:fdb,GW_REPLY_KEY:'rk-test',GW_MAX_DEVICES:'3'};
+ const ctl=http.createServer(async(q,r)=>{let b='';q.on('data',c=>b+=c);q.on('end',async()=>{
+  const u='http://w'+q.url;const wreq=new Request(u,{method:q.method,headers:{'X-GW-Reply-Key':String(q.headers['x-gw-reply-key']||''),'content-type':'application/json'},body:q.method==='POST'?b:undefined});
+  const wres=await handleTunnel(wreq,wEnv,new URL(u));r.writeHead(wres.status,{'content-type':'text/plain'});r.end(await wres.text())})});
+ await new Promise(r=>ctl.listen(0,'127.0.0.1',r));
+ const SIGN_PRIV_B64=PRIV.export({format:'der',type:'pkcs8'}).toString('base64');
+ // the pairing approval binds to the PC-LOCAL fingerprint source (the device.json on THIS machine) - never to the remote answer alone
+ const devFpLocal=fpFn(JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8')).pub);
+ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:async(id,r)=>{m.set(id,r);return true}}}; // durable per-sender outbox (survives within the run)
+ const mkS=()=>createSenderClient({deviceUrl:'http://127.0.0.1:47732',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50});
+ const orchLive=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint,episode,challenge})=>fingerprint===devFpLocal&&!!episode&&!!challenge});
+ const rO=await orchLive.run();
+ assert(rO.ok===true&&rO.deviceId===devIdE,'integrated orchestrator enrolled against the LIVE Electron runtime: '+JSON.stringify(rO));
+ assert(fdb.devices.get(devIdE)&&fdb.devices.get(devIdE).pubkey===pubE,'registry recorded the live device');
+ const orchNo=createEnrollOrchestrator({sender:mkS(),approvePairing:async()=>false});
+ const rNo=await orchNo.run();
+ assert(rNo.ok===false&&rNo.stage==='pairing'&&fdb.devices.size===1,'declined pairing writes nothing in the REAL flow');
+ // independent X-GW-Device-Sig verification on a live /task response (not via the sender client)
+ const rts=Date.now(),rnonce='n'+Math.random().toString(36).slice(2,10);
+ const rsig=crypto.sign(null,Buffer.from(['GET','/task','id=enr2',String(rts),rnonce,devIdE].join('\n'),'utf8'),PRIV).toString('hex');
+ const rH=await fetch('http://127.0.0.1:47732/task?id=enr2',{headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig,'X-GW-Read-Device':devIdE}});
+ const rawBody=await rH.text();
+ const dSig=rH.headers.get('x-gw-device-sig'),dDev=rH.headers.get('x-gw-device');
+ assert(dDev===devIdE&&/^[0-9a-f]{128}$/.test(String(dSig||'')),'device-signed response headers present');
+ const bh=crypto.createHash('sha256').update(rawBody,'utf8').digest('hex');
+ assert(crypto.verify(null,Buffer.from([devIdE,'GET','/task','id=enr2',String(rts),rnonce,String(rH.status),bh].join('\n'),'utf8'),crypto.createPublicKey({key:Buffer.from(pubE,'base64'),format:'der',type:'spki'}),Buffer.from(dSig,'hex')),'X-GW-Device-Sig verifies INDEPENDENTLY against the enrolled pubkey');
+ // unknown/same-id reconciliation: dead endpoint -> unknown with the SAME id, exact-envelope retry
+ const sDead=createSenderClient({deviceUrl:'http://127.0.0.1:9',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50});
+ const u1=await sDead.sendCommand({kind:'enroll_device',data:{challenge:'dead-'+Date.now().toString(36)}});
+ assert(u1.status==='unknown'&&u1.id,'dead endpoint -> unknown (reconcile manually), id present: '+JSON.stringify(u1));
+ const u2=await sDead.send(await sDead.prepare({kind:'enroll_device',data:{challenge:'dead-'+Date.now().toString(36)}}));
+ assert(u2.status==='unknown','network failure never claims a result');
+
  // 9) replay guard cannot persist -> signed command gets the BLOCKING card with blocking copy, never auto-runs
  await a.close();
  fs.rmSync(cfg+'/glasswidgets/agent-seen.json',{force:true});fs.mkdirSync(cfg+'/glasswidgets/agent-seen.json'); // a directory where the store file should be
@@ -182,5 +231,18 @@ const launch=async()=>{
  assert(/אישור הרצת פקודה/.test(c.title),'persist failure -> blocking card: '+c.title);
  assert(c.body.includes('בלי אישור'),'blocking copy, not auto-run copy: '+c.body);
  await sleep(3500);assert(!fs.existsSync(m8),'no auto-run when the replay guard cannot persist');
+
+ // 11b) re-enroll AFTER restart-after-mint: a CLEAN relaunch on the same profile (scenario 9
+ // sabotaged the seen store on purpose - remove the sabotage so signed envelopes verify again).
+ await a.close();
+ fs.rmSync(cfg+'/glasswidgets/agent-seen.json',{recursive:true,force:true});
+ ({a,A}=await launch());
+ const orchRe=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint})=>fingerprint===devFpLocal});
+ const rRe=await orchRe.run();
+ assert(rRe.ok===true&&rRe.deviceId===devIdE,'post-restart re-enroll resolves the SAME device: '+JSON.stringify(rRe));
+ assert(fdb.devices.size===1,'registry still holds exactly the one device');
+ const devJ2=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8'));
+ assert(devJ2.pub===pubE,'identity unchanged across the restart');
+ ctl.close();
  console.log('AGENT-SIG TESTS PASSED');await a.close();srv.close();process.exit(0);
 })().catch(e=>{console.error('FAIL',e);try{console.error('AUDIT-TAIL:\n'+fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').split('\n').slice(-12).join('\n'))}catch{}try{console.error('ACKS:',JSON.stringify(ACK.slice(-8)))}catch{}process.exit(1)});
