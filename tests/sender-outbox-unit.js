@@ -5,7 +5,8 @@ const assert=require('assert'),fs=require('fs'),os=require('os'),path=require('p
 const{createFileOutbox}=require('../server/lib/outbox-file');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gw-outbox-u-'));
 const rec=(n)=>({envelope:{id:'cmd-'+n,kind:'find_files'},receipt:null,at:n});
-const patched=(obj,key,fn,body)=>{const orig=obj[key];obj[key]=fn;try{return body()}finally{obj[key]=orig}};
+const patched=async(obj,key,fn,body)=>{const orig=obj[key];obj[key]=fn;try{return await body()}finally{obj[key]=orig}}; // await the body: the patch must outlive every fs call inside it
+const realOpen=fs.openSync;
 (async()=>{
  // roundtrip + durability across instances (a sender restart closes, re-opens, sees the SAME record)
  const b1=createFileOutbox(dir);
@@ -16,7 +17,7 @@ const patched=(obj,key,fn,body)=>{const orig=obj[key];obj[key]=fn;try{return bod
  assert(r&&r.envelope&&r.envelope.id==='cmd-1','record survives a restart');
  assert((await b2.get('cmd-absent'))===null,'missing record is null');
  // CORRUPT -> THROWS (fail closed: never a silent null that would allow a blind re-send)
- fs.writeFileSync(path.join(dir,'cmd-bad.json'),'{not json');
+ fs.writeFileSync(path.join(dir,'cmd-bad.json'),'{not json',{mode:0o600}); // well-formed mode, corrupt CONTENT: tests the JSON gate, not the mode gate
  await assert.rejects(()=>b2.get('cmd-bad'),/JSON/,'corrupt record throws');
  // id boundary: traversal and proto names refused
  assert((await b2.put('../evil',{a:1}))===false,'traversal id refused on put');
@@ -76,6 +77,41 @@ const patched=(obj,key,fn,body)=>{const orig=obj[key];obj[key]=fn;try{return bod
  });
  assert((await b4.get('cmd-5'))===null,'rename-failed record never installed');
  assert(fs.readdirSync(dir).filter(f=>/\.tmp$/.test(f)&&f!=='other.tmp').length===0,'no tmp residue after failures');
+ // FAULT INJECTION 5: POST-RENAME dir fsync failure - committed-but-unverified: the record lands
+ // (get returns it), put=false, and an idempotent re-put is NOT confirmed until a fresh dir fsync succeeds
+ await patched(fs,'openSync',(p,flags,mode)=>{
+  if(p===dir&&flags==='r')throw Object.assign(new Error('dir sync unavailable'),{code:'EIO'});
+  return realOpen(p,flags,mode);
+ },async()=>{
+  assert((await b4.put('cmd-6',rec(6)))===false,'dir-fsync failure refuses the put');
+  assert((await b4.get('cmd-6')).envelope.id==='cmd-6','record committed on disk (readable) but unverified');
+  assert((await b4.put('cmd-6',rec(6)))===false,'idempotent re-put still unconfirmed while dir fsync fails');
+ });
+ assert((await b4.put('cmd-6',rec(6)))===true,'idempotent re-put confirms after dir fsync heals');
+ // POSIX READ CHECKS: a record with widened mode fails closed on read
+ if(process.platform!=='win32'){
+  fs.chmodSync(path.join(dir,'cmd-6.json'),0o644);
+  await assert.rejects(()=>b4.get('cmd-6'),/mode is not 600/,'widened record mode fails closed on read');
+  fs.chmodSync(path.join(dir,'cmd-6.json'),0o600);
+ }
+ // CONCURRENT RECLAIM (process level): a dead-pid lock + two parallel openers -> EXACTLY ONE wins
+ b4.close();
+ fs.writeFileSync(path.join(dir,'.outbox.lock'),JSON.stringify({pid:99999999,host:os.hostname(),at:1}));
+ const child=()=>{const{spawn}=require('child_process');return new Promise(res=>{
+  const c=spawn(process.execPath,['-e','try{const b=require('+JSON.stringify(require.resolve('../server/lib/outbox-file'))+').createFileOutbox(process.argv[1]);console.log("OK");setTimeout(()=>process.exit(0),400)}catch(e){console.log("REFUSED")}',dir],{stdio:['ignore','pipe','ignore']});
+  let out='';c.stdout.on('data',d=>out+=d);c.on('close',()=>res(out.trim()));})};
+ const[rA,rB]=await Promise.all([child(),child()]);
+ assert.strictEqual([rA,rB].filter(x=>x==='OK').length,1,'exactly one concurrent reclaimer wins: '+rA+','+rB);
+ assert.strictEqual([rA,rB].filter(x=>x==='REFUSED').length,1,'the loser is refused: '+rA+','+rB);
+ // a LIVE reclaim guard blocks openers; a STALE guard (dead pid) is cleared by the next reclaimer
+ fs.writeFileSync(path.join(dir,'.outbox.lock'),JSON.stringify({pid:99999999,host:os.hostname(),at:1}));
+ fs.mkdirSync(path.join(dir,'.outbox.reclaim'),{recursive:true});
+ fs.writeFileSync(path.join(dir,'.outbox.reclaim','pid'),JSON.stringify({pid:process.pid,host:os.hostname()})); // live (us) as stand-in live reclaimer
+ assert.throws(()=>createFileOutbox(dir),/reclaim in progress/,'live reclaim guard blocks');
+ fs.writeFileSync(path.join(dir,'.outbox.reclaim','pid'),JSON.stringify({pid:99999999,host:os.hostname()})); // stale guard
+ const b5=createFileOutbox(dir);
+ assert((await b5.get('cmd-6')).envelope.id==='cmd-6','stale guard cleared, dead lock reclaimed, records intact');
+ b5.close();
  // PRIVACY (POSIX): a pre-existing 0755 dir is enforced to 700 on open; a symlink dir is refused
  if(process.platform!=='win32'){
   const lax=fs.mkdtempSync(path.join(os.tmpdir(),'gw-outbox-lax-'));
