@@ -120,17 +120,24 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // again before the auto-run timer fires). ANY anomaly -> ordinary blocking card (fail-closed).
  const SKEW_MS=60000; // small clock-skew allowance; ts further in the future is rejected
  function validPreapproval(m,payload,device){
+  // reason-coded refusal audit: the intermittent bad_sig needs fingerprints (which gate failed,
+  // ts/exp/now), never a bare false. Same fail-closed behavior, just attributable.
+  const no=(reason,extra)=>{audit({kind:'server',stage:'pre_sig_fail',reason,id:String(m&&m.id||'').slice(0,40),...(extra||{})});return false};
   try{
-   if(!signPub||!seenOk||!m||m.ts==null||m.exp==null)return false;
-   const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false; // strict hex - never feed arbitrary bytes to verify
+   if(!signPub)return no('no_signpub');
+   if(!seenOk)return no('seen_store_broken');
+   if(!m||m.ts==null||m.exp==null)return no('missing_fields');
+   const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return no('sig_shape');
    const ts=+m.ts,exp=+m.exp,now=Date.now();
-   if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
-   if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return false; // not from the future, not stale
-   if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return false; // a sane, live validity window
+   if(!Number.isFinite(ts)||!Number.isFinite(exp))return no('ts_exp_nan');
+   if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return no('ts_window',{ts,now});
+   if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return no('exp_window',{ts,exp,now});
    // v2 envelopes bind the TARGET DEVICE into the signature (device\nid\nkind...); v1 (stage A, single device) has no device field
    const fields=device!=null?[String(device),String(m.id),String(m.kind),String(ts),String(exp),payload]:[String(m.id),String(m.kind),String(ts),String(exp),payload];
-   return crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
-  }catch{return false}
+   const ok=crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
+   if(!ok)return no('verify_false',{kind:String(m.kind||'').slice(0,30),payloadLen:String(payload||'').length});
+   return true;
+  }catch(e){return no('thrown',{err:String(e&&e.message||e).slice(0,80)})}
  }
  // replay guard: signed command ids are remembered (persisted) with their decision until their exp,
  // so the same signed message cannot re-run after a burst, reconnect or app restart. The store is

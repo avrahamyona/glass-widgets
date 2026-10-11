@@ -236,7 +236,8 @@ const launch=async()=>{
  // DURABLE (file) outbox - byte-identical on the wire; lost-POST-after-accept reconciles as
  // duplicate; 404 -> unknown; expiry never hits the wire.
  const outDir=fs.mkdtempSync('/tmp/gw-outbox-');
- const fileBox=()=>({get:async id=>{try{return JSON.parse(fs.readFileSync(path.join(outDir,id+'.json'),'utf8'))}catch{return null}},put:async(id,r)=>{fs.writeFileSync(path.join(outDir,id+'.json'),JSON.stringify(r));return true}}); // durable: survives a sender process restart
+ const{createFileOutbox}=require(REPO+'/server/lib/outbox-file.js');
+ const fileBox=()=>createFileOutbox(outDir); // the PRODUCTION durable outbox (atomic, fail-closed) - a sender restart sees the same records
  const wireSeen=[];
  const rec=http.createServer((q,r)=>{if(q.url==='/cmd'&&q.method==='POST'){let b='';q.on('data',c=>b+=c);q.on('end',()=>{wireSeen.push(b);if(wireSeen.length===1){q.socket.destroy()}else{r.writeHead(409,{'content-type':'application/json'});r.end('{"ok":false,"reason":"duplicate","outcome":{"status":"accepted"}}')}})}else{r.writeHead(404);r.end()}}); // first POST: accepted then the response is LOST (socket dies); retry: 409 cached
  await new Promise(r=>rec.listen(0,'127.0.0.1',r));
