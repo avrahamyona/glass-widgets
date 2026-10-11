@@ -1,0 +1,38 @@
+// Unit tests for worker/outbound-sign.js: canonical byte-compatibility with the PC verifiers,
+// id/device validation, v1/v2 shapes, ttl bounds, fail-closed env.
+const assert=require('assert'),crypto=require('crypto');
+const{signReadRequest,buildCommandEnvelope,CMD_TTL_MS}=require('../worker/outbound-sign.js');
+const{publicKey:PUB,privateKey:PRIV}=crypto.generateKeyPairSync('ed25519');
+const env={GW_SIGN_PRIVATE:PRIV.export({format:'der',type:'pkcs8'}).toString('base64')};
+const pubK=()=>crypto.createPublicKey({key:Buffer.from(PUB.export({format:'der',type:'spki'}).toString('base64'),'base64'),format:'der',type:'spki'});
+const DEV=crypto.createHash('sha256').update('devpub').digest('hex').slice(0,16);
+const verify=(fields,sig)=>crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),pubK(),Buffer.from(sig,'hex'));
+(async()=>{
+ // read signer: six-field canonical exactly as verifyReadAuth expects
+ const r=await signReadRequest(env,{device:DEV,method:'GET',path:'/task',query:'id=c2'});
+ assert(/^[0-9a-f]{24}$/.test(r.nonce)&&/^[0-9a-f]{128}$/.test(r.sig),'read shape');
+ assert(verify(['GET','/task','id=c2',String(r.ts),r.nonce,DEV],r.sig),'read canonical verifies');
+ assert(!verify(['GET','/info','id=c2',String(r.ts),r.nonce,DEV],r.sig),'path is bound');
+ assert(!verify(['GET','/task','id=c2',String(r.ts),r.nonce,'0'.repeat(16)],r.sig),'device is bound');
+ await assert.rejects(()=>signReadRequest(env,{device:'nope',path:'/task',query:''}),'bad device refused');
+ await assert.rejects(()=>signReadRequest(env,{device:DEV,path:'task',query:''}),'bad path refused');
+ await assert.rejects(()=>signReadRequest({},{device:DEV,path:'/task',query:''}),'missing key fails closed');
+ // v2 command: device-first six-field
+ const data={query:'dad'};
+ const e2=await buildCommandEnvelope(env,{id:'cmd-0001',kind:'find_files',device:DEV,data});
+ assert(e2.device===DEV&&verify([DEV,'cmd-0001','find_files',String(e2.ts),String(e2.exp),JSON.stringify(data)],e2.sig),'v2 canonical verifies');
+ assert(e2.exp-e2.ts===CMD_TTL_MS,'default ttl');
+ assert(!verify(['cmd-0001','find_files',String(e2.ts),String(e2.exp),JSON.stringify(data)],e2.sig),'v2 sig does NOT pass the v1 canonical');
+ // v1 legacy: five-field, no device key in the envelope
+ const e1=await buildCommandEnvelope(env,{id:'cmd-0002',kind:'find_files',data});
+ assert(!('device' in e1)&&verify(['cmd-0002','find_files',String(e1.ts),String(e1.exp),JSON.stringify(data)],e1.sig),'v1 canonical verifies');
+ // payload canonicalization: data arrives as the exact JSON object sent
+ const e3=await buildCommandEnvelope(env,{id:'cmd-0003',kind:'read_file',device:DEV,data:{path:'/a b/ק.txt'}});
+ assert(verify([DEV,'cmd-0003','read_file',String(e3.ts),String(e3.exp),JSON.stringify(e3.data)],e3.sig),'non-ascii payload canonical');
+ // validation
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'x',kind:'find_files',data}),'short id refused');
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0004',kind:'find_files',device:'BAD',data}),'bad device refused');
+ const e4=await buildCommandEnvelope(env,{id:'cmd-0005',kind:'find_files',device:DEV,data,ttlMs:99999999});
+ assert(e4.exp-e4.ts===300000,'ttl capped at 300s');
+ console.log('WORKER-OUTBOUND-UNIT: PASS');
+})().catch(e=>{console.error('FAIL',e);process.exit(1)});
