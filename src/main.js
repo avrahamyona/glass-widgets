@@ -440,10 +440,11 @@ function wireUpdater(){
   autoUpdater.on('update-available',i=>{upd.state='downloading';upd.version=i.version;upd.percent=0;upd.error=null});
   autoUpdater.on('update-not-available',()=>{upd.state='none';upd.error=null});
   autoUpdater.on('download-progress',p=>{upd.state='downloading';upd.percent=Math.round(p.percent)});
-  autoUpdater.on('update-downloaded',i=>{upd.state='ready';upd.version=i.version;upd.percent=100});
+  autoUpdater.on('update-downloaded',i=>{upd.state='ready';upd.version=i.version;upd.percent=100;
+   auditUpd('downloaded',i.version);silentInstall(i.version)}); // the standing grant completes here: auto-checks install, not just download
   autoUpdater.on('error',e=>{if(quietCheck){upd.state='idle';upd.error=null}else{upd.state='error';upd.error='לא ניתן לבדוק עדכונים כרגע. נסה שוב מאוחר יותר'}});
   const quiet=()=>{quietCheck=true;autoUpdater.checkForUpdates().catch(()=>{}).finally(()=>{quietCheck=false})};
-  setTimeout(quiet,15000);setInterval(quiet,30*60*1000); // background re-checks: a stale "no update" self-heals, silently
+  setTimeout(quiet,15000);setInterval(quiet,10*60*1000); // check on launch + every 10 min: a stale "no update" self-heals, silently
   updWired=true;return true;
  }catch{return false}
 }
@@ -452,6 +453,34 @@ ipcMain.handle('update:state',()=>({...upd,current:app.getVersion()}));
 ipcMain.handle('update:install',()=>{if(upd.state==='ready'&&updWired){
  try{fs.writeFileSync(path.join(app.getPath('userData'),'pending-update-relaunch'),String(Date.now()))}catch{}
  require('electron-updater').autoUpdater.quitAndInstall(false,true);return {ok:true}}return {ok:false}});
+function auditUpd(stage,version,note){try{fs.appendFileSync(path.join(app.getPath('userData'),'agent-audit.log'),JSON.stringify({at:new Date().toISOString(),kind:'update_app',stage,version:version||null,note:note||null})+'\n')}catch{}}
+let installScheduled=false,autoUpdaterRef=null;
+function silentInstall(version){ // idempotent: update-downloaded and update_app converge here, exactly one quit
+ if(installScheduled)return;installScheduled=true;
+ auditUpd('installing',version);
+ try{fs.writeFileSync(path.join(app.getPath('userData'),'pending-update-relaunch'),String(Date.now()))}catch{}
+ setTimeout(()=>{try{(autoUpdaterRef||require('electron-updater').autoUpdater).quitAndInstall(true,true)}catch{}},2500)} // silent NSIS + relaunch, after any in-flight ack lands
+
+// update_app (agent command): check GitHub latest, download, install silently. The only self-action
+// pre-authorized by the user's standing grant, so no island approval card. Dev builds refuse.
+async function updateAppSilent(){
+ if(process.env.GLASSWIDGETS_FAKE_UPDATE){try{fs.writeFileSync(process.env.GLASSWIDGETS_FAKE_UPDATE,'installed '+Date.now())}catch{}return {ok:true,note:'installing 0.0.0-fake',version:'0.0.0-fake'}}
+ if(!wireUpdater())return {ok:false,note:'updater runs only in the installed app, not dev'};
+ const {autoUpdater}=require('electron-updater');autoUpdaterRef=autoUpdater;
+ upd.state='checking';upd.error=null;upd.percent=0; // reset first: a stale none/ready/error must never decide this run
+ auditUpd('check-started',null);
+ try{await autoUpdater.checkForUpdates()}catch{return {ok:false,note:'update check failed'}}
+ for(let i=0;i<120;i++){ // up to ~4 min for the download to land (check itself already resolved above)
+  if(upd.state==='ready')break;
+  if(upd.state==='none')return {ok:false,note:'already up to date ('+app.getVersion()+')'};
+  if(upd.state==='error')return {ok:false,note:upd.error||'update check failed'};
+  await new Promise(r=>setTimeout(r,2000));
+ }
+ if(upd.state!=='ready')return {ok:false,note:'download did not finish ('+upd.state+' '+upd.percent+'%)'};
+ const v=upd.version;
+ silentInstall(v); // idempotent; the update-downloaded handler may have beaten us to it
+ return {ok:true,note:'downloaded '+v+' - installing silently and relaunching',version:v};
+}
 function bootLog(step){try{const f=path.join(app.getPath('userData'),'boot.log');fs.appendFileSync(f,new Date().toISOString()+' v'+app.getVersion()+' '+String(step).slice(0,400)+'\n');const lines=fs.readFileSync(f,'utf8').split('\n');if(lines.length>80)fs.writeFileSync(f,lines.slice(-80).join('\n'))}catch{}}
 process.on('uncaughtException',e=>bootLog('CRASH '+(e&&e.stack||e)));
 process.on('unhandledRejection',e=>bootLog('REJECT '+(e&&e.stack||e)));
@@ -495,7 +524,8 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // check on launch + every 10 min, quiet
   try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
   if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
