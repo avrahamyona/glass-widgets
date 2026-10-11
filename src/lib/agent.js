@@ -103,26 +103,42 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  // Ed25519 pre-approval: the worker signs id\nkind\nts\nexp\npayload with its private key; the client
  // only verifies. Strict field formats, freshness AND an explicit expires_at (checked at receipt and
  // again before the auto-run timer fires). ANY anomaly -> ordinary blocking card (fail-closed).
+ const SKEW_MS=60000; // small clock-skew allowance; ts further in the future is rejected
  function validPreapproval(m,payload){
   try{
-   if(!signPub||!m||m.ts==null||m.exp==null)return false;
+   if(!signPub||!seenOk||!m||m.ts==null||m.exp==null)return false;
    const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false; // strict hex - never feed arbitrary bytes to verify
    const ts=+m.ts,exp=+m.exp,now=Date.now();
    if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
-   if(Math.abs(now-ts)>PRE_TTL_MS||exp<=now||exp-ts>PRE_TTL_MS)return false;
+   if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return false; // not from the future, not stale
+   if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return false; // a sane, live validity window
    return crypto.verify(null,Buffer.from([String(m.id),String(m.kind),String(ts),String(exp),payload].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
   }catch{return false}
  }
- // replay guard: signed command ids are remembered (persisted) with their decision for the validity
- // window, so the same signed message cannot re-run after a burst, reconnect or app restart.
+ // replay guard: signed command ids are remembered (persisted) with their decision until their exp,
+ // so the same signed message cannot re-run after a burst, reconnect or app restart. The store is
+ // load-bearing: if it cannot be read (corrupt) or written, signed auto-run is DISABLED (blocking
+ // card instead) - never a pretend replay guard.
  const seenFile=()=>path.join(app.getPath('userData'),'agent-seen.json');
- const seen={};
- try{const j=JSON.parse(fs.readFileSync(seenFile(),'utf8'));for(const k of Object.keys(j))if(j[k]&&+j[k].at>Date.now()-PRE_TTL_MS)seen[k]=j[k]}catch{}
- function markSeen(id,decision){seen[String(id)]={at:Date.now(),decision};try{fs.writeFileSync(seenFile(),JSON.stringify(seen))}catch{}}
- function dupSigned(id,kind,detail){
-  const sid=String(id),prev=seen[sid];if(!prev)return false;
-  audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:prev.decision});
-  ack(id,'failed','duplicate command id - already '+prev.decision);return true;
+ const seen={};let seenOk=true;
+ try{const j=JSON.parse(fs.readFileSync(seenFile(),'utf8'));for(const k of Object.keys(j))if(j[k]&&+j[k].exp>Date.now())seen[k]=j[k]}
+ catch(e){if(!e||e.code!=='ENOENT')seenOk=false} // missing file is fine (first run); corrupt is not
+ function markSeen(id,decision,exp){
+  const sid=String(id),prev=seen[sid];
+  seen[sid]={at:Date.now(),exp:+(exp||(prev&&prev.exp)||Date.now()),decision};
+  try{fs.writeFileSync(seenFile(),JSON.stringify(seen))}catch{seenOk=false}
+  return seenOk;
+ }
+ // duplicate-id guard for BOTH branches: a reused id (signed or not) must never clobber a parked
+ // approval entry - its original timer would otherwise execute the replacement without a click.
+ function checkDup(id,kind,detail){
+  const sid=String(id),prev=seen[sid];
+  if(prev){audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:prev.decision});
+   ack(id,'failed','duplicate command id - already '+prev.decision);return true}
+  for(const p of pendingApprovals.values())if(String(p.cmdId)===sid){
+   audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:'pending'});
+   ack(id,'failed','duplicate command id - already pending');return true}
+  return false;
  }
  function execPending(p){
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
@@ -134,20 +150,22 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(!cmd)return ack(id,'failed','missing command');
   if(cmd.length>1000)return ack(id,'failed','command too long');
   if(RUN_DENY.some(rx=>rx.test(cmd))){audit({kind:'run_command',stage:'denied',command:cmd,error:'guardrail'});return ack(id,'failed','command denied by guardrail')}
+  if(checkDup(id,'run_command',{command:cmd}))return;
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(msg&&validPreapproval(msg,cmd)){
-   if(dupSigned(id,'run_command',{command:cmd}))return;
-   markSeen(id,'pending');
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-    markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
-   audit({kind:'run_command',stage:'preapprove_card',command:cmd});
-   broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
-   return;
+   if(!markSeen(id,'pending',+msg.exp)){audit({kind:'run_command',stage:'seen_persist_failed',command:cmd})} // no durable replay guard -> blocking card below
+   else{
+    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+     if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+     markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
+    timer.unref&&timer.unref();
+    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
+    audit({kind:'run_command',stage:'preapprove_card',command:cmd});
+    broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+    return;
+   }
   }
   if(msg&&msg.sig)audit({kind:'run_command',stage:'bad_sig',command:cmd});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
@@ -364,20 +382,22 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   const core='השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר.';
   const body=core+(pre?'\nמתבצע אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.':'\nבלי אישור - תידחה אוטומטית בעוד כ-2 דקות.');
   if(body.length>1900){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'review card overflow',chars:body.length});return ack(id,'failed','plan too long to review safely (card limit) - rejected')}
+  if(checkDup(id,'web_task',{url:url.slice(0,200)}))return;
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(pre){
-   if(dupSigned(id,'web_task',{url:url.slice(0,200)}))return;
-   markSeen(id,'pending');
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-    markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
-   audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
-   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
-   return;
+   if(!markSeen(id,'pending',+task.exp)){audit({kind:'web_task',stage:'seen_persist_failed',url:url.slice(0,200)})} // no durable replay guard -> blocking card below
+   else{
+    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+     if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
+    timer.unref&&timer.unref();
+    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
+    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
+    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+    return;
+   }
   }
   if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
