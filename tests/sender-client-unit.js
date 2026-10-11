@@ -12,7 +12,14 @@ const DEV=crypto.createHash('sha256').update(DPUB.export({format:'der',type:'spk
 const senderPubB64=PUB.export({format:'der',type:'spki'}).toString('base64');
 const seenHeaders=[];
 const nodeFetch=(u,o={})=>new Promise((res,rej)=>{const url=new URL(u);
- const rq=http.request({hostname:url.hostname,port:url.port,path:url.pathname+url.search,method:o.method||'GET',headers:o.headers||{}},rs=>{let b='';rs.on('data',c=>b+=c);rs.on('end',()=>res({status:rs.statusCode,headers:rs.headers,json:async()=>JSON.parse(b),text:async()=>b}))});
+ const rq=http.request({hostname:url.hostname,port:url.port,path:url.pathname+url.search,method:o.method||'GET',headers:o.headers||{}},rs=>{
+  const chunks=[];let done=false,err=null,waiter=null,destroyed=false;
+  const wake=()=>{if(waiter){const w=waiter;waiter=null;w()}};
+  rs.on('data',c=>{chunks.push(c);wake()});rs.on('end',()=>{done=true;wake()});rs.on('error',e=>{err=e;wake()});
+  const body={async *[Symbol.asyncIterator](){let i=0;for(;;){while(i<chunks.length)yield chunks[i++];if(done)return;if(err)throw err;await new Promise(r=>waiter=r)}},
+   getReader(){const it=this[Symbol.asyncIterator]();return{read:()=>it.next(),cancel:async()=>{destroyed=true;rs.destroy();await it.return()},releaseLock(){}}}};
+  res({status:rs.statusCode,headers:rs.headers,body,text:async()=>{let b='';for await(const c of body)b+=c;return b},wasDestroyed:()=>destroyed});
+ });
  rq.on('error',rej);if(o.signal)o.signal.addEventListener('abort',()=>{rq.destroy(new Error('aborted'))});if(o.body)rq.write(o.body);rq.end()});
 const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:async(id,r)=>{m.set(id,r);return true},_map:m}};
 (async()=>{
@@ -26,7 +33,7 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  assert(srv.started,'server started');
  const port=srv.port,base='http://127.0.0.1:'+port;
  // count health proofs + capture whether the reply key EVER reaches the device origin
- const spy=(u,o={})=>{if(String(u).includes('/health'))healthHits++;seenHeaders.push([String(u),{...(o.headers||{})}]);return nodeFetch(u,o)};
+ const spy=(u,o={})=>{if(String(u).includes('/health'))healthHits++;seenHeaders.push([String(u),{...(o.headers||{})},o.method||'GET']);return nodeFetch(u,o)};
  let clock=Date.now();
  const mk=(o={})=>createSenderClient({deviceUrl:base,cmdKey:'cmdk-test',signPrivate:SIGN_PRIV,device:DEV,devicePub:DEV_PUB_B64,fetchImpl:spy,outbox:memBox(),pollIntervalMs:5,...o});
  // full cycle on the real server - secretless direct transport
@@ -34,6 +41,7 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  const s1=await c.sendCommand({kind:'find_files',data:{query:'dad'}});
  assert(s1.status==='accepted'&&s1.trusted===false&&/not a device execution proof/.test(s1.note),'202 = HTTP acceptance only, no execution claim');
  for(const[u,h]of seenHeaders)assert(!('x-gw-reply-key' in h)&&!u.includes('rk-test'),'reply key NEVER reaches the device origin (path '+u+')'); // CRITICAL negative test
+ let cmdPosts=()=>seenHeaders.filter(([u,h,m])=>u.includes('/cmd')&&m==='POST').length;
  const p1=await c.pollTask(s1.id);
  assert(p1.status==='accepted'&&p1.trusted===true,'request-bound device sig verifies (headers + exact raw body)');
  tasks.set(s1.id,{status:'done',result:{n:1},at:Date.now(),terminal:true});
@@ -52,8 +60,15 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  const pE=await cE.pollTask('cmd-tamper01');assert(pE.status==='done'&&pE.trusted===false,'tampered body fails the device sig (fail closed)');evil.close();
  // secret routing constructor rules
  assert.throws(()=>mk({replyKey:'rk-test'}),'replyKey without controlUrl refused');
- const cCtl=mk({controlUrl:base,replyKey:'rk-test'});
- assert(typeof cCtl.controlGet==='function','control origin carries the reply key (only there)');
+ assert.throws(()=>mk({controlUrl:base,replyKey:'rk-test'}),'controlUrl identical to deviceUrl refused (round-8 repro)');
+ const ctl=http.createServer((rq,rs)=>{seenHeaders.push(['CONTROL'+rq.url,{...rq.headers}]);rs.writeHead(200,{'content-type':'application/json'}).end('{"ok":true}')});
+ await new Promise(r=>ctl.listen(0,'127.0.0.1',r));
+ const cCtl=mk({controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test'});
+ await assert.rejects(()=>cCtl.controlGet('/health'),'non-allowlisted control endpoint refused');
+ const cg=await cCtl.controlGet('/glasswidgets/agent/tunnel');
+ assert(cg.status===200&&seenHeaders.some(([u,h])=>u.startsWith('CONTROL')&&h['x-gw-reply-key']==='rk-test'),'reply key rides the CONTROL origin on an allowlisted endpoint');
+ for(const[u,h]of seenHeaders)if(!u.startsWith('CONTROL'))assert(h&&!('x-gw-reply-key' in h),'reply key still never on the device origin');
+ ctl.close();
  // health TTL: cached within TTL, re-proven after TTL, resetIdentity forces re-proof
  const cH=mk({nowFn:()=>clock}); // fresh client with the fake clock - no cached proof
  const h0=healthHits;await cH.ensureDevice();const h1=healthHits;await cH.ensureDevice();
@@ -82,6 +97,28 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  await new Promise(r=>big.listen(0,'127.0.0.1',r));
  const pBig=await mk({deviceUrl:'http://127.0.0.1:'+big.address().port}).pollTask('cmd-bigbody1');
  assert(pBig.status==='unknown'&&pBig.reason==='network','over-cap utf8 body refused');big.close();
+ // stream cancellation: an infinite body loses to the deadline AND its reader is cancelled
+ let cancelled=false;
+ const infFetch=()=>Promise.resolve({status:200,headers:{},body:new ReadableStream({start(c){let n=0;const push=()=>{try{c.enqueue(new Uint8Array(1024))}catch{return}setTimeout(push,0)};push()},cancel(){cancelled=true}})});
+ const pInf=await mk({fetchImpl:infFetch,requestTimeoutMs:50}).pollTask('cmd-stream01');
+ assert(pInf.status==='unknown'&&cancelled===true,'infinite stream times out AND the reader is cancelled/released');
+ // expiry re-checked AFTER health, immediately before POST: the clock jumps during ensureDevice
+ const boxE=memBox();let jump=false;
+ const cX=mk({outbox:boxE,nowFn:()=>Date.now()+(jump?120000:0)});
+ const pX=await cX.prepare({kind:'find_files',data:{}});
+ const postsBefore=cmdPosts();
+ jump=true; // health proof now runs with a clock past the envelope exp
+ const sX=await cX.send(pX);
+ assert(sX.status==='expired'&&cmdPosts()===postsBefore,'expired after health = NO POST (round-8 repro)');
+ // device binding is required: a stored envelope with another/missing device never flies
+ const boxD=memBox();await boxD.put('cmd-otherdev',{envelope:{id:'cmd-otherdev',kind:'find_files',device:'0'.repeat(16),ts:Date.now(),exp:Date.now()+30000,sig:'0'.repeat(128),data:{}},receipt:null,at:Date.now()});
+ assert((await mk({outbox:boxD}).send({id:'cmd-otherdev'})).reason==='no_valid_durable_envelope','other-device envelope refused');
+ const boxI=memBox();await boxI.put('cmd-noidmtch',{envelope:{id:'cmd-DIFFERENT',kind:'find_files',device:DEV,ts:Date.now(),exp:Date.now()+30000,sig:'0'.repeat(128),data:{}},receipt:null,at:Date.now()});
+ assert((await mk({outbox:boxI}).send({id:'cmd-noidmtch'})).reason==='envelope_id_mismatch','envelope id must match the requested id');
+ // text-only transports refused by default, allowed test-only
+ const txtOnly=()=>Promise.resolve({status:200,headers:{},text:async()=>'{}'});
+ assert((await mk({fetchImpl:txtOnly}).pollTask('cmd-textonly')).reason==='network','text-only transport refused by default (not stream-bounded)');
+ assert(mk({fetchImpl:txtOnly,allowTextTransport:true}),'text-only transport allowed only with the explicit TEST-ONLY flag');
  // strict URLs + single-shot
  assert.throws(()=>mk({deviceUrl:'http://evil.example'}),'http origin refused');
  assert.throws(()=>mk({deviceUrl:'ftp://127.0.0.1:'+port}),'non-http(s) refused even on localhost');

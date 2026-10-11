@@ -14,7 +14,7 @@
 // status completes a wait. Deadlines race the whole request (headers AND stream-bounded
 // body), clamped to finite integers, timers always cleaned up.
 const crypto=require('crypto');
-const{buildCommandEnvelope,signReadRequest,CMD_TTL_MS}=require('../../worker/outbound-sign');
+const{buildCommandEnvelope,signReadRequest,CMD_TTL_MS,DATA_BYTES_CAP}=require('../../worker/outbound-sign');
 const{assertKind,strictId}=require('../../src/lib/command-contract');
 const CMD_PATH='/cmd'; // real local-server intake (worker proxy path TBD - not wired)
 const TASK_PATH='/task';
@@ -22,7 +22,8 @@ const TERMINAL=new Set(['done','failed','unknown']); // 'unknown' = reconcile ma
 const BODY_CAP=262144; // max response body BYTES (stream-bounded, not post-hoc)
 const HEALTH_TTL_MS=300000; // device identity proof is re-fetched after this - never cached forever
 const sha256=s=>crypto.createHash('sha256').update(s,'utf8').digest('hex');
-const finiteMs=(v,d)=>{v=+v;return Number.isFinite(v)&&v>=0?Math.floor(v):d}; // timeouts are finite integers, clamped
+const TIMER_MAX=2**31-1; // above this setTimeout overflows to ~1ms
+const finiteMs=(v,d)=>{v=+v;return Number.isFinite(v)&&v>=0?Math.min(TIMER_MAX,Math.floor(v)):d}; // timeouts: finite integers, bounded BOTH ways
 
 function strictBase(u,what){
  let url;try{url=new URL(String(u))}catch{throw new Error('bad '+what)}
@@ -47,18 +48,24 @@ function verifyDeviceSig(devPub,expectDevice,{headers,method,path,query,reqTs,re
  }catch{return false} // malformed proof fails CLOSED
 }
 // schema-check a stored envelope before it ever reaches the wire (stored bytes are trusted only after shape validation)
-function envelopeSchemaOk(e){
+function envelopeSchemaOk(e,expectDevice){
  try{
   if(!e||typeof e!=='object'||Array.isArray(e))return false;
   if(!strictId(e.id)||!e.kind||!Number.isFinite(e.ts)||!Number.isFinite(e.exp))return false;
   assertKind(e.kind);
-  if(!/^[0-9a-f]{128}$/.test(String(e.sig||'')))return false;
+  if(!/^[0-9a-f]{128}$/.test(String(e.sig||'')))return false; // shape only - authenticity is the PC's to verify
+  if(String(e.device||'')!==String(expectDevice))return false; // v2 device binding REQUIRED - a missing/other device never flies
+  if(!(e.exp>e.ts)||e.exp-e.ts>CMD_TTL_MS)return false; // sane TTL window
   if(e.data==null||typeof e.data!=='object'||Array.isArray(e.data))return false;
+  if(Buffer.byteLength(JSON.stringify(e.data),'utf8')>DATA_BYTES_CAP)return false; // same bound the builder enforces
   return true;
  }catch{return false}
 }
 
-function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,device,devicePub,fetchImpl,outbox,cmdPath,requestTimeoutMs=15000,pollIntervalMs=2000,pollTimeoutMs=120000,healthTtlMs=HEALTH_TTL_MS,nowFn}){
+// NOTE: deviceUrl/controlUrl are IMMUTABLE for the life of the client. A tunnel pointer / URL
+// change REQUIRES constructing a new client (resetIdentity only clears the cached health proof -
+// it never re-origins an existing client).
+function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,device,devicePub,fetchImpl,outbox,cmdPath,allowTextTransport=false,requestTimeoutMs=15000,pollIntervalMs=2000,pollTimeoutMs=120000,healthTtlMs=HEALTH_TTL_MS,nowFn}){
  if(!deviceUrl||!cmdKey||!signPrivate)throw new Error('sender client needs deviceUrl, cmdKey and signPrivate');
  if(typeof fetchImpl!=='function')throw new Error('fetchImpl required (injected - no implicit network)');
  if(!devicePub)throw new Error('devicePub required (registry-verified device pubkey) - an unproven status is never terminal');
@@ -66,11 +73,13 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  if(controlUrl&&!replyKey)throw new Error('controlUrl requires replyKey');
  const devPub=crypto.createPublicKey({key:Buffer.from(String(devicePub),'base64'),format:'der',type:'spki'});
  const base=strictBase(deviceUrl,'deviceUrl'),cbase=controlUrl?strictBase(controlUrl,'controlUrl'):null;
+ if(cbase&&cbase===base)throw new Error('controlUrl must be a DISTINCT origin from deviceUrl - the reply key must have no path to the device origin'); // round-8 repro: identical origins passed silently
  const cpath=String(cmdPath||CMD_PATH);
  if(!/^\/[A-Za-z0-9/_-]*$/.test(cpath)||cpath.includes('..'))throw new Error('bad command path: fixed segments only');
  const env={GW_SIGN_PRIVATE:signPrivate};
  if(!outbox||typeof outbox.get!=='function'||typeof outbox.put!=='function')throw new Error('durable outbox required ({get(id),put(id,record)->true})');
  const now=typeof nowFn==='function'?nowFn:()=>Date.now();
+ // allowTextTransport is TEST-ONLY: permits text()-only transports (inherently post-allocation)
  requestTimeoutMs=finiteMs(requestTimeoutMs,15000);pollIntervalMs=finiteMs(pollIntervalMs,2000);pollTimeoutMs=finiteMs(pollTimeoutMs,120000);healthTtlMs=finiteMs(healthTtlMs,HEALTH_TTL_MS);
 
  // one fully-raced request: the fetch itself AND a stream-bounded body read are both inside the
@@ -78,24 +87,35 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  async function req(u,opt,budgetMs){
   const budget=Math.max(1,finiteMs(Math.min(requestTimeoutMs,budgetMs==null?requestTimeoutMs:budgetMs),requestTimeoutMs));
   const ac=new AbortController();
-  let timer=null;
-  // ONE race covers the whole request - headers AND body - so a fetchImpl that ignores the
-  // abort signal, or a stream that never ends, still loses to the deadline. Timer always cleared.
+  let timer=null,cancelBody=null;
+  // ONE race covers the whole request - headers AND body. On cap/timeout the reader is cancelled
+  // and released AND the request aborted; a signal-ignoring fetchImpl or a never-ending stream
+  // still loses to the deadline. Timers always cleared.
   const work=(async()=>{
    const r=await fetchImpl(u,{...opt,signal:ac.signal,redirect:'error'});
    if(r.status>=300&&r.status<400)throw new Error('redirect refused - credentials never follow a redirect');
    let raw;
-   if(r.body&&(typeof r.body.getReader==='function'||Symbol.asyncIterator in Object(r.body))){ // stream-bounded: stop at BODY_CAP BYTES
+   const readIt=async(next,cancel)=>{ // bounded read over ANY chunk source; cancels on cap
     const chunks=[];let n=0;
-    const it=typeof r.body.getReader==='function'?async function*(){const rd=r.body.getReader();for(;;){const{done,value}=await rd.read();if(done)return;yield value}}():r.body;
-    for await(const c of it){n+=c.length;if(n>BODY_CAP)throw new Error('response body over cap');chunks.push(c)}
-    raw=Buffer.concat(chunks.map(c=>Buffer.isBuffer(c)?c:Buffer.from(c))).toString('utf8');
-   }else if(typeof r.text==='function')raw=await r.text();
-   else raw=String(r.body||'');
+    for(;;){const{done,value}=await next();if(done)break;n+=value.length;
+     if(n>BODY_CAP){try{await cancel()}catch{};throw new Error('response body over cap')}
+     chunks.push(value)}
+    return Buffer.concat(chunks.map(c=>Buffer.isBuffer(c)?c:Buffer.from(c))).toString('utf8')};
+   if(r.body&&typeof r.body.getReader==='function'){
+    const rd=r.body.getReader();cancelBody=async()=>{try{await rd.cancel()}catch{}try{rd.releaseLock()}catch{}};
+    try{raw=await readIt(()=>rd.read(),()=>rd.cancel())}finally{try{rd.releaseLock()}catch{};cancelBody=null}
+   }else if(r.body&&Symbol.asyncIterator in Object(r.body)){
+    const it=r.body[Symbol.asyncIterator]();cancelBody=async()=>{try{await it.return()}catch{}};
+    try{raw=await readIt(()=>it.next(),()=>it.return())}finally{cancelBody=null}
+   }else if(typeof r.text==='function'){
+    if(!allowTextTransport)throw new Error('unbounded transport (text-only body): a stream body is required outside tests'); // post-allocation read can never be stream-bounded
+    raw=await r.text();
+    if(Buffer.byteLength(raw,'utf8')>BODY_CAP)throw new Error('response body over cap');
+   }else raw=String(r.body||'');
    if(Buffer.byteLength(raw,'utf8')>BODY_CAP)throw new Error('response body over cap'); // utf8 BYTES, not chars
    return {status:r.status,headers:r.headers||{},rawBody:raw};
   })();
-  try{return await Promise.race([work,new Promise((_,rej)=>{timer=setTimeout(()=>{try{ac.abort()}catch{};rej(new Error('request timeout'))},budget)})])}
+  try{return await Promise.race([work,new Promise((_,rej)=>{timer=setTimeout(()=>{try{ac.abort()}catch{};if(cancelBody)Promise.resolve(cancelBody()).catch(()=>{});rej(new Error('request timeout'))},budget)})])}
   finally{if(timer)clearTimeout(timer)}
  }
   const parseJson=r=>{try{return JSON.parse(r.rawBody)}catch{return null}};
@@ -119,7 +139,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   const cmdId=id||crypto.randomUUID();
   let prior;try{prior=await outbox.get(String(cmdId))}catch(e){return {error:'outbox_read_failed',id:cmdId};}
   if(prior){
-   if(!envelopeSchemaOk(prior.envelope))return {error:'outbox_record_corrupt',id:cmdId};
+   if(!envelopeSchemaOk(prior.envelope,device))return {error:'outbox_record_corrupt',id:cmdId};
    const h=sha256(JSON.stringify({kind:prior.envelope.kind,data:prior.envelope.data,device:prior.envelope.device||null}));
    const h2=sha256(JSON.stringify({kind:String(kind),data:data&&typeof data==='object'?JSON.parse(JSON.stringify(data)):data,device:String(device)}));
    if(h!==h2)throw new Error('id reuse with different content refused - a retry resends the EXACT stored envelope');
@@ -139,11 +159,12 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   if(prep&&prep.error)return {id:prep.id,status:'unknown',reason:prep.error,trusted:false};
   const id=String(prep&&prep.id||'');
   let rec=null;try{rec=await outbox.get(id)}catch(e){return {id,status:'unknown',reason:'outbox_read_failed',trusted:false};}
-  if(!rec||!envelopeSchemaOk(rec.envelope))return {id,status:'unknown',reason:'no_valid_durable_envelope',trusted:false};
+  if(!rec||!envelopeSchemaOk(rec.envelope,device))return {id,status:'unknown',reason:'no_valid_durable_envelope',trusted:false};
   const envelope=rec.envelope;
-  if(envelope.device&&envelope.device!==String(device))return {id,status:'unknown',reason:'device_mismatch',trusted:false}; // never send an envelope bound to another device
+  if(String(envelope.id)!==id)return {id,status:'unknown',reason:'envelope_id_mismatch',trusted:false}; // the stored envelope must be FOR this id
   if(now()>=envelope.exp)return {id,status:'expired',trusted:false};
   if(!await ensureDevice(requestTimeoutMs))return {id,status:'unknown',reason:'device_unproven',trusted:false};
+  if(now()>=envelope.exp)return {id,status:'expired',trusted:false}; // re-checked AFTER the health proof, immediately before the wire (round-8 repro)
   let r;
   try{r=await req(base+cpath,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':cmdKey},body:JSON.stringify(envelope)})} // NO X-GW-Reply-Key on the direct path - ever
   catch(e){return {id,status:'unknown',reason:'network',error:String(e&&e.message||e),trusted:false};}
@@ -181,9 +202,10 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   }
  }
  // control origin (worker registry/discovery) - the ONLY place the reply key is ever attached
+ const CONTROL_PATHS=new Set(['/glasswidgets/agent/tunnel','/glasswidgets/agent/enroll']); // the ONLY endpoints the reply key may ever be sent to
  async function controlGet(path,budgetMs){
   if(!cbase)throw new Error('no controlUrl configured');
-  if(!/^\/[A-Za-z0-9/_-]*$/.test(path))throw new Error('bad control path');
+  if(!CONTROL_PATHS.has(String(path)))throw new Error('control path not allowlisted - the reply key goes to known registry endpoints ONLY');
   return req(cbase+path,{method:'GET',headers:{'X-GW-Reply-Key':replyKey}},budgetMs);
  }
  return {prepare,send,sendCommand,pollTask,waitTerminal,ensureDevice,resetIdentity,controlGet,strictBase,verifyDeviceSig,CMD_PATH,CMD_TTL_MS,TERMINAL};
