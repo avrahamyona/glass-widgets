@@ -173,6 +173,9 @@ const launch=async()=>{
  const dRes=await fetch('http://127.0.0.1:47732/cmd',{method:'POST',headers:{'content-type':'application/json','X-GW-Key':'cmd-key'},body:JSON.stringify(dEnv)});
  assert(dRes.status===202,'direct malformed enroll accepted for processing');
  assert((await waitAck('enrBad2','failed')).note==='bad challenge','direct-intake malformed challenge refused with the SAME explicit reason (no silent drop)');
+ // a LONG NUMERIC challenge passes a String()-coerced shape check - refused by the typeof gate
+ ts=Date.now();exp=EX();pushCmd({id:'enrBad3',kind:'enroll_device',data:{challenge:12345678},ts,exp,sig:sign('enrBad3','enroll_device',ts,exp,JSON.stringify({challenge:12345678}))});
+ assert((await waitAck('enrBad3','failed')).note==='bad challenge','numeric challenge 12345678 refused (typeof gate, no String coercion)');
 
  // re-enroll (already enrolled): idempotent, fresh pending window for the NEW command id
  ts=Date.now();exp=EX();pushCmd({id:'enr2',kind:'enroll_device',data:{challenge:'re'+CH},ts,exp,sig:sign('enr2','enroll_device',ts,exp,JSON.stringify({challenge:'re'+CH}))});
@@ -251,7 +254,9 @@ const launch=async()=>{
  assert(n1.status==='unknown'&&n1.reason==='not_found'&&n1.id==='no-such-task-1','404 -> unknown not_found, same id');
  const pX=await sB.prepare({kind:'enroll_device',data:{challenge:'exp-'+Date.now().toString(36)},ttlMs:1000});
  await sleep(1100);
+ const wireBefore=wireSeen.length;
  assert((await sB.send(pX)).status==='expired','an expired envelope never hits the wire');
+ assert(wireSeen.length===wireBefore,'expired: NO wire call left the sender (wireSeen unchanged)');
  rec.close();
 
  // 9) replay guard cannot persist -> signed command gets the BLOCKING card with blocking copy, never auto-runs
