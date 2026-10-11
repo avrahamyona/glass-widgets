@@ -22,7 +22,7 @@ const waitUp=async(b,label)=>{for(let i=0;i<60&&!b.out().includes('server up');i
 const post=(U,body)=>fetch(U+'/cmd',{method:'POST',headers:{'content-type':'application/json','X-GW-Key':'srv-key'},body:JSON.stringify(body)});
 const task=async(U,id,dev)=>{let j=null;for(let i=0;i<50;i++){j=await(await fetch(U+'/task?id='+id,{headers:signRead('/task','id='+id,dev)})).json();if(j.terminal)break;await sleep(200)}return j};
 const kill=cp=>new Promise(res=>{if(!cp||cp.exitCode!==null)return res();cp.once('exit',()=>res());cp.kill('SIGTERM');setTimeout(res,3000).unref()});
-let b1=null,b2=null,bS=null,b4=null;
+let b1=null,b2=null,bS=null,b4=null,bE=null,dir2=null;
 (async()=>{try{
  b1=boot();const U=await waitUp(b1,'server');
  const devJson=fs.readFileSync(path.join(dir,'device.json'),'utf8');
@@ -100,8 +100,16 @@ let b1=null,b2=null,bS=null,b4=null;
  for(let i=0;i<40&&!dead4;i++)await sleep(200);
  assert(dead4&&!b4.out().includes('server up'),'unreadable device path -> fail closed, no mint-over: '+b4.out());
  await kill(b4.cp);b4=null;
+ // env-only first boot on a FRESH data dir (no config file at all): private dir created, then mint
+ dir2=fs.mkdtempSync('/tmp/gw-srv-env-');const fresh=path.join(dir2,'fresh'); // does NOT exist yet
+ bE=boot({GW_SERVER_CONFIG:path.join(fresh,'config.json'),GW_SERVER_TOKEN:'srv-key',GW_SENDER_PUB:PUB_B64});
+ await waitUp(bE,'env-only');
+ assert(fs.existsSync(path.join(fresh,'device.json')),'env-only: device minted in the fresh dir');
+ assert((fs.statSync(fresh).mode&511)===448,'fresh dir created private (700): '+(fs.statSync(fresh).mode&511).toString(8));
+ await kill(bE.cp);bE=null;
  console.log('SERVER-SKELETON-UNIT: PASS');
 }catch(e){console.error('FAIL',e);process.exitCode=1}
-finally{for(const b of [b1,b2,bS,b4])await kill(b&&b.cp);
+finally{for(const b of [b1,b2,bS,b4,bE])await kill(b&&b.cp);
  try{fs.rmSync(dir,{recursive:true,force:true})}catch(e){console.error('cleanup failed:',e.message)}
+ if(dir2)try{fs.rmSync(dir2,{recursive:true,force:true})}catch(e){console.error('cleanup2 failed:',e.message)}
  process.exit(process.exitCode||0)}})();

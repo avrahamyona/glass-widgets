@@ -34,26 +34,29 @@ function derivePub(privB64){
  const pub=crypto.createPublicKey(crypto.createPrivateKey({key:Buffer.from(privB64,'base64'),format:'der',type:'pkcs8'}));
  return pub.export({format:'der',type:'spki'}).toString('base64');
 }
-let device=null;
-let devRaw=null;
-try{devRaw=fs.readFileSync(devFile,'utf8')}catch(e){if(!e||e.code!=='ENOENT')throw e} // ONLY a missing file means first boot; EACCES/EIO/corrupt filesystems fail CLOSED
-if(devRaw===null){ // first boot ONLY: mint, ACL-harden the dir (verified), atomic unique-tmp + rename
+let device=null,devRaw=null,devExists=true;
+try{fs.statSync(devFile)}catch(e){if(!e||e.code!=='ENOENT')throw e;devExists=false} // ONLY a missing file means first boot; stat failures fail CLOSED
+if(devExists){
+ // the agent's load order: dir AND file ACL verified BEFORE the private key is read or parsed -
+ // write access to the DIR could replace the identity even when the file itself is owner-only
+ if(process.platform==='win32'&&(!aclOwnerOnly(dataDir)||!aclOwnerOnly(devFile)))throw new Error('device identity ACL failed (dir or file not owner-only) - refusing to boot');
+ devRaw=fs.readFileSync(devFile,'utf8');
+ device=JSON.parse(devRaw); // a CORRUPT file throws here - boot fails loud, identity never silently renews
+ if(!device||!device.priv||!device.pub||derivePub(device.priv)!==device.pub)throw new Error('device identity file failed the private/public pair check - refusing to boot over a corrupt identity');
+ const want=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
+ if(device.id!==want)throw new Error('device id does not match its pubkey - refusing to boot over a corrupt identity');
+}else{ // first boot ONLY: create the data dir private, harden+verify it, THEN mint (atomic unique-tmp + rename)
+ fs.mkdirSync(dataDir,{recursive:true,mode:0o700}); // env-only provisioning: the dir may not exist yet
+ hardenOrThrow(dataDir,true);
  const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
  device={pub:publicKey.export({format:'der',type:'spki'}).toString('base64'),priv:privateKey.export({format:'der',type:'pkcs8'}).toString('base64')};
  device.id=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
- hardenOrThrow(dataDir,true);
  const tmp=path.join(dataDir,'.device-'+process.pid+'-'+Date.now()+'.tmp');
  try{
   fs.writeFileSync(tmp,JSON.stringify(device),{mode:0o600,flag:'wx'}); // exclusive create - a pre-planted tmp is never overwritten
   hardenOrThrow(tmp,false); // harden+verify BEFORE the rename
   fs.renameSync(tmp,devFile); // atomic same-dir rename
  }finally{try{fs.unlinkSync(tmp)}catch{}} // a failed mint never leaves a tmp behind
-}else{
- device=JSON.parse(devRaw); // a CORRUPT file throws here - boot fails loud, identity never silently renews
- if(!device||!device.priv||!device.pub||derivePub(device.priv)!==device.pub)throw new Error('device identity file failed the private/public pair check - refusing to boot over a corrupt identity');
- const want=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
- if(device.id!==want)throw new Error('device id does not match its pubkey - refusing to boot over a corrupt identity');
- if(process.platform==='win32'&&!aclOwnerOnly(devFile))throw new Error('device private key is readable by others - refusing to boot'); // load-time ACL check, same as the agent
 }
 const privK=crypto.createPrivateKey({key:Buffer.from(device.priv,'base64'),format:'der',type:'pkcs8'});
 const deviceSign=t=>crypto.sign(null,Buffer.from(t,'utf8'),privK).toString('hex');
