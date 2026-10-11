@@ -432,7 +432,15 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  // persisted replay guards, per-step audit. GLASSWIDGETS_UI_DRYRUN is a test-only hook.
  const UI_ACTIONS=['click','dblclick','rclick','move','wait'];
  const UI_DRYRUN=process.env.GLASSWIDGETS_UI_DRYRUN==='1';
- const UI_PS1=path.join(__dirname,'ui-input.ps1');
+ const UI_PS1_SRC=path.join(__dirname,'ui-input.ps1');
+ function uiPs1File(){ // app.asar is not a real filesystem for powershell -File: stage to a temp copy
+  // (the same route main.js uses for ble-scan.ps1). Re-staged when the packaged script changes.
+  const d=path.join(app.getPath('temp'),'glasswidgets-ps');fs.mkdirSync(d,{recursive:true});
+  const f=path.join(d,'ui-input.ps1'),src=fs.readFileSync(UI_PS1_SRC,'utf8');
+  try{if(fs.readFileSync(f,'utf8')===src+'')return f}catch{}
+  fs.writeFileSync(f,'﻿'+src); // BOM so Windows PowerShell reads it as UTF-8
+  return f;
+ }
  const UI_TASK_MS=+process.env.GLASSWIDGETS_UI_TASK_MS||120000; // hard whole-task deadline
  function dipRect(d){ // one display's PHYSICAL-pixel rect from the OS conversion, never a hand-rolled multiply
   if(typeof screen.dipToScreenRect!=='function'){
@@ -464,7 +472,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  function uiStep(d,x,y,timeoutMs){return new Promise(res=>{
   if(UI_DRYRUN)return res({ok:true,dry:true});
   if(process.platform!=='win32')return res({ok:false,error:'ui input is supported on Windows only'});
-  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',UI_PS1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:Math.max(1,Math.floor(timeoutMs)),windowsHide:true},
+  let ps1;try{ps1=uiPs1File()}catch(e){audit({kind:'ui_automation',stage:'failed',error:'ps1 staging failed'});return res({ok:false,error:'ps1 staging failed'})}
+  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',ps1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:Math.max(1,Math.floor(timeoutMs)),windowsHide:true},
    (e,so,se)=>res(e?{ok:false,error:String(se||so||e.message||e).replace(/\s+/g,' ').trim().slice(0,150)}:{ok:true}));
  })}
  async function execUi(id,steps){
