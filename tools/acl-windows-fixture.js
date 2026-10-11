@@ -46,6 +46,7 @@ const me=currentSid();
 console.log('fixture: node '+process.version+' | os '+os.platform()+' '+os.release()+' | me '+me);
 const base=fs.mkdtempSync(path.join(os.tmpdir(),'gw-acl-'));
 const results=[];
+try{ // finally: the scratch dir is ALWAYS cleaned up, even when a case throws mid-setup
 function runCase(name,target,expect,setup){
  if(setup)setup();
  const dump=aclDump(target);
@@ -73,5 +74,6 @@ runCase('C-inherited-ace',fileInh,false,()=>{
 });
 const ok=results.every(Boolean);
 console.log('FIXTURE: '+(ok?'PASS':'FAIL')+' ('+results.filter(Boolean).length+'/'+results.length+' cases)');
-try{fs.rmSync(base,{recursive:true,force:true})}catch(e){console.log('cleanup failed (harmless): '+e.message)}
-process.exit(ok?0:1);
+process.exitCode=ok?0:1;
+}catch(e){console.error('FIXTURE: ERROR - '+String(e&&e.message||e));process.exitCode=1}
+finally{try{fs.rmSync(base,{recursive:true,force:true});console.log('cleanup: scratch removed')}catch(e){console.log('cleanup: FAILED - scratch left at '+base+' ('+e.message+') - delete it manually')}}
