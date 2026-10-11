@@ -219,19 +219,16 @@ async function cardClick(c,b,el){if(c.acted||c.busy||c.settled)return;c.busy=tru
  c.busy=false;c.busyButton='';
  if(r.ok||r.reason==='already_acted'||r.reason==='expired'){c.acted=true;c.actedButton=b.id;save()}
  render(log);if(island&&pillMode==='open')render(pillBodyLog())}
-let pillSettleT=0;
+let settleScanT=0;
 function approvalSettled(c){return !!(c.settled||c.acted||(c.expiresAt&&Date.now()>c.expiresAt+5000))}
-function render(into){const pillView=into.id==='pillLog';
- const keepTop=into.scrollTop,nearBottom=into.scrollHeight-into.clientHeight-keepTop<40;into.innerHTML='';let dirty=false;
- for(const it of timeline()){
-  if(pillView&&it.c&&String(it.c.id).startsWith('local-approve-')){
-   if(it.c.settled||it.c.acted)continue;
-   if(it.c.expiresAt&&Date.now()>it.c.expiresAt+5000){it.c.settled='expired';dirty=true;continue} // missed settle event: persist, dead buttons, greyed history
-  }
-  into.append(it.m?bubble(it.m):cardEl(it.c))}
- if(dirty)save();
+function settleExpiredCards(){let dirty=false;for(const c of (H.cards||[])){if(!String(c.id).startsWith('local-approve-')||c.settled||c.acted)continue;if(c.expiresAt&&Date.now()>c.expiresAt+5000){c.settled='expired';dirty=true}}if(dirty)save();return dirty} // missed settle events: persist the expired state BEFORE any view paints
+function refreshViews(){render(log);if(island&&pillMode==='open')render(pillBodyLog())}
+function scheduleSettleScan(){clearTimeout(settleScanT);const nx=(H.cards||[]).filter(c=>String(c.id).startsWith('local-approve-')&&!c.settled&&!c.acted&&c.expiresAt&&Date.now()<=c.expiresAt+5000).map(c=>c.expiresAt+5100-Date.now()).filter(ms=>ms>0).sort((a,b)=>a-b)[0];if(nx)settleScanT=setTimeout(()=>{if(settleExpiredCards())refreshViews();scheduleSettleScan()},Math.min(nx,600000))} // runs regardless of panel state, refreshes BOTH mounted views
+function render(into){const pillView=into.id==='pillLog';settleExpiredCards();
+ const keepTop=into.scrollTop,nearBottom=into.scrollHeight-into.clientHeight-keepTop<40;into.innerHTML='';
+ for(const it of timeline()){if(pillView&&it.c&&String(it.c.id).startsWith('local-approve-')&&approvalSettled(it.c))continue;into.append(it.m?bubble(it.m):cardEl(it.c))}
  into.scrollTop=nearBottom?into.scrollHeight:Math.min(keepTop,into.scrollHeight);updatePillSt();
- if(pillView){clearTimeout(pillSettleT);const nx=(H.cards||[]).filter(c=>String(c.id).startsWith('local-approve-')&&!approvalSettled(c)&&c.expiresAt).map(c=>c.expiresAt+5100-Date.now()).filter(ms=>ms>0).sort((a,b)=>a-b)[0];if(nx)pillSettleT=setTimeout(()=>{if(pillMode==='open')render(pillBodyLog())},Math.min(nx,600000))}} // pill settles cards on lifecycle events (expiry fallback refresh); chat log keeps full history
+ scheduleSettleScan()} // settle first, then paint: expired cards show dead buttons in every view; the log keeps full history
 async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
@@ -308,7 +305,7 @@ if(window.api&&api.pillCmd)api.pillCmd(a=>{if(a==='open'&&pillMode!=='open')open
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
-(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];scheduleSettleScan();readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  if(api.onChatMsg)api.onChatMsg(incoming);
  if(api.onChatCard)api.onChatCard(incomingCard);
