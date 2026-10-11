@@ -1,4 +1,5 @@
-// Local computer-actions agent. Consumes the /glasswidgets/cmd SSE stream (receiver key) and runs
+// Local computer-actions agent. Consumes commands from TWO intakes: the /glasswidgets/cmd SSE stream
+// (worker fallback) and the embedded localhost server behind the tunnel (own-server leg), and runs
 // allowlisted actions: find_files, get_file (upload via /file/upload), index, sys_info, screenshot,
 // delete_file (Downloads folder only, files only), open_path, run_command, media_control, clipboard_read, web_task, ui_automation (screen clicks, card-gated), screenshot (read-only capture).
 // Safety: a resolved-folder allowlist gates file reads, delete_file is pinned to the real Downloads
@@ -831,7 +832,28 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    }catch(e){clearTimeout(idleT);if(stop)break;await new Promise(r=>setTimeout(r,backoff));backoff=Math.min(backoff*2,15000)}
   }
  }
+ const KNOWN_KINDS=new Set(['find_files','delete_file','open_path','run_command','update_app','media_control','clipboard_read','web_task','ui_automation','island_control','screenshot','index','sys_info','get_file']);
+ // own-server leg (stage 1): the same command intake, served locally and reached through the tunnel.
+ // the worker SSE loop keeps running as fallback until cutover; checkDup dedups a command that
+ // somehow arrives on both channels, and every terminal state still acks over the existing leg.
+ const srvCfg={enabled:true,port:47631,...((cfg.localServer&&typeof cfg.localServer==='object')?cfg.localServer:{})};
+ if(process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED!==undefined)srvCfg.enabled=process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED==='1';
+ if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
+ let srvStop=null;
+ if(cmdKey&&srvCfg.enabled)resolveFolders().then(async()=>{
+  if(!folders.length)return;
+  const{startLocalServer}=require('./localserver');
+  const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
+   log:(lvl,o)=>audit({lvl,...o}),
+   onCommand:(m)=>{
+    if(!KNOWN_KINDS.has(m.kind))return {accepted:false,reason:'unknown_kind'};
+    if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return {accepted:false,reason:'duplicate'};
+    handle(m);
+    return {accepted:true};
+   }});
+  if(r.started)srvStop=r.stop;else audit({kind:'server',stage:'not_started',reason:String(r.reason||'')});
+ });
  if(cmdKey)resolveFolders().then(()=>{if(folders.length)loop()});
- return {stop:()=>{stop=true}};
+ return {stop:()=>{stop=true;if(srvStop)srvStop()}};
 }
 module.exports=startAgent;
