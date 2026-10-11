@@ -12,6 +12,7 @@ class FakeStmt{constructor(db,sql,args){this.db=db;this.sql=sql;this.args=args}
   throw new Error('unexpected first: '+s)}
  async run(){const d=this.db,s=this.sql,a=this.args;
   if(s.startsWith('INSERT INTO devices')&&s.includes('WHERE (SELECT COUNT(*)')){ // atomic conditional insert
+   if(d.failNextInsert){d.failNextInsert=false;throw new Error('UNIQUE constraint failed: devices.device_id')}
    if(d.devices.size>=a[3])return{meta:{changes:0}};
    d.devices.set(a[0],{pubkey:a[1],enrolled_at:a[2]});return{meta:{changes:1}}}
   if(s.startsWith('INSERT INTO devices')){d.devices.set(a[0],{pubkey:a[1],enrolled_at:a[2]});return{meta:{changes:1}}}
@@ -61,6 +62,13 @@ const get=(env,path,opts)=>handleTunnel(req('GET',path,opts),env,new URL('http:/
  assert(r.status===409,'third device -> 409 device_limit (enforced INSIDE the insert)');
  r=await post(env,'/glasswidgets/agent/enroll',{device_id:DEVID,pubkey:PUB_B64});
  assert(r.status===200,'re-enroll same id+pubkey idempotent (no slot consumed)');
+ // concurrent same-id race: a PRIMARY KEY constraint error resolves idempotently
+ env.AVI_ACCOUNT_DB.failNextInsert=true;
+ r=await post(env,'/glasswidgets/agent/enroll',{device_id:DEVID,pubkey:PUB_B64});
+ assert(r.status===200,'constraint race on same id+pubkey -> idempotent ok');
+ env.AVI_ACCOUNT_DB.failNextInsert=true;
+ r=await post(env,'/glasswidgets/agent/enroll',{device_id:id3,pubkey:k3});
+ assert(r.status===409,'constraint race on an unknown id -> 409, never a silent join');
  // publish / ordering / TOMBSTONE
  const t0=Date.now()-5000;
  r=await post(env,'/glasswidgets/agent/tunnel',{deviceId:DEVID,url:U,v:'0.4.62',ts:t0,sig:devSign(DEVID,U,t0)});

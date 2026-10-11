@@ -85,7 +85,15 @@ async function handleTunnel(request, env, url) {
     }
     // ATOMIC cap: the limit is enforced inside the INSERT itself (SQLite serializes writers), so
     // two parallel enrolls can never both pass a COUNT-then-INSERT race.
-    const r = await DB.prepare("INSERT INTO devices (device_id,pubkey,enrolled_at) SELECT ?,?,? WHERE (SELECT COUNT(*) FROM devices) < ?").bind(id, pk, Date.now(), max).run();
+    let r;
+    try {
+      r = await DB.prepare("INSERT INTO devices (device_id,pubkey,enrolled_at) SELECT ?,?,? WHERE (SELECT COUNT(*) FROM devices) < ?").bind(id, pk, Date.now(), max).run();
+    } catch {
+      // a concurrent same-id enroll can hit the PRIMARY KEY - resolve it idempotently
+      const won = await DB.prepare("SELECT pubkey FROM devices WHERE device_id=?").bind(id).first();
+      if (won && won.pubkey === pk) return Response.json({ ok: true, already: true });
+      return new Response('id_conflict', { status: 409 });
+    }
     if (r.meta.changes === 0) return new Response('device_limit', { status: 409 });
     return Response.json({ ok: true });
   }

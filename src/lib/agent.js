@@ -898,22 +898,23 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // enrollment. The baked cmd key is public and never proves device identity.
  const devDir=()=>path.join(app.getPath('userData'),'device');
  const devFile=()=>path.join(devDir(),'device.json');
- // Windows ACL helpers (mode bits are a no-op there): resolve the current user's SID, harden a
- // path to owner-only, and VERIFY the effective ACL - on the file AND before every load.
+ // Windows ACL helpers (mode bits are a no-op there). Verification is PowerShell Get-Acl with
+ // SID-typed JSON output - NOT icacls text (whose first ACE rides the filepath line, whose summary
+ // is localized, and whose names are unresolvable-SID ambiguous). The pure evaluator lives in
+ // acl-check.js and is fixture-tested.
+ const{evalAclDump}=require('./acl-check');
+ const ACL_PS="$a=(Get-Acl -LiteralPath $args[0]).Access;$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$rules=@();foreach($x in $a){$sid=$null;try{$sid=$x.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$sid=[string]$x.IdentityReference};$rules+=@{sid=$sid;rights=[int64]$x.FileSystemRights;allow=($x.AccessControlType -eq 'Allow');inherited=[bool]$x.IsInherited}};@{me=$me;rules=$rules}|ConvertTo-Json -Compress -Depth 4";
  function currentSid(){
   if(process.platform!=='win32')return null;
-  try{const out=execFileSync('whoami',['/user','/fo','csv','/nh'],{windowsHide:true,timeout:8000}).toString();
-   const m=out.match(/S-1-5-[0-9-]+/);return m?m[0]:null}catch{return null}
+  try{const out=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-Command','[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],{windowsHide:true,timeout:8000}).toString().trim();
+   return /^S-1-5-[0-9-]+$/.test(out)?out:null}catch{return null}
  }
  function aclOwnerOnly(p){
   if(process.platform!=='win32')return true;
-  const sid=currentSid();if(!sid)return false;
   try{
-   const out=execFileSync('icacls',[p],{windowsHide:true,timeout:8000}).toString();
-   const aces=out.split(/\r?\n/).slice(1).map(l=>l.trim()).filter(l=>l&&!/Successfully/i.test(l));
-   if(aces.length!==1)return false; // exactly one ACE
-   if(/Everyone|BUILTIN\\|Users|Authenticated|Guests/i.test(aces[0])&&!aces[0].includes(sid))return false;
-   return aces[0].includes(sid)||aces[0].includes(os.userInfo().username);
+   const out=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-Command',ACL_PS,p],{windowsHide:true,timeout:10000}).toString();
+   const dump=JSON.parse(out);
+   return evalAclDump(dump,dump&&dump.me); // exact-SID, allow-only, non-inherited, rights-masked, single-ACE
   }catch{return false}
  }
  function aclHarden(p,isDir){
