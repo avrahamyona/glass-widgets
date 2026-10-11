@@ -56,3 +56,13 @@ The SSE fallback stays CONNECTED until E2E + ledger are proven; nothing in stage
 6. **Fallback.** A stale/down pointer (no heartbeat within 90s, or `down:true`) means the
    sender returns to SSE. Cutover happens only after E2E tests pass on the live tunnel with
    the ledger proving no lost commands.
+
+### Execution-time authority gate (round 5)
+Every execution branch (auto-run timer, approval tap, media session grant) passes one shared
+gate in execPending: the effect dies when min(signed exp, transport expiry) has passed, with a
+terminal failed record + ack. Preapproval cards store that same min as their private expiry.
+On SSE, duplicate resolution runs BEFORE expiry evaluation: a replay - expired or not - of a
+known id returns the cached terminal result (done/failed), stays silent for accepted/running/
+unknown, and never rewrites a live record. Only a NEW expired intake gets the refusal record.
+Ack results are shape-safe: null/primitives wrap to {value}, cycles/functions serialize to
+{unserializable:true}; the canonical path can never throw before the ledger write.

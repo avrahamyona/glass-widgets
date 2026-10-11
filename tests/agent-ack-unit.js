@@ -83,6 +83,15 @@ const mkAck=(onSend)=>{let sent=null;const audits=[];
   const wire=JSON.parse(cap.getSent());
   assert(wire.result.matches.length<50,'matches shrunk on the ack path');
   assert(wire.result.truncated===true&&wire.result.matches_full===50,'matches loss marked: '+JSON.stringify({t:wire.result.truncated,f:wire.result.matches_full}));
+  // 6c) shape-safe canonical: null / primitive / cyclic / function results never crash the ack path
+  const sN=mkAck();await sN.fn('n1','done','ok',null);
+  assert(JSON.parse(sN.getSent()).result.value===null,'null result wrapped into a stable shape');
+  const sP=mkAck();await sP.fn('p1','done','ok',42);
+  assert(JSON.parse(sP.getSent()).result.value===42,'primitive result wrapped');
+  const cyc={a:1};cyc.self=cyc;const sC=mkAck();await sC.fn('c1','done','ok',cyc);
+  assert(JSON.parse(sC.getSent()).result.unserializable===true,'cyclic result marked unserializable');
+  const sF=mkAck();await sF.fn('f1','done','ok',function(){return 1});
+  assert(JSON.parse(sF.getSent()).result.unserializable===true,'function result marked unserializable');
   console.log('AGENT-ACK-UNIT: PASS');
  })().catch(e=>{console.error('FAIL',e);process.exit(1)});
 }

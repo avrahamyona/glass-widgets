@@ -161,6 +161,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return false;
  }
  function execPending(p){
+  // execution-time transport authority, one gate for EVERY branch (auto-run, approval tap,
+  // media session grant): the effect dies if either the signed exp or the transport expiry passed
+  const expA=[+p.exp,+p.texp].filter(x=>Number.isFinite(x)&&x>0);
+  if(expA.length&&Date.now()>=Math.min(...expA)){audit({kind:p.kind||'run_command',stage:'transport_expired',id:String(p.cmdId||'').slice(0,40),command:p.command,action:p.action});ack(p.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני הביצוע');return}
   if(ledger.transition(p.cmdId,'running')!==true){audit({kind:p.kind||'run_command',stage:'running_gate_fail',id:String(p.cmdId||'').slice(0,40)});ack(p.cmdId,'failed','ledger transition failed - effect blocked');return} // no durable running mark -> NO effect
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
@@ -184,7 +188,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
      if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
      markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
     timer.unref&&timer.unref();
-    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
+    const cardExp=[+msg.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+msg.exp); // the card's private expiry is min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:cardExp});
     audit({kind:'run_command',stage:'preapprove_card',command:cmd});
     broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',expiresAt:+msg.exp,body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
     return;
@@ -673,7 +678,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   // carried - no dual fidelity.
   let canon;
   if(result!==undefined){
-   let r=JSON.parse(JSON.stringify(result)); // the canonical copy - the input is never mutated
+   let r,ser=true;try{r=JSON.parse(JSON.stringify(result))}catch{ser=false} // cycles / BigInt / throwing toJSON never crash the ack path
+   if(!ser)r={unserializable:true};
+   else if(r===null||typeof r!=='object')r={value:r}; // null and primitives get a stable object shape
    if(Array.isArray(r.matches)){const m=[...r.matches],fullCount=m.length; // trim WITH the loss metadata counted in, so the final object still fits the cap
     let sj=JSON.stringify({...r,matches:m,truncated:true,matches_full:fullCount});
     while(m.length&&Buffer.byteLength(sj)>RESULT_CAP){m.pop();sj=JSON.stringify({...r,matches:m,truncated:true,matches_full:fullCount})}
@@ -828,16 +835,16 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    // (expires_at - SSE envelope metadata, never a sender field) bound the effect. An unsigned
    // command without either gets a BOUNDED dedup window (not an at-most-once-forever claim);
    // a fallback resend of the same command keeps the SAME id inside that window.
-   const wins=[+m.exp,+m.expires_at].filter(x=>Number.isFinite(x)&&x>0);
-   const winEnd=wins.length?Math.min(...wins):Date.now()+SSE_UNSIGNED_WINDOW_MS;
-   if(winEnd<=Date.now()){audit({kind:String(m.kind||'').slice(0,40),stage:'transport_expired',id:id.slice(0,40)});try{ledger.put(id,{status:'failed',note:'transport expired before effect',exp:Date.now()})}catch{}return ack(id,'failed','expired - תוקף התעבורה פג לפני הביצוע')} // authority expired BEFORE any effect - the refusal is terminal evidence
-   intake={...(intake||{}),exp:winEnd}; // execution-time expiry for parked cards, same as the tunnel leg
-   const prev=ledger.get(id);
+   const prev=ledger.get(id); // duplicate resolution FIRST - a replay (expired or not) never rewrites a live record and never contradicts the original outcome
    if(prev){
     audit({kind:String(m.kind||'').slice(0,40),stage:'cross_transport_duplicate',id:id.slice(0,40),status:prev.status});
-    if(prev.status==='done'||prev.status==='failed')ack(id,prev.status,prev.note||'cached result',prev.result||undefined); // cached terminal result - the effect NEVER re-runs
+    if(prev.status==='done'||prev.status==='failed')ack(id,prev.status,prev.note||'cached result',prev.result||undefined); // cached terminal result - the effect NEVER re-runs; accepted/running/unknown stay silent (no ack race)
     return;
    }
+   const wins=[+m.exp,+m.expires_at].filter(x=>Number.isFinite(x)&&x>0);
+   const winEnd=wins.length?Math.min(...wins):Date.now()+SSE_UNSIGNED_WINDOW_MS;
+   if(winEnd<=Date.now()){audit({kind:String(m.kind||'').slice(0,40),stage:'transport_expired',id:id.slice(0,40)});try{ledger.put(id,{status:'failed',note:'transport expired before effect',exp:Date.now()})}catch{}return ack(id,'failed','expired - תוקף התעבורה פג לפני הביצוע')} // authority expired BEFORE any effect - only a NEW intake gets the refusal record
+   intake={...(intake||{}),exp:winEnd}; // execution-time expiry for parked cards, same as the tunnel leg
    if(!ledger.ok()){audit({kind:String(m.kind||'').slice(0,40),stage:'ledger_down',id:id.slice(0,40)});return ack(id,'failed','ledger unavailable')}
    const putR=ledger.put(id,{status:'accepted',exp:winEnd}); // the dedup tombstone lives exactly as long as the command's authority window
    if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:id.slice(0,40)});return ack(id,'failed','ledger full - retry later')}

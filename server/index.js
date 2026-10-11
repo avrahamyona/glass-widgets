@@ -1,0 +1,90 @@
+// "החיים שלי השרתי" - the standalone own-server skeleton. Electron-free Node process.
+// Eventually replaces the Cloudflare worker path: no quotas, no external dependency.
+// Local build only - NOT deployed, NOT wired into any release.
+//
+// Trust model (same contract as the embedded leg): the baked token is PUBLIC and gates
+// nothing private by itself. Commands arrive as Ed25519-signed envelopes {id,kind,ts,exp,
+// sig,data[,device]} verified against the configured sender pubkey; reads are signed and
+// device-bound; one transactional ledger gives at-most-once execution with durable evidence.
+const fs=require('fs'),path=require('path'),crypto=require('crypto'),os=require('os');
+const{startLocalServer}=require('../src/lib/localserver');
+const{createLedger,RESULT_TTL_MS}=require('../src/lib/ledger');
+const{OPS}=require('./lib/ops');
+
+const CONFIG=process.env.GW_SERVER_CONFIG||path.join(process.env.GW_SERVER_DATA||path.join(os.homedir(),'.glasswidgets-server'),'config.json');
+const cfg=JSON.parse(fs.readFileSync(CONFIG,'utf8'));
+const dataDir=path.dirname(CONFIG);
+if(!cfg.token||!cfg.senderPub)throw new Error('config requires token + senderPub (base64 SPKI)');
+const roots=Array.isArray(cfg.roots)&&cfg.roots.length?cfg.roots:[path.join(os.homedir(),'Documents'),path.join(os.homedir(),'Desktop'),path.join(os.homedir(),'Downloads')].filter(p=>{try{return fs.statSync(p).isDirectory()}catch{return false}});
+const signPub=crypto.createPublicKey({key:Buffer.from(cfg.senderPub,'base64'),format:'der',type:'spki'});
+
+// device identity: generated ON this machine on first boot, private key never leaves
+const devFile=path.join(dataDir,'device.json');
+let device;
+try{device=JSON.parse(fs.readFileSync(devFile,'utf8'))}catch{}
+if(!device||!device.priv||!device.pub){
+ const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
+ device={pub:publicKey.export({format:'der',type:'spki'}).toString('base64'),priv:privateKey.export({format:'der',type:'pkcs8'}).toString('base64')};
+ device.id=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
+ fs.writeFileSync(devFile,JSON.stringify(device),{mode:0o600});
+}
+const privK=crypto.createPrivateKey({key:Buffer.from(device.priv,'base64'),format:'der',type:'pkcs8'});
+const deviceSign=t=>crypto.sign(null,Buffer.from(t,'utf8'),privK).toString('hex');
+
+const ledger=createLedger(path.join(dataDir,'ledger.json'));
+const logFile=path.join(dataDir,'server-audit.log');
+const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().toISOString(),lvl,...o})+'\n')}catch{}};
+
+const READ_SKEW_MS=60000,readNonces=new Map();
+function verifyReadAuth(method,pathName,query,headers){
+ const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
+ const dev=String(headers['x-gw-read-device']||'');
+ if(dev!==device.id)return false;
+ if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
+ if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
+ const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
+ const key=String(ts)+'|'+nonce;
+ if(readNonces.has(key))return false;
+ let ok=false;try{ok=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce,dev].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{}
+ if(ok)readNonces.set(key,ts+120000);
+ return ok;
+}
+
+function validEnvelope(m,payload){
+ const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false;
+ const ts=+m.ts,exp=+m.exp,now=Date.now();
+ if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
+ if(ts>now+60000||exp<=ts||exp-ts>300000||exp<=now)return false;
+ const fields=m.device!=null?[String(m.device),String(m.id),String(m.kind),String(ts),String(exp),payload]:[String(m.id),String(m.kind),String(ts),String(exp),payload];
+ try{return crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{return false}
+}
+
+async function main(){
+ const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),token:cfg.token,version:'server-0.1.0',caps:'files',
+  getDevice:()=>({deviceId:device.id,deviceSign}),
+  getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
+  getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub}),
+  verifyReadAuth,log,
+  onCommand:(m)=>{
+   if(!OPS[m.kind])return {accepted:false,status:400,reason:'unknown_kind'};
+   const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
+   for(const k of['id','kind','ts','exp','sig','device'])if(k in data)return {accepted:false,status:400,reason:'reserved_field'};
+   if(m.device!=null&&String(m.device)!==device.id){log('warn',{stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
+   if(!validEnvelope(m,JSON.stringify(data))){log('warn',{stage:'unsigned_cmd',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'unsigned'}}
+   if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
+   if(ledger.has(m.id))return {accepted:false,status:409,reason:'duplicate'};
+   const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
+   if(putR==='full')return {accepted:false,status:429,reason:'ledger_full'};
+   if(putR!==true)return {accepted:false,status:503,reason:'ledger'};
+   (async()=>{ // dispatch AFTER the durable commit; the running gate decides before any effect
+    if(ledger.transition(m.id,'running')!==true){log('warn',{stage:'running_gate_fail',id:String(m.id).slice(0,40)});try{ledger.put(m.id,{status:'failed',note:'running gate failed'})}catch{}return}
+    try{const out=await OPS[m.kind](data,{roots});
+     ledger.put(m.id,out.ok?{status:'done',note:m.kind+' ok',result:out.result}:{status:'failed',note:String(out.error||'failed')});
+    }catch(e){try{ledger.put(m.id,{status:'failed',note:'op error'})}catch{}}
+   })();
+   return {accepted:true};
+  }});
+ if(!r.started){console.error('not started:',r.reason);process.exit(1)}
+ console.log('server up on 127.0.0.1:'+r.port,'device',device.id,'roots',roots.length);
+}
+main().catch(e=>{console.error(e);process.exit(1)});

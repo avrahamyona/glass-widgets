@@ -515,6 +515,32 @@ const launch=async()=>{
   assert(v2.status===202,'strict: v2 device-bound envelope accepted');
   await waitAck('sv2','done')}
 
+ // 15l) execution-time expiry: the signed exp is valid for 60s but the transport authority
+ // (expires_at) dies in 400ms - the parked preapproved card refuses at the shared execution gate
+ {const cmd='touch /tmp/gw-15l-marker';try{fs.unlinkSync('/tmp/gw-15l-marker')}catch{}
+  ts=Date.now();const expL=Date.now()+60000;
+  pushCmd({id:'x-exec-exp',kind:'run_command',command:cmd,ts,exp:expL,sig:sign('x-exec-exp','run_command',ts,expL,cmd),expires_at:Date.now()+400});
+  const aX=await waitAck('x-exec-exp','failed');assert(/expired/.test(aX.note||''),'execution-time expiry refused: '+aX.note);
+  assert(!fs.existsSync('/tmp/gw-15l-marker'),'effect blocked at the execution gate: marker absent');
+  const tL=await readJson('/task','id=x-exec-exp');assert(tL.body.status==='failed','execution-expiry refusal recorded failed')}
+
+ // 15m) expired replays resolve as duplicates FIRST - a stale replay never rewrites a live
+ // record and never contradicts the original outcome
+ {const logP=cfg+'/glasswidgets/agent-audit.log';
+  const expLines=()=>fs.readFileSync(logP,'utf8').split('\n').filter(l=>l.includes('x-exp')&&l.includes('transport_expired')).length;
+  const before=expLines();const acksBefore=ACK.filter(x=>x.id==='x-exp').length;
+  pushCmd({id:'x-exp',kind:'delete_file',path:os.homedir()+'/Downloads/never.txt',expires_at:Date.now()-1000}); // stale replay of a terminal id
+  await sleep(1500);
+  assert(expLines()===before,'stale replay of a terminal id writes NO new expiry record');
+  assert(ACK.filter(x=>x.id==='x-exp').length>acksBefore,'terminal replay gets the cached result ack');
+  pushCmd({id:'x-park',kind:'run_command',command:'echo parked',ts:Date.now(),exp:Date.now()+60000}); // unsigned -> approval card parks (accepted)
+  await sleep(800);
+  const tP=await readJson('/task','id=x-park');assert(tP.body.status==='accepted','parked card recorded accepted, got '+tP.body.status);
+  pushCmd({id:'x-park',kind:'run_command',command:'echo parked',expires_at:Date.now()-1000}); // expired replay of the live intake
+  await sleep(1500);
+  const tP2=await readJson('/task','id=x-park');assert(tP2.body.status==='accepted','expired replay of a live intake does NOT rewrite the record');
+  assert(!ACK.some(x=>x.id==='x-park'),'no wire ack at all for the live intake')}
+
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
  process.exit(0);
