@@ -26,6 +26,16 @@ jobs:
           if (-not $s.Contains('__GW_CMD_KEY__')) { throw 'cmd key placeholder not found in src/lib/agent.js' }
           [System.IO.File]::WriteAllText($p, $s.Replace('__GW_CMD_KEY__', $env:GW_CMD_KEY.Trim()))
           if ([System.IO.File]::ReadAllText($p).Contains('__GW_CMD_KEY__')) { throw 'cmd key placeholder still present after injection' }
+      - name: Inject agent sign public key
+        shell: pwsh
+        env: { GW_SIGN_PUB: '${{ secrets.GW_SIGN_PUB }}' }
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:GW_SIGN_PUB)) { Write-Host 'GW_SIGN_PUB secret not set - signed pre-approval stays dormant'; exit 0 }
+          $p = 'src/lib/agent.js'
+          $s = [System.IO.File]::ReadAllText($p)
+          if (-not $s.Contains('__GW_SIGN_PUB__')) { throw 'sign pubkey placeholder not found in src/lib/agent.js' }
+          [System.IO.File]::WriteAllText($p, $s.Replace('__GW_SIGN_PUB__', $env:GW_SIGN_PUB.Trim()))
+          if ([System.IO.File]::ReadAllText($p).Contains('__GW_SIGN_PUB__')) { throw 'sign pubkey placeholder still present after injection' }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-dotnet@v4
