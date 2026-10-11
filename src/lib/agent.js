@@ -896,23 +896,52 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // per-device credential: the keypair is GENERATED ON THIS PC (enroll_device kind, worker-signed
  // only); the private key never leaves the machine - only the public key is acked back for
  // enrollment. The baked cmd key is public and never proves device identity.
- const devFile=()=>path.join(app.getPath('userData'),'device.json');
+ const devDir=()=>path.join(app.getPath('userData'),'device');
+ const devFile=()=>path.join(devDir(),'device.json');
+ // Windows ACL helpers (mode bits are a no-op there): resolve the current user's SID, harden a
+ // path to owner-only, and VERIFY the effective ACL - on the file AND before every load.
+ function currentSid(){
+  if(process.platform!=='win32')return null;
+  try{const out=execFileSync('whoami',['/user','/fo','csv','/nh'],{windowsHide:true,timeout:8000}).toString();
+   const m=out.match(/S-1-5-[0-9-]+/);return m?m[0]:null}catch{return null}
+ }
+ function aclOwnerOnly(p){
+  if(process.platform!=='win32')return true;
+  const sid=currentSid();if(!sid)return false;
+  try{
+   const out=execFileSync('icacls',[p],{windowsHide:true,timeout:8000}).toString();
+   const aces=out.split(/\r?\n/).slice(1).map(l=>l.trim()).filter(l=>l&&!/Successfully/i.test(l));
+   if(aces.length!==1)return false; // exactly one ACE
+   if(/Everyone|BUILTIN\\|Users|Authenticated|Guests/i.test(aces[0])&&!aces[0].includes(sid))return false;
+   return aces[0].includes(sid)||aces[0].includes(os.userInfo().username);
+  }catch{return false}
+ }
+ function aclHarden(p,isDir){
+  if(process.platform!=='win32')return true;
+  const sid=currentSid();if(!sid)return false;
+  try{execFileSync('icacls',[p,'/inheritance:r','/grant:r','*'+sid+(isDir?':(OI)(CI)(F)':':(R,W)')],{windowsHide:true,timeout:8000});return aclOwnerOnly(p)}catch{return false}
+ }
  let devKey=null,devId='',devPubB64='';
  function loadDevice(){
-  try{const j=JSON.parse(fs.readFileSync(devFile(),'utf8'));
+  try{
+   if(process.platform==='win32'&&!aclOwnerOnly(devFile())){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key fails closed
+   const j=JSON.parse(fs.readFileSync(devFile(),'utf8'));
    const priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});
    const pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64');
    if(pub!==String(j.pub)){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'device_mismatch'});return} // the stored pub must DERIVE from the private key - a tampered file fails closed
    devKey=priv;devPubB64=pub;devId=crypto.createHash('sha256').update(pub).digest('hex').slice(0,16);
   }catch{devKey=null;devId='';devPubB64=''}
  }
- // atomic persist (tmp+rename) + REAL owner-only ACL on Windows (mode bits are a no-op there):
- // icacls strips inheritance and grants only the current user. Any failure = no key on disk.
+ // harden the private DIRECTORY first (verified), then write to a UNIQUE tmp (a pre-planted tmp can
+ // never smuggle ACEs in), harden it by SID, verify the effective ACL, and rename atomically.
+ // Any failure = no key on disk and the enroll fails.
  function persistDevice(pubB64,privB64){
-  const f=devFile(),tmp=f+'.tmp';
+  const dir=devDir(),f=devFile(),tmp=path.join(dir,'device-'+process.pid+'-'+Date.now()+'.tmp');
   try{
+   fs.mkdirSync(dir,{recursive:true});
+   if(process.platform==='win32'&&!aclHarden(dir,true)){audit({kind:'enroll_device',stage:'persist_fail',err:'dir acl'});return false}
    fs.writeFileSync(tmp,JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600});
-   if(process.platform==='win32')execFileSync('icacls',[tmp,'/inheritance:r','/grant:r',os.userInfo().username+':(R,W)'],{windowsHide:true,timeout:10000});
+   if(process.platform==='win32'&&!aclHarden(tmp,false)){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:'file acl'});return false}
    fs.renameSync(tmp,f);
    return true;
   }catch(e){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:String(e&&e.message||e).slice(0,120)});return false}
@@ -921,23 +950,23 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const deviceSign=text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex');
  async function enrollDeviceCmd(m,intake){
   // worker-signed ONLY: the tunnel intake marker arrives as an INTERNAL parameter (never a sender
-  // field), the flat SSE path needs a sig over an empty payload. This operation founds the device
-  // identity, so it never parks a user card and never runs unsigned. IDEMPOTENT: an existing
-  // identity is RETURNED, never rewritten - replaying any valid enroll changes nothing. Only an
-  // explicit signed {rotate:true} founds a new identity.
+  // field), the flat SSE path needs a sig over the empty payload. This operation founds the device
+  // identity, so it never parks a user card and never runs unsigned. STAGE 1 HAS NO ROTATION: an
+  // existing identity is RETURNED, never rewritten, and any extra fields (incl. a tampered
+  // 'rotate') are IGNORED - so no replay or payload tampering can ever change the keys. Explicit
+  // rotation/revocation is a stage-2 design (stable identity + dedicated signed flow).
   const tun=!!(intake&&intake.tunnel===true);
   if(!tun&&!validPreapproval(m,'')){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
-  const rotate=m&&m.rotate===true;
-  if(devKey&&devId&&!rotate){audit({kind:'enroll_device',stage:'already_enrolled',device:devId});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64})}
+  if(devKey&&devId){audit({kind:'enroll_device',stage:'already_enrolled',device:devId});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64})}
   const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
   const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
   const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
   if(!persistDevice(pubB64,privB64))return ack(m.id,'failed','device key persist failed');
   loadDevice();
   if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
-  audit({kind:'enroll_device',stage:rotate?'rotated':'enrolled',device:devId});
+  audit({kind:'enroll_device',stage:'enrolled',device:devId});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
-  ack(m.id,'done',rotate?'rotated':'enrolled',{deviceId:devId,pubkey:pubB64}); // PUBLIC key only travels
+  ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64}); // PUBLIC key only travels
  }
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
@@ -955,7 +984,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(stop)return; // stop() raced the download - never bring the tunnel up afterwards
   if(!exe){audit({kind:'tunnel',stage:'no_binary'});return}
   const t=startTunnel({exePath:exe,port,isStopped:()=>stop,log:(stage,obj)=>audit({kind:'tunnel',stage,...obj}),
-   onDown:()=>{currentTunnelUrl='';clearInterval(heartbeat);heartbeat=null;audit({kind:'tunnel',stage:'down'});publishTunnel('')}, // pointer goes stale NOW, not after 90s of false-fresh
+   onDown:()=>{currentTunnelUrl='';clearInterval(heartbeat);heartbeat=null;audit({kind:'tunnel',stage:'down'});publishTunnel('')}, // best-effort clear NOW (network/D1 permitting); the 90s stale window remains the guaranteed fallback
    onUrl:(url)=>{
     currentTunnelUrl=url;
     audit({kind:'tunnel',stage:'published',url});

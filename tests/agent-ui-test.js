@@ -355,7 +355,7 @@ const launch=async()=>{
  const aE1=await waitAck('e1','done');
  assert(aE1.result&&/^[0-9a-f]{16}$/.test(aE1.result.deviceId)&&aE1.result.pubkey,'enrolled: deviceId+pubkey acked');
  assert(!JSON.stringify(aE1.result).includes('priv'),'PRIVATE KEY NEVER travels');
- const devJ=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device.json','utf8'));
+ const devJ=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8'));
  assert(devJ.pub===aE1.result.pubkey&&devJ.priv,'device.json persisted locally with the private key');
  // health proof now live: server signs with the freshly enrolled key without a restart
  const hE=await (await fetch('http://127.0.0.1:47731/health?nonce=abc12345',{headers:{'X-GW-Key':'cmd-key'}})).json();
@@ -363,24 +363,23 @@ const launch=async()=>{
  const pubK=crypto.createPublicKey({key:Buffer.from(devJ.pub,'base64'),format:'der',type:'spki'});
  assert(crypto.verify(null,Buffer.from(hE.deviceId+'\nabc12345','utf8'),pubK,Buffer.from(hE.sig,'hex')),'sender-side verification of the health proof');
 
- // 15e) enroll is IDEMPOTENT: a second signed enroll returns the SAME identity (no silent key
- // rewrite, durable against replay); only an explicit signed rotate founds a new identity
+ // 15e) stage 1 has NO rotation: re-enroll returns the SAME identity, a tampered 'rotate' field
+ // is IGNORED (it is not part of the signed payload and the code has no rotation path), and a
+ // signed enroll replayed after a full RESTART still returns the same identity (never new keys)
  ts=Date.now();exp=EX();
  pushCmd({id:'e2',kind:'enroll_device',ts,exp,sig:sign('e2','enroll_device',ts,exp,'')});
  const aE2=await waitAck('e2','done');
  assert(aE2.result.deviceId===aE1.result.deviceId&&aE2.result.pubkey===aE1.result.pubkey,'re-enroll idempotent: same deviceId+pubkey, private never rewritten');
  ts=Date.now();exp=EX();
- pushCmd({id:'e3',kind:'enroll_device',rotate:true,ts,exp,sig:sign('e3','enroll_device',ts,exp,'')});
+ pushCmd({id:'e3',kind:'enroll_device',rotate:true,ts,exp,sig:sign('e3','enroll_device',ts,exp,'')}); // tampered: rotate injected, not signed for
  const aE3=await waitAck('e3','done');
- assert(aE3.result.deviceId!==aE1.result.deviceId&&aE3.result.pubkey!==aE1.result.pubkey,'explicit signed rotate founds a NEW identity');
- const devJ3=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device.json','utf8'));
- assert(devJ3.pub===aE3.result.pubkey&&devJ3.priv,'rotated identity persisted');
- const pubK3=crypto.createPublicKey({key:Buffer.from(devJ3.pub,'base64'),format:'der',type:'spki'});
- assert(crypto.verify(null,Buffer.from('x','utf8'),pubK3,Buffer.from(crypto.sign(null,Buffer.from('x','utf8'),crypto.createPrivateKey({key:Buffer.from(devJ3.priv,'base64'),format:'der',type:'pkcs8'})).toString('hex'),'hex')),'persisted pub derives from persisted priv');
+ assert(aE3.result.deviceId===aE1.result.deviceId&&aE3.result.pubkey===aE1.result.pubkey,'tampered rotate:true IGNORED - identity unchanged (stage 1 has no rotation)');
+ await a.close();global.cmdRes=null;
+ ({a,A}=await launch()); // RESTART: the replay must not mint new keys
  ts=Date.now();exp=EX();
- pushCmd({id:'e4',kind:'enroll_device',ts,exp,sig:sign('e4','enroll_device',ts,exp,'')});
- const aE4=await waitAck('e4','done');
- assert(aE4.result.deviceId===aE3.result.deviceId,'post-rotation re-enroll still idempotent');
+ pushCmd({id:'e5',kind:'enroll_device',ts,exp,sig:sign('e5','enroll_device',ts,exp,'')});
+ const aE5=await waitAck('e5','done');
+ assert(aE5.result.deviceId===aE1.result.deviceId&&aE5.result.pubkey===aE1.result.pubkey,'enroll after restart returns the persisted identity');
 
  // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
  // envelope expired is refused - the command never runs
