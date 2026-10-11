@@ -86,11 +86,20 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const RUN_DENY=[/\bformat\s+[a-z]:/i,/\bshutdown\b/i,/\brestart-computer\b/i,/\brm\s+-[a-z]*r[a-z]*f\s+\//i,/\bdel\s+\/[a-z]*s/i,/\brd\s+\/[a-z]*s/i,/\brmdir\s+\/[a-z]*s/i,/\bdiskpart\b/i,/<\s*\w+\.(ps1|bat|cmd|exe)/i];
  function execRun(id,cmd){return new Promise(res=>{
   exec(cmd,{timeout:60000,maxBuffer:1024*1024,windowsHide:true},async(e,so,se)=>{
-   // COMBINED envelope bound: the worker rejects oversized serialized results; stdout+stderr must
-   // fit it TOGETHER with JSON escaping headroom (was: 3000+1000 separately - could cross the cap)
-   const stdout=String(so||'').slice(0,2200),stderr=String(se||(e&&e.message||'')).slice(0,600);
-   audit({kind:'run_command',stage:'executed',command:cmd,ok:!e,exit:e?(e.code??null):0,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300)});
-   await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',{stdout,stderr,exit:e?(e.code??null):0});res();
+   // COMBINED envelope bound on the SERIALIZED result: the worker rejects result JSON >3500 / raw
+   // body >4000. Fixed slices cannot guarantee that (escaping worst-case 6x), so we budget by actual
+   // JSON.stringify length and record explicit truncation metadata.
+   const so0=String(so||''),se0=String(se||(e&&e.message||'')),exitC=e?(e.code??null):0;
+   const RES_CAP=3400; // leaves headroom under the worker's 3500 result cap
+   const ser=(a,b)=>JSON.stringify({stdout:a,stderr:b,exit:exitC}).length;
+   let stderr=se0.slice(0,800);
+   if(ser('',stderr)>RES_CAP)stderr=stderr.slice(0,200); // pathological escaping in stderr alone
+   let stdout=so0;
+   while(stdout.length&&ser(stdout,stderr)>RES_CAP)stdout=stdout.slice(0,Math.floor(stdout.length*0.8));
+   const result={stdout,stderr,exit:exitC};
+   if(stdout.length<so0.length||stderr.length<se0.length){result.truncated=true;result.stdout_full=so0.length;result.stderr_full=se0.length}
+   audit({kind:'run_command',stage:'executed',command:cmd,ok:!e,exit:exitC,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300),truncated:!!result.truncated});
+   await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',result);res();
   });
  })}
 
@@ -635,8 +644,13 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  async function ack(id,status,note,result){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
   if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m}}body.result=result}
-  try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
-   if(!r.ok)audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status}); // a rejected ack is EVIDENCE, never a silent drop
+  let wire=JSON.stringify(body);
+  if(wire.length>3900){audit({kind:'ack',stage:'oversize_guard',id:String(id||''),status,bytes:wire.length});body.result={truncated:true,guard:true};wire=JSON.stringify(body)} // last-resort raw-body bound (worker cap 4000)
+  try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
+   const respText=await r.text().catch(()=> '');
+   if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return} // a rejected ack is EVIDENCE, never a silent drop
+   let landed=null;try{landed=JSON.parse(respText).updated}catch{}
+   if(landed!==1)audit({kind:'ack',stage:'ack_unconfirmed',id:String(id||''),status,http:r.status,updated:landed}); // 2xx without a row transition is not proof of landing
   }catch(e){audit({kind:'ack',stage:'send_failed',id:String(id||''),status,error:String(e&&e.message||e).slice(0,200)})}
  }
 
