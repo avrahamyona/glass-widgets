@@ -545,22 +545,23 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
  }
  // island_control: open/close the chat island pill directly (no screen clicks needed - the pill
  // is click-through when closed, so OS-level injection can't reach it). Card/signed gated like ui_automation.
- const ISLAND_ACTIONS={open:'פתיחת האי',close:'סגירת האי'};
- function execIsland(id,action){
+ const ISLAND_ACTIONS=['open','close']; // explicit allowlist - no inherited-object keys
+ const ISLAND_ACTION_LABELS={open:'פתיחת האי',close:'סגירת האי'};
+ async function execIsland(id,action){
   if(!islandCtl){audit({kind:'island_control',stage:'failed',error:'no island bridge in this build'});return ack(id,'failed','island_control unsupported in this build')}
-  const r=islandCtl(action);
+  let r;try{r=await islandCtl(action)}catch(e){r={ok:false,error:String(e&&e.message||e)}}
   if(r&&r.ok)audit({kind:'island_control',stage:'executed',action});else audit({kind:'island_control',stage:'failed',action,error:(r&&r.error)||'unknown'});
-  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done':String((r&&r.error)||'unknown'));
+  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+action+')':String((r&&r.error)||'unknown'));
  }
  function islandControl(id,m){
   const action=String(m.action||'').toLowerCase();
-  if(!ISLAND_ACTIONS[action]){audit({kind:'island_control',stage:'failed',error:'bad action'});return ack(id,'failed','unknown island action (open/close)')}
+  if(!ISLAND_ACTIONS.includes(action)){audit({kind:'island_control',stage:'failed',error:'bad action'});return ack(id,'failed','unknown island action (open/close)')}
   // pre-approval payload the worker signs for island_control: the action string
   const pre=validPreapproval(m,action);
   if(checkDup(id,'island_control',{}))return;
   let preOk=false;
   if(pre){preOk=markSeen(id,'pending',+m.exp);if(!preOk)audit({kind:'island_control',stage:'seen_persist_failed'})}
-  const core='השרת מבקש לבצע על האי: '+ISLAND_ACTIONS[action]+'.';
+  const core='השרת מבקש לבצע על האי: '+ISLAND_ACTION_LABELS[action]+'.';
   const body=core+(preOk?'\nמתבצע אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.':'\nבלי אישור - תידחה אוטומטית בעוד כ-2 דקות.');
   if(pendingApprovals.size>=5){if(preOk)markSeen(id,'refused');return ack(id,'failed','too many pending approvals')}
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
