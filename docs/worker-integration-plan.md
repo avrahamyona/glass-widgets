@@ -6,12 +6,19 @@ Base: agent through PR #70 (4849b70), worker route v4 (PR #69, df5b311), contrac
 ## A. Live worker wiring
 
 ### A1. Enrollment wiring (MISSING end-to-end)
-- What: agent boot -> if no device keypair, mint -> enroll publish to worker /glasswidgets/agent/enroll (worker verifies sender auth X-GW-Reply-Key, binds device_id=sha256(pubkey)[:16], enforces GW_MAX_DEVICES atomically) -> worker delivers worker-signed enroll_device envelope (signEnrollCommand, SSE) -> agent handler persists device (idempotent, ACL-hardened file).
-- Locus: worker/tunnel-route.js (enroll route EXISTS, static-cleared), src/lib/agent.js enroll_device handler (EXISTS), src/lib/tunnel.js publish loop (EXISTS).
-- Verify: live round-trip on staging worker: fresh profile enrolls, re-enroll same id+pubkey is idempotent, different pubkey refused, device limit enforced. Evidence: worker logs + agent audit + ledger record.
+- What (safe bootstrap order - the PC never receives a sender secret):
+  1. Owner backend (holds X-GW-Reply-Key / GW_REPLY_KEY - a private sender credential that must NEVER be provisioned to the PC) authorizes and signs the enroll intent.
+  2. PC mints its device keypair locally and persists it ACL-hardened + atomically (EXISTS in src/lib/agent.js; the standalone server skeleton now does the same - tmp exclusive-create + rename + load-time private/public pair check).
+  3. PC publishes its PUBLIC key only (device-signed) as the enroll ACK.
+  4. Owner backend verifies the device identity against the authorized intent.
+  5. Worker enroll registry records device_id = sha256(pubkey)[:16] with the atomic device limit (route EXISTS, static-cleared).
+  6. Signed tunnel-pointer publish + nonce proof (health nonce flow EXISTS).
+  The code as written only mints worker-signed enroll_device envelopes; the /enroll endpoint requires the private reply key, so the order above is the only safe wiring.
+- Locus: worker/tunnel-route.js (enroll route EXISTS), src/lib/agent.js enroll_device handler (EXISTS, idempotent), src/lib/tunnel.js publish loop (EXISTS).
+- Verify: live round-trip on a staging worker: fresh profile enrolls, re-enroll same id+pubkey is idempotent, different pubkey refused, device limit enforced, and the PC config/data dir provably contains NO sender secret. Evidence: worker logs + agent audit + ledger record.
 
 ### A2. Read signer (MISSING)
-- What: worker route that authorizes /task (and /info) reads: signs the 6-field read canonical (path, query, device, ts0) with GW_SIGN_PRIVATE so the agent's verifyReadAuth (EXISTS, device-bound) returns 200; wrong sig / stale ts0 -> 403.
+- What: worker route that authorizes /task (and /info) reads: signs the six-field read canonical exactly as the handler verifies it - [method, path, query, ts, nonce, device] joined by newlines - with GW_SIGN_PRIVATE, so the agent's verifyReadAuth (EXISTS, device-bound) returns 200; wrong sig / stale ts / replayed nonce -> 403 read_auth. (403 device_required is only the STRICT_ENVELOPES v1-command refusal; read failures surface as read_auth.)
 - Locus: new worker route (e.g. /glasswidgets/agent/read-sign or proxied read), agent verifyReadAuth in src/lib/agent.js:881 (EXISTS).
 - Verify: read proof - signed read 200 with correct body, tampered sig 403, replayed stale ts0 403, v1 read on strict-enrolled device 403 device_required.
 
@@ -21,16 +28,16 @@ Base: agent through PR #70 (4849b70), worker route v4 (PR #69, df5b311), contrac
 - Verify: on enrolled+strict device: v1 -> 403, v2 -> 202; on legacy device: v1 still 202 (no regression).
 
 ### A4. Capabilities exchange (PARTIAL)
-- What: agent already advertises caps on the SSE registration query (approve,update,media,clip,web,sig,ui,shot,island - EXISTS). Worker must persist caps per device and route only advertised kinds; sender UI/agent must not offer commands the device cannot run.
+- What: agent already advertises caps on the SSE registration query (approve,update,media,clip,web,sig,ui,shot,island - EXISTS). The advertisement is INFORMATIONAL ONLY: it is sent under the baked, public command key and must never grant authority. Authoritative capability comes from the device-signed registration (enrolled device key) plus the verified code capability of the running build; the worker routes only kinds the device's signed registration advertised, and the sender must not offer commands the device cannot run.
 - Locus: worker command intake (to write), agent caps source src/lib/agent.js:853 (EXISTS).
-- Verify: worker refuses/queues a kind the device did not advertise; caps refresh on relaunch.
+- Verify: worker refuses/queues a kind the device did not advertise in its signed registration; caps refresh on relaunch; a forged advertisement over the public key changes nothing.
 
 ### A5. Sender client (MISSING)
-- What: the component that turns a user intent into a signed command envelope: id (ULID), kind from the closed allowlist, data JSON, ts/exp, 5- or 6-field Ed25519 signature with GW_SIGN_PRIVATE, POST to worker with X-GW-Reply-Key, then task polling for terminal status. Idempotent retry: SAME id + same payload; a 409 duplicate means accepted/ran/unknown - never a new id. done/unknown are NOT authorization to re-execute.
+- What: the component that turns a user intent into a signed command envelope: id under the EXISTING strict id contract (the current ULID/UUID format and its uniqueness rules - no new id scheme), kind from the closed allowlist, data JSON, ts/exp, 5- or 6-field Ed25519 signature with GW_SIGN_PRIVATE, POST to worker with X-GW-Reply-Key, then task polling for terminal status. Idempotent retry: SAME id + same payload; a 409 duplicate means accepted/ran/unknown - never a new id. done/unknown are NOT authorization to re-execute.
 - Locus: new component (worker-side route or ops backend); contract sections already written in docs/sender-tunnel-contract.md.
 - Verify: unit + live: build/sign/post/poll cycle; duplicate POST returns cached outcome; expired envelope refused without effect.
 
-## B. E2E proofs (all UNVERIFIED)
+## B. E2E proofs (TARGET behaviors - none of these exist as verified features yet)
 
 ### B1. Tunnel proof
 command -> worker intake 202 -> tunnel publish -> agent intake (durable accepted) -> exec -> terminal ledger record -> ack; duplicate delivery -> cached re-ack, effect never re-runs; expired transport -> refusal record only for NEW intakes (replay resolves as duplicate first).
@@ -41,8 +48,9 @@ as A2 verify, against the live worker + real device.
 ### B3. Task poll
 sender polls /task?id=...: accepted -> running -> terminal transitions visible; terminal exactly-once via ack; crash between running and terminal leaves 'unknown' -> manual reconciliation (exactly-once across crashes is NOT claimed).
 
-### B4. Crash / ack retry E2E
-kill the agent mid-run -> ledger shows running/unknown on restart -> no blind re-execution; ack retry with backoff -> worker dedups by id (updated:1 idempotent); unfittable ack body -> audited, never transmitted blind.
+### B4. Crash / ack retry E2E (TARGET behavior - the retry path is NOT built yet)
+kill the agent mid-run -> ledger shows running/unknown on restart -> no blind re-execution.
+Ack retry with backoff: MISSING on the agent side. The worker's current updated=1 write is NOT an idempotent receipt (it ACKs WHERE pending, so a replayed ack updates 0 rows and looks like a failure) - a receipt/reconcile contract is needed: the worker records the ack by id idempotently (replay returns the stored outcome), and the agent reconciles non-terminal ledger records against it on restart. Unfittable ack body -> audited, never transmitted blind (EXISTS, ack-unit).
 
 ## C. Cutover (after A+B verified)
 
