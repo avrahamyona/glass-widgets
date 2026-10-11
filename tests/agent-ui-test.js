@@ -1,0 +1,261 @@
+const REPO=process.env.GW_REPO||'/home/sandbox/glass-widgets';
+const {_electron:e}=require(REPO+'/node_modules/playwright');const assert=require('assert'),fs=require('fs'),os=require('os'),path=require('path'),http=require('http'),crypto=require('crypto');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const {publicKey:PUB,privateKey:PRIV}=crypto.generateKeyPairSync('ed25519');
+const PUB_B64=PUB.export({format:'der',type:'spki'}).toString('base64');
+const sign=(id,kind,ts,exp,payload)=>crypto.sign(null,Buffer.from([id,kind,String(ts),String(exp),payload].join('\n'),'utf8'),PRIV).toString('hex');
+let ACK=[],CMDQS=[],UPLOADS=[];
+const srv=http.createServer((q,r)=>{const u=new URL(q.url,'http://x');
+ if(u.pathname==='/chat/stream'){r.writeHead(200,{'content-type':'text/event-stream'});r.write(': ready\n\n');return}
+ if(u.pathname==='/chat'&&q.method==='GET'){r.writeHead(200,{'content-type':'application/json'});r.end('{"ok":true,"read_upto":0,"messages":[]}');return}
+ if(u.pathname==='/chat'&&q.method==='POST'){let b='';q.on('data',d=>b+=d);q.on('end',()=>{r.writeHead(200,{'content-type':'application/json'});r.end('{"ok":true,"id":"x1"}')});return}
+ if(u.pathname==='/chat/action'&&q.method==='POST'){r.writeHead(200,{'content-type':'application/json'});r.end('{"ok":true}');return}
+ if(u.pathname==='/cmd/stream'){CMDQS.push(u.search);r.writeHead(200,{'content-type':'text/event-stream'});r.write(': ready\n\n');global.cmdRes=r;return}
+ if(u.pathname==='/cmd/ack'){let b='';q.on('data',d=>b+=d);q.on('end',()=>{ACK.push(JSON.parse(b||'{}'));r.end('{}')});return}
+ if(u.pathname==='/file/upload'){let n=0;q.on('data',d=>n+=d.length);q.on('end',()=>{UPLOADS.push({name:u.searchParams.get('name'),bytes:n,key:q.headers['x-gw-key']});r.writeHead(200,{'content-type':'application/json'});r.end('{"file_id":"f-'+UPLOADS.length+'"}')});return}
+ r.statusCode=404;r.end()});
+const pushCmd=m=>{if(global.cmdRes)global.cmdRes.write('data: '+JSON.stringify(m)+'\n\n')};
+const EX=()=>Date.now()+300000;
+const waitAck=async(id,status)=>{for(let i=0;i<50;i++){const a=ACK.find(x=>x.id===id&&x.status===status);if(a)return a;await sleep(200)}throw new Error('no ack '+id+' '+status+' in '+JSON.stringify(ACK.slice(-6)))};
+let env,cfg,port;
+const launch=async()=>{
+ const old=global.cmdRes;
+ const a=await e.launch({executablePath:REPO+'/node_modules/electron/dist/electron',args:['--no-sandbox',REPO],env});
+ const waitWin=async pat=>{for(let i=0;i<80;i++){const w=a.windows().find(w=>w.url().includes(pat));if(w)return w;await sleep(150)}throw new Error('no '+pat)};
+ const A=await waitWin('/chat/');await sleep(1500);
+ for(let i=0;i<120&&global.cmdRes===old;i++)await sleep(250);
+ assert(global.cmdRes&&global.cmdRes!==old,'agent connected');
+ return {a,A};
+};
+(async()=>{
+ await new Promise(r=>srv.listen(0,'127.0.0.1',r));port=srv.address().port;
+ cfg=fs.mkdtempSync('/tmp/gw-ui-');fs.mkdirSync(cfg+'/glasswidgets',{recursive:true});
+ fs.writeFileSync(cfg+'/glasswidgets/instances.json',JSON.stringify([{id:'chat',type:'chat'}]));
+ fs.writeFileSync(cfg+'/glasswidgets/settings.json',JSON.stringify({instanceConfigs:{chat:{size:'island'}}}));
+ env={...process.env,XDG_CONFIG_HOME:cfg,GLASSWIDGETS_NO_PICKER:'1',PYTHONPATH:'/tmp/pystub',GLASSWIDGETS_CLOUD_PYTHON:'/usr/bin/python3',
+  GLASSWIDGETS_CHAT_URL:'http://127.0.0.1:'+port+'/chat',GLASSWIDGETS_CHAT_STREAM_URL:'http://127.0.0.1:'+port+'/chat/stream',
+  GLASSWIDGETS_CHAT_KEY:'chat-key',GLASSWIDGETS_AGENT_CMD_KEY:'cmd-key',GLASSWIDGETS_AGENT_CMD_URL:'http://127.0.0.1:'+port+'/cmd/stream',GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack',
+  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1'};
+ global.cmdRes=null;
+ let {a,A}=await launch();
+ assert(CMDQS[0].includes('ui')&&CMDQS[0].includes('shot')&&CMDQS[0].includes('island'),'caps advertise ui+shot+island: '+CMDQS[0]);
+ const card=async find=>{for(let i=0;i<40;i++){const c=await A.evaluate(f=>{const els=[...document.querySelectorAll('#pillBody .card')];const el=els.find(e=>e.textContent.includes(f));return el?{cid:el.dataset.cid,title:el.querySelector('.ct').textContent,body:el.querySelector('.cb')?el.querySelector('.cb').textContent:'',btns:[...el.querySelectorAll('button')].map(b=>b.textContent)}:null},find);if(c)return c;await sleep(200)}throw new Error('no card matching '+find)};
+ const clickBtn=(find,label)=>A.evaluate(([f,l])=>{const el=[...document.querySelectorAll('#pillBody .card')].find(e=>e.textContent.includes(f));const b=[...el.querySelectorAll('button')].find(b=>b.textContent===l);if(b)b.click()},[find,label]);
+
+ // 1) unsigned ui_automation: blocking card showing the COMPLETE plan, approve -> executes (dry-run)
+ pushCmd({id:'u1',kind:'ui_automation',label:'עדכון Efi Music',steps:[{do:'click',x:100,y:200},{do:'wait',ms:500},{do:'dblclick',x:300,y:400}]});
+ let c=await card('עדכון Efi Music');
+ assert(/אישור לחיצות על המסך/.test(c.title),'blocking card title: '+c.title);
+ assert.deepEqual(c.btns,['אשר','דחה'],'blocking buttons');
+ assert(c.body.includes('לחיצה ב-(x:100, y:200)')&&c.body.includes('המתנה 500ms')&&c.body.includes('לחיצה כפולה ב-(x:300, y:400)'),'complete plan on card: '+c.body);
+ await clickBtn('עדכון Efi Music','אשר');
+ let a1=await waitAck('u1','done');
+ assert(a1.result&&a1.result.steps&&a1.result.steps.length===3&&a1.result.steps.every(s=>s.ok&&(s.do==='wait'||s.dry)),'3 dry steps ok: '+JSON.stringify(a1.result));
+
+ // 2) deny path: no execution
+ pushCmd({id:'u2',kind:'ui_automation',steps:[{do:'click',x:50,y:50}]});
+ c=await card('לחיצה ב-(x:50, y:50)');
+ await clickBtn('לחיצה ב-(x:50, y:50)','דחה');
+ assert(/denied/.test((await waitAck('u2','failed')).note||''),'denied ack');
+
+ // 3) signed ui_automation: cancelable auto-run card, executes without a tap
+ const steps3=[{do:'move',x:500,y:500},{do:'click',x:600,y:600}];
+ let ts=Date.now(),exp=EX();
+ pushCmd({id:'u3',kind:'ui_automation',steps:steps3,ts,exp,sig:sign('u3','ui_automation',ts,exp,JSON.stringify(steps3))});
+ c=await card('הזזת עכבר ב-(x:500, y:500)');
+ assert(/⚡ מבצע לחיצות שאישרת/.test(c.title),'auto card title: '+c.title);
+ assert.deepEqual(c.btns,['בטל'],'only cancel');
+ const a3=await waitAck('u3','done');
+ assert(a3.result.steps.length===2&&a3.result.steps[0].do==='move','auto-ran signed plan');
+
+ // 3b) replay: same signed id again -> duplicate is audit-only, NO ack (a dup ack would clobber the real result)
+ ACK=ACK.filter(x=>x.id!=='u3');
+ pushCmd({id:'u3',kind:'ui_automation',steps:steps3,ts,exp,sig:sign('u3','ui_automation',ts,exp,JSON.stringify(steps3))});
+ await sleep(1500);
+ assert(!ACK.some(x=>x.id==='u3'),'replay produces no ack: '+JSON.stringify(ACK.filter(x=>x.id==='u3')));
+
+ // 4) bad sig -> blocking card, no auto-run
+ ts=Date.now();exp=EX();
+ pushCmd({id:'u4',kind:'ui_automation',steps:[{do:'click',x:111,y:222}],ts,exp,sig:'ab'.repeat(64)});
+ c=await card('לחיצה ב-(x:111, y:222)');
+ assert(/אישור לחיצות על המסך/.test(c.title),'bad sig -> blocking card');
+ await clickBtn('לחיצה ב-(x:111, y:222)','דחה');
+ await waitAck('u4','failed');
+
+ // 5) invalid plans: refused without a card
+ pushCmd({id:'u5',kind:'ui_automation',steps:[{do:'type',x:1,y:1,text:'hi'}]});
+ assert(/bad ui plan/.test((await waitAck('u5','failed')).note||''),'unknown action refused');
+ pushCmd({id:'u6',kind:'ui_automation',steps:[{do:'click',x:-99999,y:1}]});
+ assert(/bad ui plan/.test((await waitAck('u6','failed')).note||''),'off-screen coords refused');
+ pushCmd({id:'u7',kind:'ui_automation',steps:Array.from({length:21},()=>({do:'wait',ms:100}))});
+ assert(/bad ui plan/.test((await waitAck('u7','failed')).note||''),'>20 steps refused');
+ pushCmd({id:'u8',kind:'ui_automation',steps:[{do:'wait',ms:99999}]});
+ assert(/bad ui plan/.test((await waitAck('u8','failed')).note||''),'overlong wait refused');
+ pushCmd({id:'u9',kind:'ui_automation',steps:[]});
+ assert(/bad ui plan/.test((await waitAck('u9','failed')).note||''),'empty plan refused');
+
+ // 6) unsigned duplicate id with a parked card: refused, original intact
+ pushCmd({id:'u10',kind:'ui_automation',steps:[{do:'click',x:10,y:10}]});
+ c=await card('לחיצה ב-(x:10, y:10)');
+ ACK=ACK.filter(x=>x.id!=='u10');
+ pushCmd({id:'u10',kind:'ui_automation',steps:[{do:'click',x:20,y:20}]});
+ await sleep(1200);
+ assert(!ACK.some(x=>x.id==='u10'),'dup of parked card produces no ack: '+JSON.stringify(ACK.filter(x=>x.id==='u10')));
+ await clickBtn('לחיצה ב-(x:10, y:10)','אשר');
+ await waitAck('u10','done');
+ await sleep(600);
+ assert(ACK.filter(x=>x.id==='u10').length===1,'exactly one ack for u10 (the real result): '+JSON.stringify(ACK.filter(x=>x.id==='u10')));
+
+ // 7) screenshot: captures, uploads PNG with cmd key, returns geometry for coord mapping
+ pushCmd({id:'sh1',kind:'screenshot'});
+ const ash=await waitAck('sh1','done');
+ assert(ash.result&&ash.result.file_id==='f-1'&&ash.result.bytes>1000,'screenshot uploaded: '+JSON.stringify(ash.result));
+ assert(ash.result.img_width>0&&ash.result.logical_width>0&&ash.result.scale>=1,'geometry returned: '+JSON.stringify(ash.result));
+ assert(Number.isFinite(ash.result.origin_x)&&Number.isFinite(ash.result.origin_y)&&ash.result.coord&&ash.result.coord.startsWith('physical'),'origin + physical coord contract: '+JSON.stringify(ash.result));
+ assert(ash.result.one_to_one===true&&ash.result.px_per_img_x===1&&ash.result.px_per_img_y===1,'measured 1:1 mapping: '+JSON.stringify(ash.result));
+ assert(UPLOADS[0]&&UPLOADS[0].key==='cmd-key'&&UPLOADS[0].name.startsWith('screenshot-sh1'),'upload keyed+named: '+JSON.stringify(UPLOADS[0]));
+
+ // 10) island_control: unsigned -> blocking card, approve -> pill opens in the island window
+ const pillOpen=()=>A.evaluate(()=>document.getElementById('pill').classList.contains('open'));
+ // earlier approval cards auto-open the island - close it first through island_control itself
+ pushCmd({id:'i0',kind:'island_control',action:'close'});
+ c=await card('סגירת האי');
+ await clickBtn('סגירת האי','אשר');
+ await waitAck('i0','done');
+ for(let i=0;i<20&&(await pillOpen());i++)await sleep(150);
+ assert(!(await pillOpen()),'island_control close closed the pill (from card-opened state)');
+ pushCmd({id:'i1',kind:'island_control',action:'open'});
+ c=await card('פתיחת האי');
+ assert(/אישור פעולה על האי/.test(c.title),'island blocking card title: '+c.title);
+ assert.deepEqual(c.btns,['אשר','דחה'],'island blocking buttons');
+ await clickBtn('פתיחת האי','אשר');
+ await waitAck('i1','done');
+ for(let i=0;i<20&&!(await pillOpen());i++)await sleep(150);
+ assert(await pillOpen(),'island_control open opened the pill');
+ // signed close -> cancelable auto-run card, pill closes without a tap
+ ts=Date.now();exp=EX();
+ pushCmd({id:'i2',kind:'island_control',action:'close',ts,exp,sig:sign('i2','island_control',ts,exp,'close')});
+ c=await card('פעולת אי שאישרת'); // match the auto card uniquely - i0's stale blocking card shares the action text
+ assert(/⚡ מבצע פעולת אי שאישרת/.test(c.title),'island auto card title: '+c.title);
+ assert.deepEqual(c.btns,['בטל'],'island auto card: only cancel');
+ await waitAck('i2','done');
+ for(let i=0;i<20&&(await pillOpen());i++)await sleep(150);
+ assert(!(await pillOpen()),'island_control close closed the pill');
+ // unknown action refused without a card - including inherited-object keys (constructor/toString/__proto__)
+ pushCmd({id:'i3',kind:'island_control',action:'spin'});
+ assert(/unknown island action/.test((await waitAck('i3','failed')).note||''),'bad island action refused');
+ pushCmd({id:'i5',kind:'island_control',action:'toString'});
+ assert(/unknown island action/.test((await waitAck('i5','failed')).note||''),'inherited key refused');
+ // 11) dup-race regression: same signed id delivered twice (worker retry) -> exactly ONE ack, the real result
+ ts=Date.now();exp=EX();const sig11=sign('i4','island_control',ts,exp,'open');
+ pushCmd({id:'i4',kind:'island_control',action:'open',ts,exp,sig:sig11});
+ pushCmd({id:'i4',kind:'island_control',action:'open',ts,exp,sig:sig11});
+ await waitAck('i4','done');
+ await sleep(1500);
+ assert(ACK.filter(x=>x.id==='i4').length===1,'dup delivery: exactly one ack: '+JSON.stringify(ACK.filter(x=>x.id==='i4')));
+ assert(/renderer confirmed open/.test(ACK.find(x=>x.id==='i4').note||''),'done ack means renderer-confirmed state: '+ACK.find(x=>x.id==='i4').note);
+ assert(await pillOpen(),'dup delivery: the real execution still ran');
+ const log11=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(log11.includes('"stage":"duplicate"'),'audit records the duplicate delivery');
+
+ // 11b) close ack wording: 'closed', not the raw action string
+ assert(/renderer confirmed closed/.test(ACK.find(x=>x.id==='i2').note||''),'closed wording: '+ACK.find(x=>x.id==='i2').note);
+
+ // 11c) lifecycle settling on the MOUNTED pill: settle events (not age) drive the refresh
+ let ptxt=await A.evaluate(()=>{const l=document.getElementById('pillLog');return l?l.textContent:''});
+ assert(!ptxt.includes('סגירת האי')&&!ptxt.includes('עדכון Efi Music')&&!ptxt.includes('פעולת אי שאישרת'),'settled/acted cards out of the mounted pill: '+ptxt.slice(0,120));
+ pushCmd({id:'iA',kind:'island_control',action:'open'});
+ c=await card('פתיחת האי'); // unsigned -> blocking pending card
+ ptxt=await A.evaluate(()=>document.getElementById('pillLog').textContent);
+ assert(ptxt.includes('פתיחת האי'),'fresh pending card visible in the pill');
+ await sleep(5200); // APPROVAL_TTL_MS=4000: the agent's expiry settle must refresh the mounted panel by itself
+ ptxt=await A.evaluate(()=>document.getElementById('pillLog').textContent);
+ assert(!ptxt.includes('פתיחת האי'),'expiry settle refreshed the mounted pill without any further event: '+ptxt.slice(0,120));
+ const mainLog=await A.evaluate(()=>{const l=document.getElementById('log');return l?l.textContent:''});
+ assert(mainLog.includes('עדכון Efi Music')&&mainLog.includes('פתיחת האי'),'main chat log keeps full card history');
+ const greyed=await A.evaluate(()=>{const el=[...document.querySelectorAll('#log .card')].find(e=>e.dataset.cid==='local-approve-iA');return el?el.className:'missing'});
+ assert(/acted/.test(greyed),'expired card shows dead/greyed in history: '+greyed);
+
+ // 11d) hover audit: a real renderer mouseenter is recorded with its fire-time mode
+ ts=Date.now();exp=EX();
+ pushCmd({id:'i9',kind:'island_control',action:'close',ts,exp,sig:sign('i9','island_control',ts,exp,'close')});
+ await waitAck('i9','done');
+ for(let i=0;i<20&&(await pillOpen());i++)await sleep(150);
+ await A.hover('#pillHead');await sleep(400);
+ const logH=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"island_hover","mode":"mini","instance":"chat"/.test(logH),'closed-mode hover recorded with island provenance: '+logH.split('\n').filter(l=>l.includes('island_hover')).join('|'));
+
+ // 11e) raw delivery probe: every renderer-seen move in mini mode is audited (throttled), with over-pill provenance
+ const countMoves=()=>((fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').match(/"kind":"island_move"/g))||[]).length;
+ const before=countMoves();
+ await A.evaluate(()=>{const p=document.getElementById('pill');const r=p.getBoundingClientRect();
+  for(let i=0;i<3;i++)p.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:r.x+5,clientY:r.y+5}));});
+ await sleep(300);
+ assert(countMoves()-before===1,'3 rapid moves throttle to one island_move line, got '+(countMoves()-before));
+ let logM=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"island_move"[^\n]*"mode":"mini"[^\n]*"over":true/.test(logM),'probe carries mode+over-pill provenance');
+ await sleep(350);
+ await A.evaluate(()=>{document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:2,clientY:2}))});
+ await sleep(300);
+ assert(countMoves()-before===2,'post-throttle move logged as second line');
+ logM=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"island_move"[^\n]*"over":false/.test(logM),'off-pill move logged with over:false');
+ // move lines carry per-window provenance; invalid payloads are rejected, never coerced into trusted audit
+ assert(/"kind":"island_move"[^\n]*"src":"primary","wid":\d+/.test(logM),'move line carries source role + webContents id');
+ const beforeBad=countMoves();
+ await A.evaluate(()=>{window.api.pillMove({x:NaN,y:1,mode:'mini',over:true});window.api.pillMove({x:1,y:1,mode:'open',over:true});window.api.pillMove({x:1,y:1,mode:'mini',over:'yes'})});
+ await sleep(300);
+ assert(countMoves()===beforeBad,'invalid move payloads rejected (non-finite coord, wrong mode, non-boolean over)');
+ // passthrough TRANSITIONS are audited with validated provenance (not per-invocation spam)
+ assert(/"kind":"island_passthrough","on":false[^\n]*"source":"island"/.test(logM)&&/"kind":"island_passthrough","on":true[^\n]*"source":"island"/.test(logM),'passthrough transitions audited with island provenance');
+ const ptLines=(logM.match(/"kind":"island_passthrough"/g)||[]).length;
+ await A.evaluate(()=>{window.api.chatPassthrough(true);window.api.chatPassthrough(true);window.api.chatPassthrough(true)});
+ await sleep(300);
+ logM=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert((logM.match(/"kind":"island_passthrough"/g)||[]).length===ptLines,'repeat same-state passthrough calls add NO audit lines (transitions only)');
+
+ // 12) absent DOM: pill element removed -> close can never falsely confirm, bounded failure
+ await A.evaluate(()=>{const p=document.getElementById('pill');p.remove()});
+ ts=Date.now();exp=EX();
+ pushCmd({id:'i6',kind:'island_control',action:'close',ts,exp,sig:sign('i6','island_control',ts,exp,'close')});
+ const a6=await waitAck('i6','failed');
+ assert(/did not reach close/.test(a6.note||''),'absent DOM: close fails instead of confirming: '+a6.note);
+
+ // 13) hung renderer: blocked JS loop -> probes race out, the bridge still answers within its bound
+ A.evaluate(()=>{while(true){}}).catch(()=>{}); // never resolves - do not await
+ ts=Date.now();exp=EX();
+ pushCmd({id:'i7',kind:'island_control',action:'open',ts,exp,sig:sign('i7','island_control',ts,exp,'open')});
+ const t13=Date.now();
+ const a7=await waitAck('i7','failed');
+ assert(Date.now()-t13<15000,'hung renderer: bridge answered within bound: '+(Date.now()-t13)+'ms');
+ assert(/did not reach open/.test(a7.note||''),'hung renderer: failed, not stranded: '+a7.note);
+ await a.close();global.cmdRes=null;({a,A}=await launch());
+
+ // 14) destroyed primary: window gone -> failed ack, never dispatch-only 'done'
+ await A.close();await sleep(500);
+ ts=Date.now();exp=EX();
+ pushCmd({id:'i8',kind:'island_control',action:'open',ts,exp,sig:sign('i8','island_control',ts,exp,'open')});
+ const a8=await waitAck('i8','failed');
+ assert(/island primary window unavailable|no island/.test(a8.note||''),'destroyed primary fails: '+a8.note);
+ await a.close();global.cmdRes=null;({a,A}=await launch()); // fresh windows for the audit/deadline scenarios
+
+ // 8) audit trail
+ const log=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ for(const k of ['"ui_automation"','"screenshot"','"preapproved"','"step"','"island_control"'])assert(log.includes(k),'audit has '+k);
+
+ // 9) hard task deadline: waits beyond the budget never run
+ await a.close();
+ env={...env,GLASSWIDGETS_UI_TASK_MS:'2000'};
+ global.cmdRes=null;
+ ({a,A}=await launch());
+ const steps9=[{do:'wait',ms:1500},{do:'wait',ms:1500},{do:'click',x:100,y:200}];
+ ts=Date.now();exp=EX();
+ pushCmd({id:'u11',kind:'ui_automation',steps:steps9,ts,exp,sig:sign('u11','ui_automation',ts,exp,JSON.stringify(steps9))});
+ const a11=await waitAck('u11','failed');
+ assert(/deadline/.test(a11.note||''),'deadline stop: '+a11.note);
+ assert(a11.result&&a11.result.deadline===true&&a11.result.steps.filter(x=>x.ok).length<=2,'stopped before the expired step: '+JSON.stringify(a11.result));
+
+ await a.close();srv.close();
+ console.log('AGENT-UI-TEST: ALL 9 SCENARIOS PASS');
+ process.exit(0);
+})().catch(e=>{console.error('FAIL',e);process.exit(1)});

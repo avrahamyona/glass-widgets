@@ -301,6 +301,7 @@ if(window.api&&api.pillCmd)api.pillCmd(a=>{if(a==='open'&&pillMode!=='open')open
  pill.addEventListener('mouseleave',()=>{if(pillMode!=='open')api.chatPassthrough(true)});
  document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode!=='open')api.chatPassthrough(true)});
  pill.addEventListener('mouseenter',()=>{api.chatPassthrough(false);if(window.api&&api.pillHover)api.pillHover(pillMode)}); // hover audit: proves (with fire-time mode) which delivery path reached the renderer
+ let lastMoveProbe=0;document.addEventListener('mousemove',e=>{if(pillMode!=='mini'||!window.api||!api.pillMove)return;const n=Date.now();if(n-lastMoveProbe<250)return;lastMoveProbe=n;api.pillMove({x:e.clientX,y:e.clientY,mode:pillMode,over:!!(e.target&&pill.contains(e.target))})}); // raw delivery probe: every forwarded move the renderer actually sees (0.4.58)
  document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
