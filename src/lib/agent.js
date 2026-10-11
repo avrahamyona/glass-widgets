@@ -851,9 +851,36 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     handle(m);
     return {accepted:true};
    }});
-  if(r.started)srvStop=r.stop;else audit({kind:'server',stage:'not_started',reason:String(r.reason||'')});
+  if(r.started){srvStop=r.stop;startTunnelLeg(r.port)}else audit({kind:'server',stage:'not_started',reason:String(r.reason||'')});
  });
+
+ // path B: quick tunnel + authenticated discovery publish on the worker + heartbeat.
+ // the worker record is a POINTER ONLY (url + timestamp); commands keep flowing over SSE until
+ // the sender switches, and a stale record (no heartbeat) means the sender falls back to SSE.
+ const tunnelCfg={enabled:true,...((cfg.tunnel&&typeof cfg.tunnel==='object')?cfg.tunnel:{})};
+ if(process.env.GLASSWIDGETS_TUNNEL_ENABLED!==undefined)tunnelCfg.enabled=process.env.GLASSWIDGETS_TUNNEL_ENABLED==='1';
+ const discoveryUrl=base.replace(/\/chat$/,'/agent/tunnel');
+ let tunnelStop=null,heartbeat=null;
+ async function publishTunnel(url){
+  try{const r=await fetch(discoveryUrl,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':cmdKey},body:JSON.stringify({url,v:app.getVersion()}),signal:AbortSignal.timeout(15000)});
+   if(!r.ok)audit({kind:'tunnel',stage:'publish_fail',status:r.status});
+  }catch(e){audit({kind:'tunnel',stage:'publish_error',err:String(e&&e.message||e).slice(0,120)})}
+ }
+ async function startTunnelLeg(port){
+  if(!tunnelCfg.enabled)return;
+  const{ensureCloudflared,startTunnel}=require('./tunnel');
+  const exe=await ensureCloudflared(path.join(app.getPath('userData'),'bin'),{log:(stage,obj)=>audit({kind:'tunnel',stage,...obj})});
+  if(!exe){audit({kind:'tunnel',stage:'no_binary'});return}
+  const t=startTunnel({exePath:exe,port,log:(stage,obj)=>audit({kind:'tunnel',stage,...obj}),
+   onUrl:(url)=>{
+    audit({kind:'tunnel',stage:'published',url});
+    publishTunnel(url);
+    clearInterval(heartbeat);
+    heartbeat=setInterval(()=>publishTunnel(url),45000);heartbeat.unref&&heartbeat.unref();
+   }});
+  tunnelStop=t.stop;
+ }
  if(cmdKey)resolveFolders().then(()=>{if(folders.length)loop()});
- return {stop:()=>{stop=true;if(srvStop)srvStop()}};
+ return {stop:()=>{stop=true;clearInterval(heartbeat);if(tunnelStop)tunnelStop();if(srvStop)srvStop()}};
 }
 module.exports=startAgent;
