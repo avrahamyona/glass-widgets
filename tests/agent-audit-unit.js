@@ -81,4 +81,17 @@ const evW=w=>({sender:w.webContents}); // e.sender IS the webContents object in 
  assert(caps.length===1&&caps[0].wid===7,'exhaustion announced exactly once - absence afterwards means sampling stopped');
  delete process.env.GLASSWIDGETS_MOVE_PROBE_MAX;
 }
+// D) env normalization: Infinity/negatives/fractions/junk/huge all normalize to a finite positive integer <= 1000
+{
+ const budgetFor=v=>{process.env.GLASSWIDGETS_MOVE_PROBE_MAX=v;const w=makeWorld();
+  const realNow=Date.now;Date.now=()=>99999;w.h.move(evW(w.primary),{x:1,y:1,mode:'mini',over:true});Date.now=realNow;
+  delete process.env.GLASSWIDGETS_MOVE_PROBE_MAX;
+  const l=w.audit.find(l=>l.kind==='island_move');return l?l.budget:null};
+ assert(budgetFor('3')===2,'small positive budget honored');
+ assert(budgetFor('2.7')===1,'fraction floored');
+ assert(budgetFor('Infinity')===999,'Infinity cannot remove the hard cap');
+ assert(budgetFor('-1')===999,'negative rejected to default');
+ assert(budgetFor('abc')===999,'junk rejected to default');
+ assert(budgetFor('5000')===999,'huge values capped at 1000');
+}
 console.log('AGENT-AUDIT-UNIT: PASS');
