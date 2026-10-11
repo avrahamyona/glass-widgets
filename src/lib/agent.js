@@ -1,6 +1,6 @@
 // Local computer-actions agent. Consumes the /glasswidgets/cmd SSE stream (receiver key) and runs
 // allowlisted actions: find_files, get_file (upload via /file/upload), index, sys_info, screenshot,
-// delete_file (Downloads folder only, files only), open_path, run_command.
+// delete_file (Downloads folder only, files only), open_path, run_command, media_control, clipboard_read.
 // Safety: a resolved-folder allowlist gates file reads, delete_file is pinned to the real Downloads
 // folder, and every mutating/executing command lands in userData/agent-audit.log (JSON lines).
 const fs=require('fs'),path=require('path'),os=require('os');
@@ -11,7 +11,7 @@ const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*10
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
 const TEXT_EXT=new Set(['.txt','.md','.csv','.json','.log','.xml','.html','.htm','.js','.ts','.py','.yaml','.yml','.ini','.rtf']);
 
-function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp}){
+function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  const cfg={...(rd('agent.json',{})||{})};
  const base=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
  const cmdUrl=process.env.GLASSWIDGETS_AGENT_CMD_URL||cfg.cmdUrl||base.replace(/\/chat$/,'/cmd/stream');
@@ -100,7 +100,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp}){
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'run_command',stage:'expired',command:p.command});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,command:cmd,timer});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer});
   audit({kind:'run_command',stage:'requested',command:cmd});
   broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -108,10 +108,49 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp}){
   const cardId=String(p&&p.card_id||''),pend=pendingApprovals.get(cardId);
   if(!pend)return {ok:false,reason:'expired'};
   pendingApprovals.delete(cardId);clearTimeout(pend.timer);
-  if(p.button_id==='approve'){audit({kind:'run_command',stage:'approved',command:pend.command});execRun(pend.cmdId,pend.command);return {ok:true}}
-  audit({kind:'run_command',stage:'denied',command:pend.command});
+  if(p.button_id==='approve'){
+   audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
+   if(pend.kind==='media_control'){mediaApproved=true;execMedia(pend.cmdId,pend.action);return {ok:true}}
+   execRun(pend.cmdId,pend.command);return {ok:true}}
+  audit({kind:pend.kind||'run_command',stage:'denied',command:pend.command,action:pend.action});
   ack(pend.cmdId,'failed','denied - המשתמש דחה מהאי');return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
+
+ // media_control: play/pause/toggle/next/prev via the Windows media bridge (SMTC). An island approval
+ // card gates the CLASS once per app session (the user's approved stage); later commands in the session
+ // run directly, every one audited. The bridge exposes no volume control - volume is out of scope.
+ let mediaApproved=false;
+ const MEDIA_ACTIONS=['toggle','play','pause','next','prev'];
+ async function execMedia(id,a){
+  if(!mediaCmd){audit({kind:'media_control',stage:'failed',action:a,error:'no bridge'});return ack(id,'failed','no media bridge in this build')}
+  const r=mediaCmd(a);
+  audit({kind:'media_control',stage:'executed',action:a,ok:!!(r&&r.ok),error:r&&r.error||undefined});
+  return r&&r.ok?ack(id,'done',a):ack(id,'failed',String(r&&r.error||'media bridge unavailable').slice(0,200));
+ }
+ function mediaControl(id,action){
+  const a=String(action||'').trim().toLowerCase();
+  if(!MEDIA_ACTIONS.includes(a))return ack(id,'failed','bad action');
+  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execMedia(id,a)}
+  if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
+  if(!broadcastCard)return ack(id,'failed','no UI for approvals');
+  const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
+  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   audit({kind:'media_control',stage:'expired',action:p.action});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+  timer.unref&&timer.unref();
+  pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer});
+  audit({kind:'media_control',stage:'requested',action:a});
+  broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+ }
+
+ // clipboard_read: read-only - reports the PC clipboard text back to its owner (capped), no card.
+ async function clipboardRead(id){
+  const {clipboard}=require('electron');
+  let t;try{t=clipboard.readText()||''}catch(e){audit({kind:'clipboard_read',ok:false,error:String(e&&e.message||e)});return ack(id,'failed','clipboard read failed')}
+  audit({kind:'clipboard_read',chars:t.length});
+  if(!t)return ack(id,'done','הלוח ריק',{text:'',chars:0});
+  const CAP=2000,truncated=t.length>CAP;
+  return ack(id,'done',t.length+' תווים בלוח',{text:truncated?t.slice(0,CAP):t,chars:t.length,truncated});
+ }
 
  // update_app: the ONLY pre-authorized mutating command (the user's standing grant: app updates install
  // automatically, without asking). No island card - that would contradict the grant. Everything else
@@ -251,6 +290,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp}){
    if(m.kind==='open_path')return openPathCmd(m.id,m.path);
    if(m.kind==='run_command')return runCommand(m.id,m.command);
    if(m.kind==='update_app')return updateAppCmd(m.id);
+   if(m.kind==='media_control')return mediaControl(m.id,m.action);
+   if(m.kind==='clipboard_read')return clipboardRead(m.id);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
@@ -266,7 +307,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update'); // approve: run_command flows only to card-capable clients; update: update_app accepted (pre-authorized standing grant)
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip'); // approve: run_command/media_control flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;
