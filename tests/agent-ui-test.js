@@ -255,7 +255,27 @@ const launch=async()=>{
  assert(/deadline/.test(a11.note||''),'deadline stop: '+a11.note);
  assert(a11.result&&a11.result.deadline===true&&a11.result.steps.filter(x=>x.ok).length<=2,'stopped before the expired step: '+JSON.stringify(a11.result));
 
+ // 10) ack observability: a rejected ack and a dead ack endpoint are both audited, never silent
+ await a.close();global.cmdRes=null;
+ env={...env,GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/nope'}; // server 404s unknown paths
+ ({a,A}=await launch());
+ let steps10=[{do:'wait',ms:10}];
+ ts=Date.now();exp=EX();
+ pushCmd({id:'ak1',kind:'ui_automation',steps:steps10,ts,exp,sig:sign('ak1','ui_automation',ts,exp,JSON.stringify(steps10))});
+ await sleep(4500); // auto-run 2.5s + dry-run exec + rejected ack
+ let logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"ack","stage":"http_error","id":"ak1","status":"\w+","http":404/.test(logA),'rejected ack audited with http status: '+logA.split('\n').filter(l=>l.includes('"ack"')).join('|'));
+ await a.close();global.cmdRes=null;
+ env={...env,GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:9/none'}; // dead endpoint
+ ({a,A}=await launch());
+ steps10=[{do:'wait',ms:10}];
+ ts=Date.now();exp=EX();
+ pushCmd({id:'ak2',kind:'ui_automation',steps:steps10,ts,exp,sig:sign('ak2','ui_automation',ts,exp,JSON.stringify(steps10))});
+ await sleep(4500);
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"ack","stage":"send_failed","id":"ak2"/.test(logA),'dead ack endpoint audited with reason: '+logA.split('\n').filter(l=>l.includes('"ack"')).join('|'));
+
  await a.close();srv.close();
- console.log('AGENT-UI-TEST: ALL 9 SCENARIOS PASS');
+ console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
  process.exit(0);
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});
