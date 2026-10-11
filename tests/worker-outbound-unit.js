@@ -9,11 +9,11 @@ const DEV=crypto.createHash('sha256').update('devpub').digest('hex').slice(0,16)
 const verify=(fields,sig)=>crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),pubK(),Buffer.from(sig,'hex'));
 (async()=>{
  // read signer: six-field canonical exactly as verifyReadAuth expects
- const r=await signReadRequest(env,{device:DEV,method:'GET',path:'/task',query:'id=c2'});
+ const r=await signReadRequest(env,{device:DEV,method:'GET',path:'/task',query:'id=cmd-0001'});
  assert(/^[0-9a-f]{24}$/.test(r.nonce)&&/^[0-9a-f]{128}$/.test(r.sig),'read shape');
- assert(verify(['GET','/task','id=c2',String(r.ts),r.nonce,DEV],r.sig),'read canonical verifies');
- assert(!verify(['GET','/info','id=c2',String(r.ts),r.nonce,DEV],r.sig),'path is bound');
- assert(!verify(['GET','/task','id=c2',String(r.ts),r.nonce,'0'.repeat(16)],r.sig),'device is bound');
+ assert(verify(['GET','/task','id=cmd-0001',String(r.ts),r.nonce,DEV],r.sig),'read canonical verifies');
+ assert(!verify(['GET','/info','id=cmd-0001',String(r.ts),r.nonce,DEV],r.sig),'path is bound');
+ assert(!verify(['GET','/task','id=cmd-0001',String(r.ts),r.nonce,'0'.repeat(16)],r.sig),'device is bound');
  await assert.rejects(()=>signReadRequest(env,{device:'nope',path:'/task',query:''}),'bad device refused');
  await assert.rejects(()=>signReadRequest(env,{device:DEV,path:'task',query:''}),'bad path refused');
  await assert.rejects(()=>signReadRequest({},{device:DEV,path:'/task',query:''}),'missing key fails closed');
@@ -32,7 +32,8 @@ const verify=(fields,sig)=>crypto.verify(null,Buffer.from(fields.join('\n'),'utf
  // validation
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'x',kind:'find_files',data}),'short id refused');
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0004',kind:'find_files',device:'BAD',data}),'bad device refused');
- const e4=await buildCommandEnvelope(env,{id:'cmd-0005',kind:'find_files',device:DEV,data,ttlMs:99999999});
- assert(e4.exp-e4.ts===300000,'ttl capped at 300s');
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0005',kind:'find_files',device:DEV,data,ttlMs:99999999}),'over-cap ttl refused (no silent clamp)');
+ const e4=await buildCommandEnvelope(env,{id:'cmd-0006',kind:'find_files',device:DEV,data,ttlMs:300000});
+ assert(e4.exp-e4.ts===300000,'max ttl honored');
  console.log('WORKER-OUTBOUND-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});

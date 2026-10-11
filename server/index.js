@@ -21,7 +21,6 @@ cfg.token=process.env.GW_SERVER_TOKEN||cfg.token;
 cfg.senderPub=process.env.GW_SENDER_PUB||cfg.senderPub;
 if(!cfg.token||!cfg.senderPub)throw new Error('config requires token + senderPub (base64 SPKI)');
 const roots=Array.isArray(cfg.roots)&&cfg.roots.length?cfg.roots:[path.join(os.homedir(),'Documents'),path.join(os.homedir(),'Desktop'),path.join(os.homedir(),'Downloads')].filter(p=>{try{return fs.statSync(p).isDirectory()}catch{return false}});
-const signPub=crypto.createPublicKey({key:Buffer.from(cfg.senderPub,'base64'),format:'der',type:'spki'});
 
 // device identity: generated ON this machine on first boot, private key never leaves
 const devFile=path.join(dataDir,'device.json');
@@ -65,30 +64,8 @@ const ledger=createLedger(path.join(dataDir,'ledger.json'));
 const logFile=path.join(dataDir,'server-audit.log');
 const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().toISOString(),lvl,...o})+'\n')}catch{}};
 
-const READ_SKEW_MS=60000,readNonces=new Map();
-function verifyReadAuth(method,pathName,query,headers){
- const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
- const dev=String(headers['x-gw-read-device']||'');
- if(dev!==device.id)return false;
- if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
- if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
- const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
- const key=String(ts)+'|'+nonce;
- if(readNonces.has(key))return false;
- let ok=false;try{ok=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce,dev].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{}
- if(ok)readNonces.set(key,ts+120000);
- return ok;
-}
-
-function validEnvelope(m,payload){
- const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false;
- const ts=+m.ts,exp=+m.exp,now=Date.now();
- if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
- if(ts>now+60000||exp<=ts||exp-ts>300000||exp<=now)return false;
- const fields=m.device!=null?[String(m.device),String(m.id),String(m.kind),String(ts),String(exp),payload]:[String(m.id),String(m.kind),String(ts),String(exp),payload];
- try{return crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{return false}
-}
-
+const{createVerifier}=require('./lib/verify');
+const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
 async function main(){
  const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),token:cfg.token,version:'server-0.1.0',caps:'files',
   getDevice:()=>({deviceId:device.id,deviceSign}),
