@@ -368,7 +368,6 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  async function webTask(id,task){
   const url=String(task&&task.url||'').trim();
   if(!webUrlOk(url))return ack(id,'failed','url refused - https only, no private/local targets');
-  if(!WEB_ALLOW_LOCAL&&!(await resolvesPublic(url,new Map()))){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'resolves private'});return ack(id,'failed','destination resolves to a private/local address - refused')}
   const rawSteps=Array.isArray(task.steps)?task.steps:[];
   if(rawSteps.length>20){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'plan too long',steps:rawSteps.length});return ack(id,'failed','plan too long to review safely (max 20 steps) - rejected')}
   const plan=webTaskPlan(url,rawSteps);
@@ -377,27 +376,32 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   const label=String(task.label||'').slice(0,200);
   // pre-approval payload the worker signs for web_task: url + "\n" + JSON.stringify(steps as sent)
   const pre=validPreapproval(task,url+'\n'+JSON.stringify(rawSteps));
+  // duplicate guard + replay mark BEFORE the async DNS yield: a same-id copy arriving during the await
+  // can never slip a replacement into the original's auto-run timer. preOk (signature AND a durable
+  // replay mark) - not pre - decides which card copy is shown: a persistence failure falls back to
+  // the BLOCKING copy, never an auto-run promise the guard cannot back.
+  if(checkDup(id,'web_task',{url:url.slice(0,200)}))return;
+  let preOk=false;
+  if(pre){preOk=markSeen(id,'pending',+task.exp);if(!preOk)audit({kind:'web_task',stage:'seen_persist_failed',url:url.slice(0,200)})}
+  if(!WEB_ALLOW_LOCAL&&!(await resolvesPublic(url,new Map()))){if(preOk)markSeen(id,'refused');audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'resolves private'});return ack(id,'failed','destination resolves to a private/local address - refused')}
+  if(!preOk&&checkDup(id,'web_task',{url:url.slice(0,200)}))return; // post-yield: an unsigned same-id copy must not clobber the parked card
   // the card he approves must show the COMPLETE url+plan - never a truncated review. The overflow check
   // runs BEFORE any pending-slot registration, so a rejected plan never parks an invisible 2-min slot.
   const core='השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר.';
-  const body=core+(pre?'\nמתבצע אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.':'\nבלי אישור - תידחה אוטומטית בעוד כ-2 דקות.');
-  if(body.length>1900){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'review card overflow',chars:body.length});return ack(id,'failed','plan too long to review safely (card limit) - rejected')}
-  if(checkDup(id,'web_task',{url:url.slice(0,200)}))return;
-  if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
-  if(!broadcastCard)return ack(id,'failed','no UI for approvals');
+  const body=core+(preOk?'\nמתבצע אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.':'\nבלי אישור - תידחה אוטומטית בעוד כ-2 דקות.');
+  if(body.length>1900){if(preOk)markSeen(id,'rejected');audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'review card overflow',chars:body.length});return ack(id,'failed','plan too long to review safely (card limit) - rejected')}
+  if(pendingApprovals.size>=5){if(preOk)markSeen(id,'refused');return ack(id,'failed','too many pending approvals')}
+  if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
-  if(pre){
-   if(!markSeen(id,'pending',+task.exp)){audit({kind:'web_task',stage:'seen_persist_failed',url:url.slice(0,200)})} // no durable replay guard -> blocking card below
-   else{
-    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-     if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
-    timer.unref&&timer.unref();
-    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
-    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
-    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
-    return;
-   }
+  if(preOk){
+   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+    if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
+   timer.unref&&timer.unref();
+   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
+   audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
+   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   return;
   }
   if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
@@ -540,6 +544,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
 
  async function handle(m){
   if(!m||typeof m!=='object'||!m.id)return;
+  // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
+  // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
+  if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control')&&checkDup(m.id,m.kind,{}))return;
   const run=(async()=>{
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
