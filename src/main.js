@@ -324,8 +324,10 @@ function cleanCard(c){return {id:String(c.id||'').slice(0,80),title:String(c.tit
  buttons:(Array.isArray(c.buttons)?c.buttons:[]).slice(0,4).map(b=>({id:String(b&&b.id||'').slice(0,40),label:String(b&&b.label||'').slice(0,40),style:['primary','danger','plain'].includes(b&&b.style)?b.style:'plain'})),
  graph:c.graph&&['bar','line'].includes(c.graph.type)?{type:c.graph.type,series:(Array.isArray(c.graph.series)?c.graph.series:[]).slice(0,24).map(p=>({label:String(p&&p.label||'').slice(0,40),value:+p&&+p.value||0}))}:undefined,
  file:c.file&&typeof c.file==='object'?{name:String(c.file.name||'').slice(0,200),size:+c.file.size||0,mime:String(c.file.mime||'').slice(0,80),url:String(c.file.url||'').slice(0,600),path:String(c.file.path||'').slice(0,600)}:undefined,
+ expiresAt:+c.expiresAt||0,
  at:+c.at||+c.created_at||Date.now()}}
 function broadcastCard(c){const card=cleanCard(c);if(!card.id)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:card',card)}}
+function broadcastSettle(id,outcome){const p={id:String(id||'').slice(0,80),outcome:String(outcome||'').slice(0,20)};if(!p.id)return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:card-settle',p)}}
 ipcMain.handle('chat:card-action',async(e,p)=>{
  if(p&&String(p.card_id||'').startsWith('local-file-'))return filelink.handleCardAction(p);
  if(p&&String(p.card_id||'').startsWith('local-approve-')){const ag=require('./lib/agent');return ag.handleCardAction?ag.handleCardAction(p):{ok:false,reason:'expired'}}
@@ -369,7 +371,7 @@ ipcMain.handle('chat:read-mark',async(e,upto)=>{upto=Math.round(+upto||0);if(!up
  try{const r=await fetch(CHAT_URL+'/read',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,thread:callerInstance(e)||chatStream.thread,upto}),signal:AbortSignal.timeout(20000)});return {ok:r.ok}}catch{return {ok:false}}});
 ipcMain.on('chat:new',e=>{for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:new')}});
 ipcMain.on('chat:sent',(e,m)=>{if(!m||typeof m!=='object')return;for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed()&&w.webContents!==e.sender)w.webContents.send('chat:sent',m)}});
-ipcMain.on('chat:hover',(e,mode)=>{try{fs.appendFileSync(path.join(app.getPath('userData'),'agent-audit.log'),JSON.stringify({at:new Date().toISOString(),kind:'island_hover',mode:String(mode||'').slice(0,12)})+'\n')}catch{}}); // island hover audit (0.4.57 live hook proof)
+ipcMain.on('chat:hover',(e,mode)=>{try{const id=callerInstance(e);if(!id||id!==chatIslandInstance())return;const m=String(mode||'');if(!['mini','open','alert'].includes(m))return;fs.appendFileSync(path.join(app.getPath('userData'),'agent-audit.log'),JSON.stringify({at:new Date().toISOString(),kind:'island_hover',mode:m,instance:id})+'\n')}catch{}}); // island hover audit: only the real island window, validated modes (0.4.57 live hook proof)
 ipcMain.handle('chat:passthrough',(e,on)=>{const id=callerInstance(e);const ws=[];if(id&&wins[id])ws.push(wins[id]);for(const w of chatCompanions.values())ws.push(w);if(!ws.length)return {ok:false};ws.forEach(w=>{if(!w.isDestroyed())w.setIgnoreMouseEvents(!!on,{forward:true})});return {ok:true}});
 ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(text.length<5)return {ok:false,error:'כתוב לפחות כמה מילים (5 תווים ומעלה)'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};
  try{const r=await fetch(FEEDBACK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app:'glasswidgets',version:app.getVersion(),text,at:Date.now()}),signal:AbortSignal.timeout(15000)});
@@ -526,7 +528,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite,
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,broadcastSettle,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite,
    islandCtl:async action=>{
     if(!['open','close'].includes(String(action)))return {ok:false,error:'bad action'};
     const id=chatIslandInstance();if(!id)return {ok:false,error:'no island'};
