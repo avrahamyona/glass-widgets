@@ -36,7 +36,7 @@ const launch=async()=>{
  env={...process.env,XDG_CONFIG_HOME:cfg,GLASSWIDGETS_NO_PICKER:'1',PYTHONPATH:'/tmp/pystub',GLASSWIDGETS_CLOUD_PYTHON:'/usr/bin/python3',
   GLASSWIDGETS_CHAT_URL:'http://127.0.0.1:'+port+'/chat',GLASSWIDGETS_CHAT_STREAM_URL:'http://127.0.0.1:'+port+'/chat/stream',
   GLASSWIDGETS_CHAT_KEY:'chat-key',GLASSWIDGETS_AGENT_CMD_KEY:'cmd-key',GLASSWIDGETS_AGENT_CMD_URL:'http://127.0.0.1:'+port+'/cmd/stream',GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack',
-  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1'};
+  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1',GLASSWIDGETS_LOCAL_SERVER_PORT:'47731',GLASSWIDGETS_TUNNEL_ENABLED:'0'};
  global.cmdRes=null;
  let {a,A}=await launch();
  assert(CMDQS[0].includes('ui')&&CMDQS[0].includes('shot')&&CMDQS[0].includes('island'),'caps advertise ui+shot+island: '+CMDQS[0]);
@@ -298,6 +298,106 @@ const launch=async()=>{
  assert(aFlood.result.truncated===true&&aFlood.result.stdout_full===4000,'explicit truncation metadata: '+JSON.stringify({truncated:aFlood.result.truncated,full:aFlood.result.stdout_full}));
  logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert(!logA.includes('"kind":"ack","stage":"http_error","id":"ak4"')&&!logA.includes('"ack_unconfirmed","id":"ak4"'),'truncated result landed confirmed (no ack anomaly for ak4)');
+
+ // 15) tunnel intake: unsigned envelope -> 403 audited, signed envelope -> 202 -> executes+acks, replay -> 409
+ await a.close();global.cmdRes=null;
+ ({a,A}=await launch());
+ const TUN='http://127.0.0.1:47731/cmd';
+ const tunPost=async body=>{const r=await fetch(TUN,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':'cmd-key'},body:JSON.stringify(body)});let j=null;try{j=await r.json()}catch{};return{status:r.status,body:j}};
+ for(let i=0;i<50;i++){try{const h=await fetch('http://127.0.0.1:47731/health',{headers:{'X-GW-Key':'cmd-key'}});if(h.ok)break}catch{};await sleep(200)}
+ const noAuth=await fetch(TUN,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+ assert(noAuth.status===403,'tunnel /cmd without the key -> 403');
+ const un=await tunPost({id:'t1',kind:'find_files',data:{query:'__no_such__'}});
+ assert(un.status===403&&un.body.reason==='unsigned','unsigned envelope -> 403 unsigned: '+JSON.stringify(un));
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"server","stage":"unsigned_cmd","id":"t1"/.test(logA),'unsigned tunnel attempt audited');
+ const data1={query:'__no_such_file_xyz__',limit:3};
+ ts=Date.now();exp=EX();
+ const sig1=sign('t2','find_files',ts,exp,JSON.stringify(data1));
+ const ok1=await tunPost({id:'t2',kind:'find_files',ts,exp,sig:sig1,data:data1});
+ assert(ok1.status===202,'signed envelope -> 202: '+JSON.stringify(ok1));
+ const aT=await waitAck('t2','done');
+ assert(aT.result&&Array.isArray(aT.result.matches),'tunnel find_files executed and acked: '+JSON.stringify(aT.result).slice(0,120));
+ const dup=await tunPost({id:'t2',kind:'find_files',ts,exp,sig:sig1,data:data1});
+ assert(dup.status===409,'signed replay -> 409 duplicate');
+ ts=Date.now();exp=EX()-600000; // stale window: exp already in the past
+ const stale=await tunPost({id:'t3',kind:'find_files',ts,exp,sig:sign('t3','find_files',ts,exp,JSON.stringify({query:'x'})),data:{query:'x'}});
+ assert(stale.status===403,'expired envelope -> 403');
+ const badData=await tunPost({id:'t4',kind:'find_files',ts:Date.now(),exp:EX(),sig:sign('t4','find_files',Date.now(),EX(),'{"query":"other"}'),data:{query:'changed'}});
+ assert(badData.status===403,'signature over different payload -> 403 (envelope binds the data)');
+
+ // 15b) reserved fields inside signed data are rejected - signed data can never smuggle identity
+ ts=Date.now();exp=EX();
+ const dataR={query:'x',id:'t2',sig:'aa'};
+ const rsv=await tunPost({id:'t5',kind:'find_files',ts,exp,sig:sign('t5','find_files',ts,exp,JSON.stringify(dataR)),data:dataR});
+ assert(rsv.status===400&&rsv.body.reason==='reserved_field','reserved key in data -> 400: '+JSON.stringify(rsv));
+
+ // 15c) parked kind via tunnel: 202, ordinary blocking card (unsigned semantics downstream),
+ // the intake replay record does NOT eat the first command, and a signed replay -> 409
+ ts=Date.now();exp=EX();
+ const dataC={command:'echo tunnel-card-test'};
+ const sigC=sign('t6','run_command',ts,exp,JSON.stringify(dataC));
+ const okC=await tunPost({id:'t6',kind:'run_command',ts,exp,sig:sigC,data:dataC});
+ assert(okC.status===202,'signed run_command via tunnel -> 202');
+ const cardC=await card('echo tunnel-card-test');
+ assert(cardC.btns.some(b=>/אשר/.test(b)),'ordinary approval card parks (tunnel sig never skips the user): '+JSON.stringify(cardC.btns));
+ const dupC=await tunPost({id:'t6',kind:'run_command',ts,exp,sig:sigC,data:dataC});
+ assert(dupC.status===409,'signed replay of a parked kind -> 409 at intake, original card intact');
+ const cardC2=await card('echo tunnel-card-test');
+ assert(cardC2&&cardC2.cid===cardC.cid,'original parked card untouched by the replay');
+
+ // 15d) enroll_device: unsigned -> refused; worker-signed -> keypair generated ON the PC, pubkey acked
+ pushCmd({id:'e0',kind:'enroll_device'});
+ const aE0=await waitAck('e0','failed');
+ assert(/unsigned/.test(aE0.note||''),'unsigned enroll refused: '+aE0.note);
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e1',kind:'enroll_device',ts,exp,sig:sign('e1','enroll_device',ts,exp,'')});
+ const aE1=await waitAck('e1','done');
+ assert(aE1.result&&/^[0-9a-f]{16}$/.test(aE1.result.deviceId)&&aE1.result.pubkey,'enrolled: deviceId+pubkey acked');
+ assert(!JSON.stringify(aE1.result).includes('priv'),'PRIVATE KEY NEVER travels');
+ const devJ=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8'));
+ assert(devJ.pub===aE1.result.pubkey&&devJ.priv,'device.json persisted locally with the private key');
+ // health proof now live: server signs with the freshly enrolled key without a restart
+ const hE=await (await fetch('http://127.0.0.1:47731/health?nonce=abc12345',{headers:{'X-GW-Key':'cmd-key'}})).json();
+ assert(hE.deviceId===aE1.result.deviceId&&/^[0-9a-f]{128}$/.test(hE.sig||''),'health nonce signed by the enrolled device');
+ const pubK=crypto.createPublicKey({key:Buffer.from(devJ.pub,'base64'),format:'der',type:'spki'});
+ assert(crypto.verify(null,Buffer.from(hE.deviceId+'\nabc12345','utf8'),pubK,Buffer.from(hE.sig,'hex')),'sender-side verification of the health proof');
+
+ // 15e) stage 1 has NO rotation: re-enroll returns the SAME identity, a tampered 'rotate' field
+ // is IGNORED (it is not part of the signed payload and the code has no rotation path), and a
+ // signed enroll replayed after a full RESTART still returns the same identity (never new keys)
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e2',kind:'enroll_device',ts,exp,sig:sign('e2','enroll_device',ts,exp,'')});
+ const aE2=await waitAck('e2','done');
+ assert(aE2.result.deviceId===aE1.result.deviceId&&aE2.result.pubkey===aE1.result.pubkey,'re-enroll idempotent: same deviceId+pubkey, private never rewritten');
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e3',kind:'enroll_device',rotate:true,ts,exp,sig:sign('e3','enroll_device',ts,exp,'')}); // tampered: rotate injected, not signed for
+ const aE3=await waitAck('e3','done');
+ assert(aE3.result.deviceId===aE1.result.deviceId&&aE3.result.pubkey===aE1.result.pubkey,'tampered rotate:true IGNORED - identity unchanged (stage 1 has no rotation)');
+ await a.close();global.cmdRes=null;
+ ({a,A}=await launch()); // RESTART: the replay must not mint new keys
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e5',kind:'enroll_device',ts,exp,sig:sign('e5','enroll_device',ts,exp,'')});
+ const aE5=await waitAck('e5','done');
+ assert(aE5.result.deviceId===aE1.result.deviceId&&aE5.result.pubkey===aE1.result.pubkey,'enroll after restart returns the persisted identity');
+
+ // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
+ // envelope expired is refused - the command never runs
+ ts=Date.now();exp=Date.now()+1500; // live at intake, dead by approval time
+ const dataX={command:'echo SHOULD-NOT-RUN'};
+ const sigX=sign('t7','run_command',ts,exp,JSON.stringify(dataX));
+ const okX=await tunPost({id:'t7',kind:'run_command',ts,exp,sig:sigX,data:dataX});
+ assert(okX.status===202,'short-lived signed envelope accepted at intake: '+JSON.stringify(okX));
+ await card('SHOULD-NOT-RUN');
+ await sleep(2200); // transport authority now expired (card TTL is 4000 - still parked)
+ const stillThere=await A.evaluate(()=>[...document.querySelectorAll('#pillBody .card')].some(e=>e.textContent.includes('SHOULD-NOT-RUN')));
+ assert(stillThere,'card still parked at approval time (inside the 1500..4000ms window)');
+ await clickBtn('SHOULD-NOT-RUN','אשר');
+ const aX=await waitAck('t7','failed');
+ assert(/expired/.test(aX.note||''),'approval after transport expiry refused: '+aX.note);
+ assert(!ACK.find(x=>x.id==='t7'&&x.status==='done'),'expired-transport command NEVER executed');
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"stage":"transport_expired"/.test(logA),'transport expiry audited at execution time');
 
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
