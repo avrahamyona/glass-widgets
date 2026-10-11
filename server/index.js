@@ -10,6 +10,7 @@ const fs=require('fs'),path=require('path'),crypto=require('crypto'),os=require(
 const{startLocalServer}=require('../src/lib/localserver');
 const{createLedger,RESULT_TTL_MS}=require('../src/lib/ledger');
 const{OPS}=require('./lib/ops');
+const{RESERVED}=require('../src/lib/command-contract'); // shared reserved-field list
 
 const CONFIG=process.env.GW_SERVER_CONFIG||path.join(process.env.GW_SERVER_DATA||path.join(os.homedir(),'.glasswidgets-server'),'config.json');
 let cfg={}; // config.json is OPTIONAL: env-only provisioning must boot without any file
@@ -75,7 +76,7 @@ async function main(){
   onCommand:(m)=>{
    if(!Object.prototype.hasOwnProperty.call(OPS,String(m.kind)))return {accepted:false,status:400,reason:'unknown_kind'};
    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
-   for(const k of['id','kind','ts','exp','sig','device'])if(k in data)return {accepted:false,status:400,reason:'reserved_field'};
+   for(const k of RESERVED)if(k in data)return {accepted:false,status:400,reason:'reserved_field'};
    if(m.device!=null&&String(m.device)!==device.id){log('warn',{stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
    if(process.env.GW_SERVER_STRICT_ENVELOPES==='1'&&m.device==null)return {accepted:false,status:403,reason:'device_required'}; // opt-in strict: enrolled devices take v2 device-bound envelopes only (mirrors the agent's STRICT_ENVELOPES)
    if(!validEnvelope(m,JSON.stringify(data))){log('warn',{stage:'unsigned_cmd',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'unsigned'}}

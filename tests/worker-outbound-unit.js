@@ -35,5 +35,12 @@ const verify=(fields,sig)=>crypto.verify(null,Buffer.from(fields.join('\n'),'utf
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0005',kind:'find_files',device:DEV,data,ttlMs:99999999}),'over-cap ttl refused (no silent clamp)');
  const e4=await buildCommandEnvelope(env,{id:'cmd-0006',kind:'find_files',device:DEV,data,ttlMs:300000});
  assert(e4.exp-e4.ts===300000,'max ttl honored');
+ // round-3 refusals: the exact serialized object is checked, nothing slips past
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0007',kind:'find_files',device:DEV,data:{__tunnel:true}}),'__tunnel in data refused'); // ops repro: data{__tunnel:true} used to get signed then PC refused
+ const spoof={toJSON(){return {id:'spoof',query:'x'}}};
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0008',kind:'find_files',device:DEV,data:spoof}),'toJSON smuggling a reserved field refused'); // toJSON()=>{id:...} passes a precheck, fails on the SERIALIZED object
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0009',kind:'find_files',device:DEV,data:['a','b']}),'array data refused, no silent {}');
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0010',kind:'find_files',device:DEV,data:'just-a-string'}),'primitive data refused, no silent {}');
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0011',kind:'find_files',device:DEV,data:{device:'spoof'}}),'device in data refused (shared RESERVED union)');
  console.log('WORKER-OUTBOUND-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});

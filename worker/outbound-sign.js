@@ -32,7 +32,7 @@ async function signReadRequest(env, { device, method, path, query }) {
   if (!/^[0-9a-f]{16}$/.test(device)) throw new Error('bad device id');
   if (method !== 'GET') throw new Error('read signer signs GET only');
   if (!READ_PATHS.has(path)) throw new Error('read path not allowed');
-  if (Buffer.byteLength(query) > READ_QUERY_CAP) throw new Error('query too long');
+  if (new TextEncoder().encode(query).length > READ_QUERY_CAP) throw new Error('query too long'); // TextEncoder, not Buffer: the live Worker is ESM with NO node-compat flag
   const parts = query ? query.split('&') : [];
   if (new Set(parts.map(p => p.split('=')[0])).size !== parts.length) throw new Error('duplicate query param');
   if (path === '/task') {
@@ -51,18 +51,21 @@ async function signReadRequest(env, { device, method, path, query }) {
 async function buildCommandEnvelope(env, { id, kind, device, data, ttlMs }) {
   if (!signerId(String(id || ''))) throw new Error('bad command id'); // shared contract: subset of the ledger shape, no prototype names
   assertKind(kind); kind = String(kind); // closed allowlist - never length-only
-  assertNoReserved(data); // a payload may never smuggle envelope fields the PC would refuse
   assertTtl(ttlMs);
+  if (data == null) data = {};
+  if (typeof data !== 'object' || Array.isArray(data)) throw new Error('data must be a plain object'); // no silent array/primitive -> {}
+  let canonData; try { canonData = JSON.parse(JSON.stringify(data)); } catch { throw new Error('unserializable data'); }
+  assertNoReserved(canonData); // reserved check on the SERIALIZED object - a toJSON spoof ({id:'spoof'}) can never smuggle an envelope field past it
   const key = await signerKey(env);
   const ts = Date.now(), exp = ts + (ttlMs == null ? CMD_TTL_MS : ttlMs);
-  const payload = JSON.stringify(data && typeof data === 'object' && !Array.isArray(data) ? data : {});
+  const payload = JSON.stringify(canonData);
   if (device != null) { // v2: device-first canonical
     device = String(device); if (!/^[0-9a-f]{16}$/.test(device)) throw new Error('bad device id');
     const sig = await signCanon(key, [device, String(id), kind, String(ts), String(exp), payload]);
-    return { id: String(id), kind, device, ts, exp, sig, data: JSON.parse(payload) };
+    return { id: String(id), kind, device, ts, exp, sig, data: canonData };
   }
   const sig = await signCanon(key, [String(id), kind, String(ts), String(exp), payload]); // v1 legacy
-  return { id: String(id), kind, ts, exp, sig, data: JSON.parse(payload) };
+  return { id: String(id), kind, ts, exp, sig, data: canonData };
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { signReadRequest, buildCommandEnvelope, CMD_TTL_MS };

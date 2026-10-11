@@ -5,7 +5,7 @@ const SIGNER_ID_RE=/^[A-Za-z0-9_-]{8,64}$/; // intentional SUBSET of the ledger'
 const PROTO_IDS=['__proto__','constructor','prototype']; // no prototype tricks, ever
 // closed kind allowlist - the PC dispatch table (agent + standalone server skeleton)
 const KINDS=new Set(['clipboard_read','delete_file','enroll_device','find_files','get_file','index','island_control','media_control','open_path','read_file','run_command','screenshot','sys_info','ui_automation','update_app','web_task']);
-const RESERVED=['id','kind','ts','exp','sig','device']; // envelope fields a data payload may never carry
+const RESERVED=['id','kind','ts','exp','sig','device','__tunnel']; // envelope/transport fields a data payload may never carry (union of the agent and server guards)
 const strictId=id=>typeof id==='string'&&ID_RE.test(id)&&!PROTO_IDS.includes(id); // ledger shape
 const signerId=id=>typeof id==='string'&&SIGNER_ID_RE.test(id)&&!PROTO_IDS.includes(id); // worker-issued shape (subset)
 function assertKind(kind){if(!KINDS.has(String(kind||'')))throw new Error('kind not allowed')}

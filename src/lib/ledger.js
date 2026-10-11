@@ -27,9 +27,9 @@ const RESULT_TTL_MS=24*3600*1000; // terminal/unknown result retention
 const MAX_LIVE=200;       // live (in-window) dedup entries - past this, intake is 429'd
 const MAX_ENTRIES=2000;   // total entries incl. retained terminals (dead-window eviction allowed)
 const MAX_BYTES=256*1024,RESULT_CAP=2000,NOTE_CAP=200;
-const ID_RE=/^[\w-]{1,80}$/,STATUSES=new Set(['accepted','running','unknown','done','failed']);
+const STATUSES=new Set(['accepted','running','unknown','done','failed']);
 const FINAL=new Set(['unknown','done','failed']); // never rewritten
-const strictId=id=>typeof id==='string'&&ID_RE.test(id)&&!['__proto__','constructor','prototype'].includes(id); // no prototype tricks, ever
+const{ID_RE,strictId}=require('./command-contract'); // the shared strict contract - one source for ledger, verifiers and signer
 // truncate to a BYTE cap without splitting a multibyte char (a 200-char Hebrew note is ~400 bytes)
 function truncBytes(s,cap){s=String(s||'');if(Buffer.byteLength(s)<=cap)return s;
  return Buffer.from(s,'utf8').subarray(0,cap).toString('utf8').replace(/\uFFFD+$/,'')}

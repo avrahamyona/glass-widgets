@@ -959,7 +959,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(!KNOWN_KINDS.has(m.kind))return {accepted:false,status:400,reason:'unknown_kind'};
     const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
     // reserved fields: signed data must never smuggle identity/envelope fields past the intake
-    for(const k of ['id','kind','ts','exp','sig','__tunnel'])if(k in data){audit({kind:'server',stage:'reserved_field',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});return {accepted:false,status:400,reason:'reserved_field'}}
+    for(const k of RESERVED)if(k in data){audit({kind:'server',stage:'reserved_field',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});return {accepted:false,status:400,reason:'reserved_field'}}
     // v2 device binding: when the envelope carries a device field, the signature must cover it
     // AND it must name THIS enrolled device - the same worker-signed envelope can never be
     // collected at another device. v1 (no device field) stays accepted in stage A (single
@@ -1003,6 +1003,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const devDir=()=>path.join(app.getPath('userData'),'device');
  const devFile=()=>path.join(devDir(),'device.json');
  const{aclDump,currentSid,aclOwnerOnly,aclHarden}=require('./acl-win'); // the shared harden+verify module (Electron-free) - same code for agent and standalone server
+ const{RESERVED}=require('./command-contract'); // shared reserved-field list (superset of the old inline guard)
 
  let devKey=null,devId='',devPubB64='';
  function loadDevice(){
