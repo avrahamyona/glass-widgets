@@ -13,7 +13,8 @@ assert(l.get('cmd-1').status==='running','running recorded');
 assert(l.put('cmd-1',{status:'done',note:'ok',result:{n:1}})===true,'terminal');
 assert(l.get('cmd-1').terminal===true&&l.get('cmd-1').status==='done','done is final');
 assert(l.put('cmd-1',{status:'failed',note:'late'})===true&&l.get('cmd-1').status==='done','terminal never rewritten');
-assert(l.transition('cmd-1','running')===true&&l.get('cmd-1').status==='done','final never transitions');
+assert(l.transition('cmd-1','running')===false&&l.get('cmd-1').status==='done','final record: NO transition permit (an effect must never (re)start)');
+assert(l.transition('never-existed','running')===false,'missing record: no durable record = no permit');
 // result kept 24h regardless of the envelope exp
 {const r=l.get('cmd-1');assert(r.resultExp>now+23*3600*1000&&r.dedupExp===now+300000,'envelope exp bounds dedup only; result retention is 24h')}
 // durability + crash reconciliation: non-final records become UNKNOWN on reload, never retried
@@ -45,6 +46,20 @@ l.put('cmd-4',{status:'done',note:'big',result:{blob:'x'.repeat(RESULT_CAP*3)}})
  for(let i=0;i<60;i++)l3.put('b-'+i,{status:'done',note:'x'.repeat(150),result:{blob:'y'.repeat(1800)}});
  for(let i=0;i<MAX_LIVE;i++){const r=l3.get('b-'+i);assert(r!==null&&r.dedupExp===now+1000,'tombstone survives byte pressure: b-'+i)}
 }
+// note truncation is by BYTES (Hebrew): a 200-char Hebrew note must still pass the byte cap
+{const l4=createLedger(path.join(dir,'l4.json'));
+ const note='אב'.repeat(150); // 300 chars, 600 bytes
+ assert(l4.put('he-1',{status:'accepted',exp:now+300000})===true);
+ assert(l4.put('he-1',{status:'done',note,result:{ok:1}})===true,'Hebrew note does not fail the terminal write');
+ const r=l4.get('he-1');assert(Buffer.byteLength(r.note)<=200,'note byte-capped: '+Buffer.byteLength(r.note))}
+// byte-capacity: dead-window terminals are evicted by BYTES until the file fits; live tombstones stay
+{const l5=createLedger(path.join(dir,'l5.json'));
+ for(let i=0;i<1500;i++)l5.put('d-'+i,{status:'accepted',exp:now-1000}); // dead dedup window
+ for(let i=0;i<1500;i++)l5.put('d-'+i,{status:'done',note:'z'.repeat(190),result:{blob:'q'.repeat(900)}});
+ for(let i=0;i<10;i++)l5.put('live-'+i,{status:'accepted',exp:now+300000});
+ const p=path.join(dir,'l5.json');
+ assert(fs.statSync(p).size<=256*1024,'file within 256KB: '+fs.statSync(p).size);
+ for(let i=0;i<10;i++)assert(l5.get('live-'+i)!==null,'live tombstone survives byte eviction: live-'+i)}
 // strict cross-field schema on load
 const badRec=(o)=>{fs.writeFileSync(F,JSON.stringify({'cmd-x':{v:SCHEMA_V,status:'done',note:'',at:1,dedupExp:now+100000,resultExp:now+100000,terminal:true,...o}}));return createLedger(F).ok()};
 assert(badRec({})===true,'valid record loads');

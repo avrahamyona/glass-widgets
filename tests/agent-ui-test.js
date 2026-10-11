@@ -31,12 +31,14 @@ const launch=async()=>{
 (async()=>{
  await new Promise(r=>srv.listen(0,'127.0.0.1',r));port=srv.address().port;
  cfg=fs.mkdtempSync('/tmp/gw-ui-');fs.mkdirSync(cfg+'/glasswidgets',{recursive:true});
+ const fold=cfg+'/fold';fs.mkdirSync(fold,{recursive:true});
+ fs.writeFileSync(fold+'/alpha-report.txt','hello cross-transport');fs.writeFileSync(fold+'/victim-file.txt','delete me');
  fs.writeFileSync(cfg+'/glasswidgets/instances.json',JSON.stringify([{id:'chat',type:'chat'}]));
  fs.writeFileSync(cfg+'/glasswidgets/settings.json',JSON.stringify({instanceConfigs:{chat:{size:'island'}}}));
  env={...process.env,XDG_CONFIG_HOME:cfg,GLASSWIDGETS_NO_PICKER:'1',PYTHONPATH:'/tmp/pystub',GLASSWIDGETS_CLOUD_PYTHON:'/usr/bin/python3',
   GLASSWIDGETS_CHAT_URL:'http://127.0.0.1:'+port+'/chat',GLASSWIDGETS_CHAT_STREAM_URL:'http://127.0.0.1:'+port+'/chat/stream',
   GLASSWIDGETS_CHAT_KEY:'chat-key',GLASSWIDGETS_AGENT_CMD_KEY:'cmd-key',GLASSWIDGETS_AGENT_CMD_URL:'http://127.0.0.1:'+port+'/cmd/stream',GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack',
-  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1',GLASSWIDGETS_LOCAL_SERVER_PORT:'47731',GLASSWIDGETS_TUNNEL_ENABLED:'0'};
+  GLASSWIDGETS_AGENT_FOLDERS:fold,GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1',GLASSWIDGETS_LOCAL_SERVER_PORT:'47731',GLASSWIDGETS_TUNNEL_ENABLED:'0'};
  global.cmdRes=null;
  let {a,A}=await launch();
  assert(CMDQS[0].includes('ui')&&CMDQS[0].includes('shot')&&CMDQS[0].includes('island'),'caps advertise ui+shot+island: '+CMDQS[0]);
@@ -69,11 +71,13 @@ const launch=async()=>{
  const a3=await waitAck('u3','done');
  assert(a3.result.steps.length===2&&a3.result.steps[0].do==='move','auto-ran signed plan');
 
- // 3b) replay: same signed id again -> duplicate is audit-only, NO ack (a dup ack would clobber the real result)
+ // 3b) replay of a TERMINAL id: the cached result is re-acked (idempotent - identical content,
+ // NO second effect). An IN-FLIGHT replay stays audit-only (no ack race with the real result).
  ACK=ACK.filter(x=>x.id!=='u3');
  pushCmd({id:'u3',kind:'ui_automation',steps:steps3,ts,exp,sig:sign('u3','ui_automation',ts,exp,JSON.stringify(steps3))});
- await sleep(1500);
- assert(!ACK.some(x=>x.id==='u3'),'replay produces no ack: '+JSON.stringify(ACK.filter(x=>x.id==='u3')));
+ let a3b=null;for(let i=0;i<50;i++){a3b=ACK.find(x=>x.id==='u3');if(a3b)break;await sleep(200)}
+ assert(a3b&&a3b.status==='done'&&a3b.note===a3.note,'terminal replay re-acks the CACHED result: '+JSON.stringify(a3b));
+ assert(a3b.result.steps.length===2&&a3b.result.steps[0].x===500,'cached result identical - the effect did NOT re-run');
 
  // 4) bad sig -> blocking card, no auto-run
  ts=Date.now();exp=EX();
@@ -157,7 +161,7 @@ const launch=async()=>{
  assert(/renderer confirmed open/.test(ACK.find(x=>x.id==='i4').note||''),'done ack means renderer-confirmed state: '+ACK.find(x=>x.id==='i4').note);
  assert(await pillOpen(),'dup delivery: the real execution still ran');
  const log11=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
- assert(log11.includes('"stage":"duplicate"'),'audit records the duplicate delivery');
+ assert(log11.includes('"stage":"cross_transport_duplicate"'),'audit records the duplicate delivery (single-ledger stage)');
 
  // 11b) close ack wording: 'closed', not the raw action string
  assert(/renderer confirmed closed/.test(ACK.find(x=>x.id==='i2').note||''),'closed wording: '+ACK.find(x=>x.id==='i2').note);
@@ -421,6 +425,48 @@ const launch=async()=>{
  {const sr=signRead('/task','id=t2','otherdevice0000');
   const r=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
   assert(r.status===403,'read bound to a different device -> 403 (cross-device collection closed)')}
+
+ // 15h) v2 device-bound COMMAND envelopes: the signature covers device\nid\nkind\nts\nexp\npayload
+ // and the device must name THIS enrolled device (PC-side ready before tunnel-first multi-device)
+ const signDev=(dev,id,kind,ts0,exp0,payload)=>crypto.sign(null,Buffer.from([dev,id,kind,String(ts0),String(exp0),payload].join('\n'),'utf8'),PRIV).toString('hex');
+ {ts=Date.now();exp=EX();const dD={query:'__none__'};
+  const okD=await tunPost({id:'dv1',kind:'find_files',device:DEV_ID,ts,exp,sig:signDev(DEV_ID,'dv1','find_files',ts,exp,JSON.stringify(dD)),data:dD});
+  assert(okD.status===202,'v2 device-bound envelope accepted for the right device: '+okD.status);
+  await waitAck('dv1','done');
+  ts=Date.now();exp=EX();
+  const wrong=await tunPost({id:'dv2',kind:'find_files',device:'otherdevice0000',ts,exp,sig:signDev('otherdevice0000','dv2','find_files',ts,exp,JSON.stringify(dD)),data:dD});
+  assert(wrong.status===403,'envelope bound to ANOTHER device -> 403 (same worker key cannot collect at the wrong device)');
+  ts=Date.now();exp=EX();
+  const leg=await tunPost({id:'dv3',kind:'find_files',ts,exp,sig:sign('dv3','find_files',ts,exp,JSON.stringify(dD)),data:dD});
+  assert(leg.status===202,'v1 (no device field) still accepted in stage A single-device');
+  await waitAck('dv3','done')}
+
+ // 15i) ONE command-id ledger across BOTH transports: an id runs AT MOST ONCE no matter which
+ // channel it arrives on - SSE then tunnel, tunnel then SSE, incl. unsafe delete_file/get_file
+ {const dlDir=os.homedir()+'/Downloads';fs.mkdirSync(dlDir,{recursive:true});const victim=dlDir+'/victim-file.txt'; // delete_file is Downloads-gated
+  fs.writeFileSync(victim,'delete me');
+  pushCmd({id:'x-del',kind:'delete_file',path:victim}); // SSE first (unsafe)
+  const aDel=await waitAck('x-del','done');assert(!fs.existsSync(victim),'delete_file ran once via SSE');
+  fs.writeFileSync(victim,'bait'); // if ANY replay re-runs the effect, the bait would be deleted
+  ts=Date.now();exp=EX();const dX={path:victim};
+  const dupT=await tunPost({id:'x-del',kind:'delete_file',ts,exp,sig:sign('x-del','delete_file',ts,exp,JSON.stringify(dX)),data:dX});
+  assert(dupT.status===409,'tunnel replay of an SSE-executed id -> 409');
+  pushCmd({id:'x-del',kind:'delete_file',path:victim}); // SSE replay
+  let cached=null;for(let i=0;i<50;i++){const cs=ACK.filter(x=>x.id==='x-del'&&x.status==='done');if(cs.length>=2){cached=cs[1];break}await sleep(200)}
+  assert(cached,'SSE replay gets the CACHED terminal result re-acked');
+  assert(fs.existsSync(victim)&&fs.readFileSync(victim,'utf8')==='bait','the effect NEVER re-ran (bait file intact)');
+  fs.unlinkSync(victim)}
+ {ts=Date.now();exp=EX();const dF={path:fold+'/alpha-report.txt'}; // tunnel first (get_file -> upload)
+  const okF=await tunPost({id:'x-get',kind:'get_file',ts,exp,sig:sign('x-get','get_file',ts,exp,JSON.stringify(dF)),data:dF});
+  assert(okF.status===202,'get_file accepted via tunnel');await waitAck('x-get','done');
+  const upBefore=UPLOADS.length;
+  pushCmd({id:'x-get',kind:'get_file',path:fold+'/alpha-report.txt'}); // SSE replay of a tunnel id
+  let cached=null;for(let i=0;i<50;i++){const cs=ACK.filter(x=>x.id==='x-get'&&x.status==='done');if(cs.length>=2){cached=cs[1];break}await sleep(200)}
+  assert(cached&&UPLOADS.length===upBefore,'SSE replay of a tunnel id -> cached result, NO second upload')}
+ {pushCmd({id:'x-sys',kind:'sys_info',topic:'all'});await waitAck('x-sys','done'); // read-only kind, SSE then SSE
+  pushCmd({id:'x-sys',kind:'sys_info',topic:'all'});
+  let cached=null;for(let i=0;i<50;i++){const cs=ACK.filter(x=>x.id==='x-sys'&&x.status==='done');if(cs.length>=2){cached=cs[1];break}await sleep(200)}
+  assert(cached,'same-transport replay -> cached terminal result')}
  // read replay: the SAME signed read twice -> 403 (nonce replay-cached)
  {const sr=signRead('/task','id=t2',DEV_ID);
   const r1=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});

@@ -53,7 +53,8 @@ const launch=async()=>{
  await waitAck('s1','done');
  // 1b) replay in-session: the SAME signed message again -> duplicate refusal
  ACK=ACK.filter(x=>x.id!=='s1');pushCmd({id:'s1',kind:'run_command',command:'touch '+m1,ts,exp,sig:sign('s1','run_command',ts,exp,'touch '+m1)});
- await sleep(1500);assert(!ACK.some(x=>x.id==='s1'),'replay: audit-only, no ack (a dup ack would clobber the real result)');
+ let aR=null;for(let i=0;i<50;i++){aR=ACK.find(x=>x.id==='s1');if(aR)break;await sleep(200)}
+ assert(aR&&aR.status==='done'&&aR.note==='ok','terminal replay re-acks the CACHED result (idempotent, no re-run): '+JSON.stringify(aR));
  const seen=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/agent-seen.json','utf8'));
  assert(seen.s1&&seen.s1.decision==='executed'&&seen.s1.exp===exp,'seen store persisted decision+exp: '+JSON.stringify(seen.s1));
  // 1c) replay after RESTART: relaunch with the same profile, same signed message -> still duplicate
@@ -61,7 +62,8 @@ const launch=async()=>{
  ({a,A}=await launch());
  ACK=ACK.filter(x=>x.id!=='s1');
  pushCmd({id:'s1',kind:'run_command',command:'touch '+m1,ts,exp,sig:sign('s1','run_command',ts,exp,'touch '+m1)});
- await sleep(1500);assert(!ACK.some(x=>x.id==='s1'),'replay after restart: no ack, original result stands');
+ let aR2=null;for(let i=0;i<50;i++){aR2=ACK.find(x=>x.id==='s1');if(aR2)break;await sleep(200)}
+ assert(aR2&&aR2.status==='done'&&aR2.note==='ok','replay after restart: CACHED result re-acked from the durable ledger, no re-run: '+JSON.stringify(aR2));
  // 2) signed but cancelled in time: no execution, decision persisted
  ts=Date.now();exp=EX();pushCmd({id:'s2',kind:'run_command',command:'sleep 2 && touch '+m2,ts,exp,sig:sign('s2','run_command',ts,exp,'sleep 2 && touch '+m2)});
  c=await card('sleep 2 && touch '+m2);

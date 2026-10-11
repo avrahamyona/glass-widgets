@@ -21,10 +21,15 @@ The SSE fallback stays CONNECTED until E2E + ledger are proven; nothing in stage
 4. **202 != executed, and exp is NOT the result TTL.** An accepted command is a durable
    ledger record whose lifecycle is `accepted -> running -> done/failed`. The sender polls
    `GET /task?id=` until a TERMINAL record (`terminal:true`). Terminal records are final and
-   retained 24h REGARDLESS of the envelope exp (the envelope exp bounds dedup only). A 404
-   means "this id was NEVER accepted" - the effect cannot have run, so the sender may create
-   a NEW id and retry. A 404/timeout/disconnect after a 202 means the outcome is UNKNOWN:
-   poll until terminal; the sender NEVER auto-retries the same id.
+   retained 24h REGARDLESS of the envelope exp (the envelope exp bounds dedup only). A 404 is
+   NOT proof of non-execution: result retention expiry, dead-window eviction or ledger-file
+   loss can all return 404 for an effect that DID run, and a 202 response can itself be lost
+   before the sender sees it. Therefore: any POST whose response was not grounded (202 lost,
+   timeout, disconnect) is an UNKNOWN outcome - the sender polls /task until a TERMINAL
+   record; a 404 after an ungrounded send is still "unknown", never "safe to retry". Only a
+   grounded terminal record (or a rejected intake response: 400/403/409/429/503 BEFORE
+   acceptance) authorizes creating a NEW id, and an unsafe effect is never auto-retried
+   without a grounded human/owner decision.
 5. **Replay stability and crash honesty.** A replayed envelope gets a stable 409 at intake
    AND its record stays pollable - one transactional ledger, no crash window between replay
    guard and result store. Records that were `accepted`/`running` when the app last exited

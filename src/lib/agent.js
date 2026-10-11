@@ -119,7 +119,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // only verifies. Strict field formats, freshness AND an explicit expires_at (checked at receipt and
  // again before the auto-run timer fires). ANY anomaly -> ordinary blocking card (fail-closed).
  const SKEW_MS=60000; // small clock-skew allowance; ts further in the future is rejected
- function validPreapproval(m,payload){
+ function validPreapproval(m,payload,device){
   try{
    if(!signPub||!seenOk||!m||m.ts==null||m.exp==null)return false;
    const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false; // strict hex - never feed arbitrary bytes to verify
@@ -127,7 +127,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
    if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return false; // not from the future, not stale
    if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return false; // a sane, live validity window
-   return crypto.verify(null,Buffer.from([String(m.id),String(m.kind),String(ts),String(exp),payload].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
+   // v2 envelopes bind the TARGET DEVICE into the signature (device\nid\nkind...); v1 (stage A, single device) has no device field
+   const fields=device!=null?[String(device),String(m.id),String(m.kind),String(ts),String(exp),payload]:[String(m.id),String(m.kind),String(ts),String(exp),payload];
+   return crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
   }catch{return false}
  }
  // replay guard: signed command ids are remembered (persisted) with their decision until their exp,
@@ -159,7 +161,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return false;
  }
  function execPending(p){
-  try{if(ledger.has(p.cmdId))ledger.transition(p.cmdId,'running')}catch{} // the effect starts NOW
+  if(ledger.transition(p.cmdId,'running')!==true){audit({kind:p.kind||'run_command',stage:'running_gate_fail',id:String(p.cmdId||'').slice(0,40)});ack(p.cmdId,'failed','ledger transition failed - effect blocked');return} // no durable running mark -> NO effect
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
@@ -792,7 +794,31 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const PARKED_KINDS=new Set(['run_command','web_task','media_control','ui_automation','island_control']); // effect starts at approval (execPending), not at dispatch
  async function handle(m,intake){
   if(!m||typeof m!=='object'||!m.id)return;
-  if(!PARKED_KINDS.has(m.kind)){try{if(ledger.has(m.id))ledger.transition(m.id,'running')}catch{}} // immediate-execution kinds: the effect starts at dispatch
+  const id=String(m.id);
+  // ONE command-id ledger across BOTH transports (SSE + tunnel): the tunnel intake already
+  // committed 'accepted' (intake.committed); the SSE leg commits HERE. Whatever the channel, an
+  // id runs AT MOST ONCE: a live record blocks dispatch (incl. after a restart, where
+  // crashed records reload as unknown), a terminal record replays its CACHED result
+  // (idempotent re-ack, never re-executed), an unknown record is never auto-retried.
+  if(!(intake&&intake.committed)){
+   const prev=ledger.get(id);
+   if(prev){
+    audit({kind:String(m.kind||'').slice(0,40),stage:'cross_transport_duplicate',id:id.slice(0,40),status:prev.status});
+    if(prev.status==='done'||prev.status==='failed')ack(id,prev.status,prev.note||'cached result',prev.result||undefined); // cached terminal result - the effect NEVER re-runs
+    return;
+   }
+   if(!ledger.ok()){audit({kind:String(m.kind||'').slice(0,40),stage:'ledger_down',id:id.slice(0,40)});return ack(id,'failed','ledger unavailable')}
+   const putR=ledger.put(id,{status:'accepted',exp:+m.exp||Date.now()+RESULT_TTL_MS}); // SSE envelopes without exp dedup for the result-retention window
+   if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:id.slice(0,40)});return ack(id,'failed','ledger full - retry later')}
+   if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:id.slice(0,40)});return ack(id,'failed','ledger commit failed')}
+  }
+  // running gate: an immediate effect NEVER starts unless the running transition is durable.
+  // transition returns false on a down store / missing record / final record - no permit, no effect.
+  if(!PARKED_KINDS.has(m.kind)&&ledger.transition(id,'running')!==true){
+   audit({kind:'server',stage:'running_gate_fail',id:id.slice(0,40)});
+   try{ledger.put(id,{status:'failed',note:'running gate failed'})}catch{}
+   return ack(id,'failed','ledger transition failed - effect blocked');
+  }
   // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
   // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
   if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return;
@@ -845,7 +871,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // ONE transactional ledger per tunnel command (intake -> accepted -> terminal): replay guard AND
  // task-result polling from the same durable record, so no crash window can strand a command
  // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
- const{createLedger}=require('./ledger');
+ const{createLedger,RESULT_TTL_MS}=require('./ledger');
  const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
  // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
  // must never gate private results. Reads carry X-GW-Read-Ts/Nonce/Sig - Ed25519 with the worker
@@ -892,7 +918,16 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
     // reserved fields: signed data must never smuggle identity/envelope fields past the intake
     for(const k of ['id','kind','ts','exp','sig','__tunnel'])if(k in data){audit({kind:'server',stage:'reserved_field',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});return {accepted:false,status:400,reason:'reserved_field'}}
-    if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
+    // v2 device binding: when the envelope carries a device field, the signature must cover it
+    // AND it must name THIS enrolled device - the same worker-signed envelope can never be
+    // collected at another device. v1 (no device field) stays accepted in stage A (single
+    // device); the worker starts sending device-bound envelopes before tunnel-first multi-device.
+    if(m.device!=null){
+     if(!devId||String(m.device)!==String(devId)){audit({kind:'server',stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
+     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data),String(m.device))){
+      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
+      return {accepted:false,status:403,reason:'unsigned'}}
+    }else if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
      return {accepted:false,status:403,reason:'unsigned'}}
     if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
@@ -902,7 +937,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
     if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:String(m.id).slice(0,40)});return {accepted:false,status:429,reason:'ledger_full'}} // live window saturated - retry later; NO live tombstone was evicted
     if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:String(m.id).slice(0,40)});return {accepted:false,status:503,reason:'ledger'}}
-    handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
+    handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp,committed:true}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
     return {accepted:true};
    }});
   if(stop){if(r.started)r.stop();return} // stop() raced the listen() call - tear it back down
