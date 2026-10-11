@@ -124,10 +124,13 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  try{const j=JSON.parse(fs.readFileSync(seenFile(),'utf8'));for(const k of Object.keys(j))if(j[k]&&+j[k].exp>Date.now())seen[k]=j[k]}
  catch(e){if(!e||e.code!=='ENOENT')seenOk=false} // missing file is fine (first run); corrupt is not
  function markSeen(id,decision,exp){
-  const sid=String(id),prev=seen[sid];
-  seen[sid]={at:Date.now(),exp:+(exp||(prev&&prev.exp)||Date.now()),decision};
-  try{fs.writeFileSync(seenFile(),JSON.stringify(seen))}catch{seenOk=false}
-  return seenOk;
+  const sid=String(id),prev=seen[sid],now=Date.now();
+  for(const k of Object.keys(seen))if(!(+seen[k].exp>now))delete seen[k]; // in-session pruning, not just at startup
+  seen[sid]={at:now,exp:+(exp||(prev&&prev.exp)||now),decision};
+  try{fs.writeFileSync(seenFile(),JSON.stringify(seen))}catch{
+   if(prev)seen[sid]=prev;else delete seen[sid]; // roll back: a failed durable mark leaves no in-memory ghost
+   seenOk=false;return false}
+  return true;
  }
  // duplicate-id guard for BOTH branches: a reused id (signed or not) must never clobber a parked
  // approval entry - its original timer would otherwise execute the replacement without a click.
@@ -158,7 +161,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    if(!markSeen(id,'pending',+msg.exp)){audit({kind:'run_command',stage:'seen_persist_failed',command:cmd})} // no durable replay guard -> blocking card below
    else{
     const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-     if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
      markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
     timer.unref&&timer.unref();
     pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
@@ -395,7 +398,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
