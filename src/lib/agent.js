@@ -437,8 +437,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   // (the same route main.js uses for ble-scan.ps1). Re-staged when the packaged script changes.
   const d=path.join(app.getPath('temp'),'glasswidgets-ps');fs.mkdirSync(d,{recursive:true});
   const f=path.join(d,'ui-input.ps1'),src=fs.readFileSync(UI_PS1_SRC,'utf8');
-  try{if(fs.readFileSync(f,'utf8')===src+'')return f}catch{}
-  fs.writeFileSync(f,'﻿'+src); // BOM so Windows PowerShell reads it as UTF-8
+  try{if(fs.readFileSync(f,'utf8').replace(/^\ufeff/,'')===src)return f}catch{} // staged file carries a BOM - compare normalized
+  fs.writeFileSync(f,'\ufeff'+src); // BOM so Windows PowerShell reads it as UTF-8
   return f;
  }
  const UI_TASK_MS=+process.env.GLASSWIDGETS_UI_TASK_MS||120000; // hard whole-task deadline
@@ -469,11 +469,13 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    if(d==='wait')return (i+1)+'. המתנה '+Math.round(+st.ms)+'ms';
    const he={click:'לחיצה',dblclick:'לחיצה כפולה',rclick:'לחיצת ימני',move:'הזזת עכבר'}[d]||d;
    return (i+1)+'. '+he+' ב-(x:'+Math.round(+st.x)+', y:'+Math.round(+st.y)+')'}).join('\n')}
- function uiStep(d,x,y,timeoutMs){return new Promise(res=>{
+ function uiStep(d,x,y,deadline){return new Promise(res=>{
   if(UI_DRYRUN)return res({ok:true,dry:true});
   if(process.platform!=='win32')return res({ok:false,error:'ui input is supported on Windows only'});
   let ps1;try{ps1=uiPs1File()}catch(e){audit({kind:'ui_automation',stage:'failed',error:'ps1 staging failed'});return res({ok:false,error:'ps1 staging failed'})}
-  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',ps1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:Math.max(1,Math.floor(timeoutMs)),windowsHide:true},
+  const remain=deadline-Date.now(); // staging is synchronous - recompute AFTER it, right before launch
+  if(remain<=0)return res({ok:false,error:'task deadline expired during staging',deadline:true});
+  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',ps1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:Math.max(1,Math.floor(Math.min(10000,remain))),windowsHide:true},
    (e,so,se)=>res(e?{ok:false,error:String(se||so||e.message||e).replace(/\s+/g,' ').trim().slice(0,150)}:{ok:true}));
  })}
  async function execUi(id,steps){
@@ -492,9 +494,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    const x=Math.round(+st.x),y=Math.round(+st.y);
    if(!uiPointOk(x,y)){out.steps.push({do:d,x,y,ok:false,error:'point no longer inside a display'});
     audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,ok:false,error:'pre-exec revalidation failed'});break}
-   remain=deadline-Date.now(); // recomputed AFTER revalidation, right before launch
+   remain=deadline-Date.now(); // recomputed AFTER revalidation
    if(remain<=0){blow(i);break}
-   const r=await uiStep(d,x,y,Math.min(10000,remain)); // the subprocess never outlives the task budget - exact remaining, no floor
+   const r=await uiStep(d,x,y,deadline); // the subprocess never outlives the task budget - exact remaining, rechecked after staging
+   if(r.deadline){blow(i);break} // the budget expired inside staging - no injection happened
    if(Date.now()>deadline){out.steps.push({do:d,x,y,ok:!!r.ok,injected:!!r.ok,late:true});blow(i);break} // completed past the deadline: not a success
    out.steps.push({do:d,x,y,ok:r.ok,injected:!!r.ok,...(r.error?{error:r.error}:{}),...(r.dry?{dry:true}:{})});
    audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,injected:!!r.ok,error:r.error});
