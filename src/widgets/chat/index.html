@@ -131,7 +131,7 @@ function incoming(m){if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
  save();render(log);if(island&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
 function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return;
- H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,file:c.file&&typeof c.file==='object'?{name:String(c.file.name||''),size:+c.file.size||0,mime:String(c.file.mime||''),url:String(c.file.url||''),path:String(c.file.path||'')}:undefined,at:+c.at||Date.now(),acted:false,actedButton:''});
+ H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,expiresAt:+c.expiresAt||0,file:c.file&&typeof c.file==='object'?{name:String(c.file.name||''),size:+c.file.size||0,mime:String(c.file.mime||''),url:String(c.file.url||''),path:String(c.file.path||'')}:undefined,at:+c.at||Date.now(),acted:false,actedButton:'',settled:''});
  save();render(log);
  if(!island)return;
  if(pillMode==='open'){render(pillBodyLog());chime();if(document.hasFocus()){markRead()}else{setUnread(true)}focusComposer();return}
@@ -184,7 +184,7 @@ function graphSvg(g){const w=210,h=64,pad=6,vals=g.series.map(p=>+p.value||0),ma
   const pl=document.createElementNS(ns,'polyline');pl.setAttribute('points',pts.map(p=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' '));pl.setAttribute('fill','none');pl.setAttribute('stroke','#0a84ff');pl.setAttribute('stroke-width','2');pl.setAttribute('stroke-linejoin','round');svg.append(pl);
   for(const p of pts){const c=document.createElementNS(ns,'circle');c.setAttribute('cx',p[0]);c.setAttribute('cy',p[1]);c.setAttribute('r','2.4');c.setAttribute('fill','#0a84ff');svg.append(c)}}
  return svg}
-function cardEl(c){const d=document.createElement('div');d.className='card nd'+(c.busy?' busy':'')+(c.acted?' acted':'');d.dir='auto';d.dataset.cid=c.id;
+function cardEl(c){const d=document.createElement('div');d.className='card nd'+(c.busy?' busy':'')+(c.acted||c.settled?' acted':'');d.dir='auto';d.dataset.cid=c.id;
  const t=document.createElement('div');t.className='ct';t.textContent=c.title;d.append(t);
  if(c.body){const b=document.createElement('div');b.className='cb';b.innerHTML=linkify(esc(c.body));wireLinks(b);d.append(b)}
  if(c.graph&&c.graph.series&&c.graph.series.length)d.append(graphSvg(c.graph));
@@ -213,13 +213,22 @@ function fileBox(c){const f=c.file,box=document.createElement('div');box.classNa
  row.append(mk('פתח','bp',()=>api.fileOpen(f)),mk('שמור','bl',()=>api.fileSave(f)));
  box.append(ic,mid,row);
  return box}
-async function cardClick(c,b,el){if(c.acted||c.busy)return;c.busy=true;c.busyButton=b.id;
+async function cardClick(c,b,el){if(c.acted||c.busy||c.settled)return;c.busy=true;c.busyButton=b.id;
  const fresh=cardEl(c);el.replaceWith(fresh);
  let r={ok:false};try{r=await api.chatCardAction({card_id:c.id,button_id:b.id,label:b.label})}catch{}
  c.busy=false;c.busyButton='';
  if(r.ok||r.reason==='already_acted'||r.reason==='expired'){c.acted=true;c.actedButton=b.id;save()}
- if(document.contains(fresh))fresh.replaceWith(cardEl(c));else{render(log);if(island&&pillMode==='open')render(pillBodyLog())}}
-function render(into){into.innerHTML='';for(const it of timeline())into.append(it.m?bubble(it.m):cardEl(it.c));into.scrollTop=into.scrollHeight;updatePillSt()}
+ render(log);if(island&&pillMode==='open')render(pillBodyLog())}
+let settleScanT=0;
+function approvalSettled(c){return !!(c.settled||c.acted||(c.expiresAt&&Date.now()>c.expiresAt+5000))}
+function settleExpiredCards(){let dirty=false;for(const c of (H.cards||[])){if(!String(c.id).startsWith('local-approve-')||c.settled||c.acted)continue;if(c.expiresAt&&Date.now()>c.expiresAt+5000){c.settled='expired';dirty=true}}if(dirty)save();return dirty} // missed settle events: persist the expired state BEFORE any view paints
+function refreshViews(){render(log);if(island&&pillMode==='open')render(pillBodyLog())}
+function scheduleSettleScan(){clearTimeout(settleScanT);const nx=(H.cards||[]).filter(c=>String(c.id).startsWith('local-approve-')&&!c.settled&&!c.acted&&c.expiresAt&&Date.now()<=c.expiresAt+5000).map(c=>c.expiresAt+5100-Date.now()).filter(ms=>ms>0).sort((a,b)=>a-b)[0];if(nx)settleScanT=setTimeout(()=>{if(settleExpiredCards())refreshViews();scheduleSettleScan()},Math.min(nx,600000))} // runs regardless of panel state, refreshes BOTH mounted views
+function render(into){const pillView=into.id==='pillLog';settleExpiredCards();
+ const keepTop=into.scrollTop,nearBottom=into.scrollHeight-into.clientHeight-keepTop<40;into.innerHTML='';
+ for(const it of timeline()){if(pillView&&it.c&&String(it.c.id).startsWith('local-approve-')&&approvalSettled(it.c))continue;into.append(it.m?bubble(it.m):cardEl(it.c))}
+ into.scrollTop=nearBottom?into.scrollHeight:Math.min(keepTop,into.scrollHeight);updatePillSt();
+ scheduleSettleScan()} // settle first, then paint: expired cards show dead buttons in every view; the log keeps full history
 async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
@@ -291,15 +300,16 @@ if(window.api&&api.pillCmd)api.pillCmd(a=>{if(a==='open'&&pillMode!=='open')open
  if(api.onChatRead)api.onChatRead(u=>applyRead(u));
  pill.addEventListener('mouseleave',()=>{if(pillMode!=='open')api.chatPassthrough(true)});
  document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode!=='open')api.chatPassthrough(true)});
- pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
+ pill.addEventListener('mouseenter',()=>{api.chatPassthrough(false);if(window.api&&api.pillHover)api.pillHover(pillMode)}); // hover audit: proves (with fire-time mode) which delivery path reached the renderer
  document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
-(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];scheduleSettleScan();readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  if(api.onChatMsg)api.onChatMsg(incoming);
  if(api.onChatCard)api.onChatCard(incomingCard);
+if(window.api&&api.onCardSettle)api.onCardSettle(p=>{const c=(H.cards||[]).find(x=>x.id===String(p&&p.id||''));if(!c)return;c.settled=String(p&&p.outcome||'settled').slice(0,20);save();render(log);if(island&&pillMode==='open')render(pillBodyLog())});
  window.__msg=incoming;
  render(island?pillBodyLog():log);shotInit();if(api.chatStream)api.chatStream(H.lastReceived||0)})();
 gearBtn.onclick=e=>{e.stopPropagation();api.serverSettingsOpen()};

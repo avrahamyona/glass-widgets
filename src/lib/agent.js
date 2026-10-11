@@ -11,7 +11,10 @@ const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*10
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
 const TEXT_EXT=new Set(['.txt','.md','.csv','.json','.log','.xml','.html','.htm','.js','.ts','.py','.yaml','.yml','.ini','.rtf']);
 
-function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCtl}){
+function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,mediaCmd,islandCtl}){
+ // lifecycle truth for approval cards: every terminal state is pushed to renderers so panels
+ // settle on the EVENT, not on age guesses. outcome in: approved,denied,cancelled,executed,expired
+ const settleCard=(cardId,outcome)=>{try{if(broadcastSettle)broadcastSettle(String(cardId||''),String(outcome||''))}catch{}};
  const cfg={...(rd('agent.json',{})||{})};
  const base=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
  const cmdUrl=process.env.GLASSWIDGETS_AGENT_CMD_URL||cfg.cmdUrl||base.replace(/\/chat$/,'/cmd/stream');
@@ -163,22 +166,22 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
    if(!markSeen(id,'pending',+msg.exp)){audit({kind:'run_command',stage:'seen_persist_failed',command:cmd})} // no durable replay guard -> blocking card below
    else{
     const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-     markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
+     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+     markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
     timer.unref&&timer.unref();
     pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
     audit({kind:'run_command',stage:'preapprove_card',command:cmd});
-    broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+    broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',expiresAt:+msg.exp,body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
     return;
    }
   }
   if(msg&&msg.sig)audit({kind:'run_command',stage:'bad_sig',command:cmd});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-   audit({kind:'run_command',stage:'expired',command:p.command});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+   audit({kind:'run_command',stage:'expired',command:p.command});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer});
   audit({kind:'run_command',stage:'requested',command:cmd});
-  broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
  async function handleCardAction(p){
   const cardId=String(p&&p.card_id||''),pend=pendingApprovals.get(cardId);
@@ -186,9 +189,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   pendingApprovals.delete(cardId);clearTimeout(pend.timer);
   if(p.button_id==='approve'){
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
-   execPending(pend);return {ok:true}}
+   settleCard(cardId,'approved');execPending(pend);return {ok:true}}
   if(pend.pre)markSeen(pend.cmdId,'cancelled');
   audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action});
+  settleCard(cardId,pend.pre?'cancelled':'denied');
   ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':'denied - המשתמש דחה מהאי');return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
 
@@ -211,11 +215,11 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-   audit({kind:'media_control',stage:'expired',action:p.action});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+   audit({kind:'media_control',stage:'expired',action:p.action});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer});
   audit({kind:'media_control',stage:'requested',action:a});
-  broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
  // clipboard_read: read-only - reports the PC clipboard text back to its owner (capped), no card.
@@ -400,21 +404,21 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-    markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
+    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
-   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+task.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-   audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+   audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
-  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
 
@@ -527,21 +531,21 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-    markSeen(p.cmdId,'executed');audit({kind:'ui_automation',stage:'preapproved',steps:p.task.steps.length});execPending(p)},AUTO_RUN_MS);
+    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:'ui_automation',stage:'preapproved',steps:p.task.steps.length});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
    pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:+m.exp});
    audit({kind:'ui_automation',stage:'preapprove_card',steps:steps.length});
-   broadcastCard({id:cardId,title:'⚡ מבצע לחיצות שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   broadcastCard({id:cardId,title:'⚡ מבצע לחיצות שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(m.sig)audit({kind:'ui_automation',stage:'bad_sig'});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-   audit({kind:'ui_automation',stage:'expired'});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+   audit({kind:'ui_automation',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer});
   audit({kind:'ui_automation',stage:'requested',steps:steps.length});
-  broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
  // island_control: open/close the chat island pill directly (no screen clicks needed - the pill
  // is click-through when closed, so OS-level injection can't reach it). Card/signed gated like ui_automation.
@@ -551,7 +555,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   if(!islandCtl){audit({kind:'island_control',stage:'failed',error:'no island bridge in this build'});return ack(id,'failed','island_control unsupported in this build')}
   let r;try{r=await islandCtl(action)}catch(e){r={ok:false,error:String(e&&e.message||e)}}
   if(r&&r.ok)audit({kind:'island_control',stage:'executed',action});else audit({kind:'island_control',stage:'failed',action,error:(r&&r.error)||'unknown'});
-  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+action+')':String((r&&r.error)||'unknown'));
+  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+(action==='close'?'closed':action)+')':String((r&&r.error)||'unknown'));
  }
  function islandControl(id,m){
   const action=String(m.action||'').toLowerCase();
@@ -568,21 +572,21 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
-    markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});execPending(p)},AUTO_RUN_MS);
+    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
    pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:+m.exp});
    audit({kind:'island_control',stage:'preapprove_card',action});
-   broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(m.sig)audit({kind:'island_control',stage:'bad_sig'});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-   audit({kind:'island_control',stage:'expired'});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+   audit({kind:'island_control',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer});
   audit({kind:'island_control',stage:'requested',action});
-  broadcastCard({id:cardId,title:'🏝️ אישור פעולה על האי',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'🏝️ אישור פעולה על האי',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
  // screenshot: read-only full-screen capture of the PRIMARY display at its physical pixel size,
