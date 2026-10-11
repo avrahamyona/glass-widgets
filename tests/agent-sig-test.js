@@ -165,6 +165,15 @@ const launch=async()=>{
  assert(rI.status===200&&rI.body.fingerprint===fpE,'enrolled /info exposes the LOCAL fingerprint: '+JSON.stringify(rI.body));
  const auditTail=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert(auditTail.includes('"stage":"enrolled"')&&auditTail.includes('"fingerprint":"'+fpE+'"'),'enroll audit carries the fingerprint');
+ // malformed challenge parity: nested (SSE) and direct (local-server intake) BOTH refuse loudly
+ ts=Date.now();exp=EX();pushCmd({id:'enrBad1',kind:'enroll_device',data:{challenge:123},ts,exp,sig:sign('enrBad1','enroll_device',ts,exp,JSON.stringify({challenge:123}))});
+ assert((await waitAck('enrBad1','failed')).note==='bad challenge','nested malformed challenge refused (bad challenge)');
+ ts=Date.now();exp=EX();const badPay=JSON.stringify({challenge:null});
+ const dEnv={id:'enrBad2',kind:'enroll_device',data:{challenge:null},ts,exp,sig:sign('enrBad2','enroll_device',ts,exp,badPay)};
+ const dRes=await fetch('http://127.0.0.1:47732/cmd',{method:'POST',headers:{'content-type':'application/json','X-GW-Key':'cmd-key'},body:JSON.stringify(dEnv)});
+ assert(dRes.status===202,'direct malformed enroll accepted for processing');
+ assert((await waitAck('enrBad2','failed')).note==='bad challenge','direct-intake malformed challenge refused with the SAME explicit reason (no silent drop)');
+
  // re-enroll (already enrolled): idempotent, fresh pending window for the NEW command id
  ts=Date.now();exp=EX();pushCmd({id:'enr2',kind:'enroll_device',data:{challenge:'re'+CH},ts,exp,sig:sign('enr2','enroll_device',ts,exp,JSON.stringify({challenge:'re'+CH}))});
  const aE2=await waitAck('enr2','done');
@@ -197,7 +206,7 @@ const launch=async()=>{
  const SIGN_PRIV_B64=PRIV.export({format:'der',type:'pkcs8'}).toString('base64');
  // the pairing approval binds to the PC-LOCAL fingerprint source (the device.json on THIS machine) - never to the remote answer alone
  const devFpLocal=fpFn(JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8')).pub);
- const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:async(id,r)=>{m.set(id,r);return true}}}; // durable per-sender outbox (survives within the run)
+ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:async(id,r)=>{m.set(id,r);return true}}}; // in-memory outbox (per-sender, within the run only - durability is covered by fileBox below)
  const mkS=()=>createSenderClient({deviceUrl:'http://127.0.0.1:47732',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50});
  const orchLive=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint,episode,challenge})=>fingerprint===devFpLocal&&!!episode&&!!challenge});
  const rO=await orchLive.run();
@@ -206,6 +215,11 @@ const launch=async()=>{
  const orchNo=createEnrollOrchestrator({sender:mkS(),approvePairing:async()=>false});
  const rNo=await orchNo.run();
  assert(rNo.ok===false&&rNo.stage==='pairing'&&fdb.devices.size===1,'declined pairing writes nothing in the REAL flow');
+ const wrongK=crypto.generateKeyPairSync('ed25519');
+ const wrongFp=fpFn(wrongK.publicKey.export({format:'der',type:'spki'}).toString('base64'));
+ const orchWrongK=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint})=>fingerprint===wrongFp}); // bound to a DIFFERENT (valid but wrong) key
+ const rWK=await orchWrongK.run();
+ assert(rWK.ok===false&&rWK.stage==='pairing'&&fdb.devices.size===1,'approval bound to a wrong-but-valid key refuses THIS pc in the REAL flow, nothing written');
  // independent X-GW-Device-Sig verification on a live /task response (not via the sender client)
  const rts=Date.now(),rnonce='n'+Math.random().toString(36).slice(2,10);
  const rsig=crypto.sign(null,Buffer.from(['GET','/task','id=enr2',String(rts),rnonce,devIdE].join('\n'),'utf8'),PRIV).toString('hex');
@@ -215,12 +229,30 @@ const launch=async()=>{
  assert(dDev===devIdE&&/^[0-9a-f]{128}$/.test(String(dSig||'')),'device-signed response headers present');
  const bh=crypto.createHash('sha256').update(rawBody,'utf8').digest('hex');
  assert(crypto.verify(null,Buffer.from([devIdE,'GET','/task','id=enr2',String(rts),rnonce,String(rH.status),bh].join('\n'),'utf8'),crypto.createPublicKey({key:Buffer.from(pubE,'base64'),format:'der',type:'spki'}),Buffer.from(dSig,'hex')),'X-GW-Device-Sig verifies INDEPENDENTLY against the enrolled pubkey');
- // unknown/same-id reconciliation: dead endpoint -> unknown with the SAME id, exact-envelope retry
- const sDead=createSenderClient({deviceUrl:'http://127.0.0.1:9',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50});
- const u1=await sDead.sendCommand({kind:'enroll_device',data:{challenge:'dead-'+Date.now().toString(36)}});
- assert(u1.status==='unknown'&&u1.id,'dead endpoint -> unknown (reconcile manually), id present: '+JSON.stringify(u1));
- const u2=await sDead.send(await sDead.prepare({kind:'enroll_device',data:{challenge:'dead-'+Date.now().toString(36)}}));
- assert(u2.status==='unknown','network failure never claims a result');
+ // unknown/same-id retry reconciliation: ONE stored record, resent after a sender restart from a
+ // DURABLE (file) outbox - byte-identical on the wire; lost-POST-after-accept reconciles as
+ // duplicate; 404 -> unknown; expiry never hits the wire.
+ const outDir=fs.mkdtempSync('/tmp/gw-outbox-');
+ const fileBox=()=>({get:async id=>{try{return JSON.parse(fs.readFileSync(path.join(outDir,id+'.json'),'utf8'))}catch{return null}},put:async(id,r)=>{fs.writeFileSync(path.join(outDir,id+'.json'),JSON.stringify(r));return true}}); // durable: survives a sender process restart
+ const wireSeen=[];
+ const rec=http.createServer((q,r)=>{if(q.url==='/cmd'&&q.method==='POST'){let b='';q.on('data',c=>b+=c);q.on('end',()=>{wireSeen.push(b);if(wireSeen.length===1){q.socket.destroy()}else{r.writeHead(409,{'content-type':'application/json'});r.end('{"ok":false,"reason":"duplicate","outcome":{"status":"accepted"}}')}})}else{r.writeHead(404);r.end()}}); // first POST: accepted then the response is LOST (socket dies); retry: 409 cached
+ await new Promise(r=>rec.listen(0,'127.0.0.1',r));
+ const mkRec=()=>createSenderClient({deviceUrl:'http://127.0.0.1:'+rec.address().port,controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:fileBox(),pollIntervalMs:50});
+ const sA=mkRec();
+ const p1=await sA.prepare({kind:'enroll_device',data:{challenge:'wire-'+Date.now().toString(36)}});
+ const u1=await sA.send(p1);
+ assert(u1.status==='unknown'&&u1.id,'lost POST after acceptance -> unknown (reconcile manually), never a claim: '+JSON.stringify(u1));
+ const sB=mkRec(); // sender RESTART over the SAME durable outbox
+ const u2=await sB.send({id:u1.id});
+ assert(u2.id===u1.id,'retry keeps the SAME id');
+ assert(wireSeen.length===2&&wireSeen[0]===wireSeen[1],'retry sends BYTE-IDENTICAL envelopes (the stored one)');
+ assert(u2.status==='duplicate','accepted-then-lost reconciles as duplicate (cached outcome), never a re-run');
+ const n1=await sB.pollTask('no-such-task-1');
+ assert(n1.status==='unknown'&&n1.reason==='not_found'&&n1.id==='no-such-task-1','404 -> unknown not_found, same id');
+ const pX=await sB.prepare({kind:'enroll_device',data:{challenge:'exp-'+Date.now().toString(36)},ttlMs:1000});
+ await sleep(1100);
+ assert((await sB.send(pX)).status==='expired','an expired envelope never hits the wire');
+ rec.close();
 
  // 9) replay guard cannot persist -> signed command gets the BLOCKING card with blocking copy, never auto-runs
  await a.close();

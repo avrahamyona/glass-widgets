@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 5 (BOM + boot שלישי בתוך הסשן, ללא קבצי redirect)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 6 (SHA נעוץ, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -36,10 +36,11 @@ try{
   $nv=(node -v 2>$null); if(-not $nv){throw 'node not found in PATH'}
   Say ("PASS 1: node found ({0})" -f $nv)
   $zip=Join-Path $base 'gw.zip'
-  Invoke-WebRequest -Uri 'https://codeload.github.com/avrahamyona/glass-widgets/zip/refs/heads/wip-0465' -OutFile $zip -UseBasicParsing
+  $pinnedSha='b78d70e67271be498b712103fffd5cda3730faae' # the EXACT reviewed snapshot - never a moving branch
+  Invoke-WebRequest -Uri ('https://codeload.github.com/avrahamyona/glass-widgets/zip/'+$pinnedSha) -OutFile $zip -UseBasicParsing
   Expand-Archive -Path $zip -DestinationPath $code -Force
   $root=Get-ChildItem $code -Directory | Select-Object -First 1
-  Say 'PASS 2: code downloaded and extracted'
+  Say ('PASS 2: code downloaded and extracted (pinned '+$pinnedSha.Substring(0,7)+')')
   $pubFile=Join-Path $base 'sender-pub.txt'
   node -e "const c=require('crypto');const{publicKey}=c.generateKeyPairSync('ed25519');require('fs').writeFileSync(process.argv[1],publicKey.export({format:'der',type:'spki'}).toString('base64'))" $pubFile
   if($LASTEXITCODE -ne 0){throw 'sender keypair generation failed'}
@@ -64,32 +65,55 @@ try{
   if(-not (Test-Path $devFile)){throw 'device.json missing'}
   $dev1=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop).id
   Say ("PASS 3: first boot up + identity minted (device {0})" -f $dev1)
-  $acl=Get-Acl $devFile
-  if($acl.AreAccessRulesProtected -and @($acl.Access).Count -eq 1 -and $acl.Access[0].IdentityReference.Value.EndsWith($env:USERNAME)){Say 'PASS 4: device identity ACL is owner-only'}
-  else{throw ('ACL unexpected: protected='+$acl.AreAccessRulesProtected+' rules='+@($acl.Access).Count)}
+  $mySid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  function Assert-OwnerOnlyAcl($p,$isDir){
+    $a=Get-Acl $p
+    $rules=@($a.Access)
+    if(-not $a.AreAccessRulesProtected){throw ('ACL not protected (inheritance on): '+$p)}
+    if($rules.Count -ne 1){throw ('ACL rule count != 1 on '+$p+': '+$rules.Count)}
+    $ruleSid=$rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    if($ruleSid -ne $mySid){throw ('ACL rule SID is not the current user on '+$p+': '+$ruleSid)}
+    if($rules[0].FileSystemRights -notmatch 'FullControl'){throw ('ACL rights not FullControl on '+$p+': '+$rules[0].FileSystemRights)}
+    if($rules[0].AccessControlType -ne 'Allow'){throw ('ACL rule is not Allow on '+$p)}
+  }
+  Assert-OwnerOnlyAcl $devFile $false
+  Assert-OwnerOnlyAcl $data $true
+  Say 'PASS 4: device identity ACL is owner-only (exact SID, file AND directory)'
   $code403=$false
   try{Invoke-WebRequest -Uri 'http://127.0.0.1:47711/health' -UseBasicParsing | Out-Null}
   catch{ if($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 403){$code403=$true} }
   $r=Invoke-WebRequest -Uri 'http://127.0.0.1:47711/health?nonce=boottest1234' -Headers @{'X-GW-Key'='boot-test-token-123'} -UseBasicParsing
   $h=$r.Content | ConvertFrom-Json -EA Stop
-  if($code403 -and $h.ok -eq $true -and $h.deviceId -eq $dev1 -and $h.sig){Say 'PASS 5: /health without key -> 403, with key -> 200'}
-  else{throw 'health gate wrong'}
+  if(-not ($code403 -and $h.ok -eq $true -and $h.deviceId -eq $dev1 -and $h.sig)){throw 'health gate wrong'}
+  # verify the health signature CRYPTOGRAPHICALLY against the minted pubkey (deviceId+LF+nonce)
+  $verifyFile=Join-Path $base 'verify-sig.js'
+  Set-Content -Path $verifyFile -Encoding ASCII -Value "const c=require('crypto');const[pub,dev,nonce,sig]=process.argv.slice(2);const ok=c.verify(null,Buffer.from(dev+'
+'+nonce,'utf8'),c.createPublicKey({key:Buffer.from(pub,'base64'),format:'der',type:'spki'}),Buffer.from(sig,'hex'));process.exit(ok?0:1)"
+  $devJson=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop)
+  & node $verifyFile $devJson.pub $dev1 'boottest1234' $h.sig
+  if($LASTEXITCODE -ne 0){throw 'health signature did NOT verify against the minted key'}
+  Say 'PASS 5: /health without key -> 403, with key -> 200, signature verified'
   Stop-Process -Id $b1.P.Id -Force -ErrorAction SilentlyContinue
   $b2=Boot 'second'
   if(-not $b2.Ok){throw 'boot 2 failed'}
-  $dev2=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop).id
-  if($dev2 -eq $dev1){Say 'PASS 6: second boot - identical identity'}else{throw 'identity changed across boots'}
+  $devJ2=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop)
+  $dev2=$devJ2.id
+  if($dev2 -eq $dev1 -and $devJ2.pub -eq $devJson.pub -and $devJ2.priv -eq $devJson.priv){Say 'PASS 6: second boot - identical identity (full keypair equality)'}else{throw 'identity changed across boots'}
   Stop-Process -Id $b2.P.Id -Force -ErrorAction SilentlyContinue
   Add-Content -Path $devFile -Value 'corrupt'
-  # third boot runs IN-SESSION (synchronous): RedirectStandardError files can come back empty on PS 5.1
-  $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
-  $thirdOut=& node (Join-Path $root.FullName 'server\index.js') 2>&1 | Out-String
+  # third boot via cmd (no PS error-stream serialization noise): stderr/stdout as raw files
+  $e3=Join-Path $base 'err-third.log'; $o3=Join-Path $base 'out-third.log'
+  $thirdJs=Join-Path $root.FullName 'server\index.js'
+  cmd /c "node `"$thirdJs`" 1> `"$o3`" 2> `"$e3`"" | Out-Null
   $exit3=$LASTEXITCODE
-  $ErrorActionPreference=$prevEap
-  Say ($thirdOut.Trim())
-  # fail-loud = nonzero exit AND the server did NOT come up AND a real error was printed
-  # (a corrupt JSON throws SyntaxError; a mismatched pair prints 'refusing to boot' - both are refusals)
-  if($exit3 -ne 0 -and $thirdOut -notmatch 'server up' -and ($thirdOut -match 'refusing to boot|SyntaxError|Unexpected|JSON|Error')){Say ('PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$exit3+')')}
+  $errTxt=(Get-Content $e3 -Raw -ErrorAction SilentlyContinue)
+  $outTxt=(Get-Content $o3 -Raw -ErrorAction SilentlyContinue)
+  Say ($errTxt.Trim())
+  # fail-loud attributed to the IDENTITY check: nonzero exit AND no listener AND the refusal names
+  # the identity failure (corrupt JSON -> SyntaxError from the device load; pair mismatch ->
+  # 'refusing to boot'). A generic crash elsewhere does NOT pass.
+  $attributed=($errTxt -match 'refusing to boot') -or ($errTxt -match 'SyntaxError')
+  if($exit3 -ne 0 -and $outTxt -notmatch 'server up' -and $attributed){Say ('PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$exit3+')')}
   else{throw ('corrupt identity boot not refused: exit='+$exit3)}
   Say 'DONE - all checks passed'
 }catch{

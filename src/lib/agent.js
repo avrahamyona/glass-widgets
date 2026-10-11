@@ -1031,8 +1031,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   // rotation/revocation is a stage-2 design (stable identity + dedicated signed flow).
   const tun=!!(intake&&intake.tunnel===true);
   // the SSE path nests the payload under m.data; the local-server intake SPREADS it to top-level
-  // fields. Read both - dropping the challenge would silently skip the episode proof.
-  const eData=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:(typeof m.challenge==='string'?{challenge:m.challenge}:{});
+  // fields. Read both - dropping the challenge would silently skip the episode proof. Field
+  // PRESENCE is preserved via own-property: a wrong-typed challenge (123, null) reaches the
+  // explicit bad_challenge refusal instead of collapsing to {} (parity across both intakes).
+  const eData=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:(Object.prototype.hasOwnProperty.call(m,'challenge')?{challenge:m.challenge}:{});
   if('challenge' in eData&&!ENROLL_CHALLENGE_RE.test(String(eData.challenge||''))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // a malformed challenge is refused, never silently ignored
   const ePayload=Object.keys(eData).length?JSON.stringify(eData):'';
   if(!tun&&!(validPreapproval(m,ePayload)||(m.device!=null&&validPreapproval(m,ePayload,m.device)))){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
