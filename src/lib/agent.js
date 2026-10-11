@@ -168,9 +168,13 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   else{const hex=ip.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/); // normalized hex form (::ffff:7f00:1)
    if(hex){const a=parseInt(hex[1],16),b=parseInt(hex[2],16);ip=(a>>8)+'.'+(a&255)+'.'+(b>>8)+'.'+(b&255)}}
   const m=ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if(m){const a=+m[1],b=+m[2];
-   return !(a===0||a===10||a===127||(a===172&&b>=16&&b<=31)||(a===192&&b===168)||(a===169&&b===254)||a>=224)}
-  return !(ip==='::1'||ip==='::'||/^(fe8|fe9|fea|feb|fc|fd)/i.test(ip));
+  if(m){const a=+m[1],b=+m[2],c=+m[3]; // every non-global v4 range, not just the common RFC1918 ones
+   if(a===0||a===10||a===127||(a===100&&b>=64&&b<=127)||(a===169&&b===254)||(a===172&&b>=16&&b<=31)||a>=224)return false;
+   if(a===192&&(b===168||(b===0&&(c===0||c===2))))return false;
+   if(a===198&&(b===18||b===19||(b===51&&c===100)))return false;
+   if(a===203&&b===0&&c===113)return false;
+   return true}
+  return !(ip==='::1'||ip==='::'||/^(fe8|fe9|fea|feb|fc|fd|ff)/i.test(ip)||ip.startsWith('2001:db8'));
  }
  function webUrlOk(u){
   if(typeof u!=='string'||u.length>500)return false;
@@ -181,6 +185,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(/^[\d.]+$/.test(h)||h.includes(':'))return ipPublic(h);
   return true; // a public-looking name still has to survive the DNS check before any request goes out
  }
+ // best-effort: Chromium resolves independently, so a rebinding attacker flipping DNS between our
+ // check and Chromium's lookup is NOT fully barred - this narrows the window, it is not a hard guarantee.
  const dnsP=require('dns').promises;
  async function resolvesPublic(u,cache){
   if(WEB_ALLOW_LOCAL)return true;
@@ -199,7 +205,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(ses.__gwWebGuard)return;ses.__gwWebGuard=true;
   ses.webRequest.onBeforeRequest({urls:['*://*/*']},(details,callback)=>{
    const ent=webTaskWindows.get(details.webContentsId);
-   if(!ent)return callback({});
+   if(!ent){ // fail-closed: service workers, background fetches and post-cleanup stragglers on the dedicated agent-web session never go out
+    audit({kind:'web_task',stage:'request_blocked',task:'-',url:String(details.url||'').slice(0,200),error:'unmapped source on guarded session'});
+    return callback({cancel:true})}
    const u=String(details.url||'');
    (async()=>webUrlOk(u)&&await resolvesPublic(u,ent.dnsCache))()
     .then(ok=>{if(!ok)audit({kind:'web_task',stage:'request_blocked',task:ent.taskId,url:u.slice(0,200)});callback(ok?{}:{cancel:true})},
@@ -270,7 +278,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    audit({kind:'web_task',stage:'executed',url:url.slice(0,200),steps:out.steps.length,ok:out.steps.filter(x=>x.ok).length});
    return ack(id,'done','web task: '+out.steps.filter(x=>x.ok).length+'/'+out.steps.length+' steps ok',webTaskResultCap(out));
   }catch(e){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:String(e&&e.message||e).slice(0,200)});return ack(id,'failed',String(e&&e.message||'web task error').slice(0,200))}
-  finally{if(win&&!win.isDestroyed())win.destroy()}
+  finally{
+   if(win&&!win.isDestroyed())win.destroy();
+   try{require('electron').session.fromPartition('persist:agent-web').clearStorageData({storages:['serviceworkers']})}catch{} // no persistent background execution outlives the task
+  }
  }
  function webTaskPlan(url,steps){
   // the COMPLETE effective plan he approves: full goto urls, full type text - never truncated
@@ -302,7 +313,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
   const label=String(task.label||'').slice(0,200);
-  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body:'השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url.slice(0,200)+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  const body='השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.';
+  if(body.length>1900){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'review card overflow',chars:body.length});return ack(id,'failed','plan too long to review safely (card limit) - rejected')} // the card he approves must show the COMPLETE url+plan - never a truncated review
+  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
  // update_app: the ONLY pre-authorized mutating command (the user's standing grant: app updates install
