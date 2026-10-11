@@ -1,9 +1,9 @@
 // Local computer-actions agent. Consumes the /glasswidgets/cmd SSE stream (receiver key) and runs
 // allowlisted actions: find_files, get_file (upload via /file/upload), index, sys_info, screenshot,
-// delete_file (Downloads folder only, files only), open_path, run_command, media_control, clipboard_read.
+// delete_file (Downloads folder only, files only), open_path, run_command, media_control, clipboard_read, web_task.
 // Safety: a resolved-folder allowlist gates file reads, delete_file is pinned to the real Downloads
 // folder, and every mutating/executing command lands in userData/agent-audit.log (JSON lines).
-const fs=require('fs'),path=require('path'),os=require('os');
+const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto');
 const {screen}=require('electron');
 const {execFile,exec}=require('child_process');
 
@@ -20,6 +20,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  const CMD_KEY_BAKED='__GW_CMD_KEY__'; // CI replaces the placeholder from the GW_CMD_KEY secret; stays dormant when not injected
  const cmdKey=process.env.GLASSWIDGETS_AGENT_CMD_KEY||cfg.cmdKey||(CMD_KEY_BAKED.slice(0,5)==='__GW_'?'':CMD_KEY_BAKED);
  module.exports.cmdKey=cmdKey;
+ const SIGN_KEY_BAKED='__GW_SIGN_KEY__'; // CI replaces the placeholder from the GW_SIGN_KEY secret; stays dormant when not injected
+ const signKey=process.env.GLASSWIDGETS_AGENT_SIGN_KEY||cfg.signKey||(SIGN_KEY_BAKED.slice(0,5)==='__GW_'?'':SIGN_KEY_BAKED);
 
  let folders=[];
  async function resolveFolders(){
@@ -87,9 +89,27 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
 
  // run_command NEVER executes on worker say-so: it parks as a pending approval, the island pops an
  // unmissable card with the exact command, and only the user's אשר tap runs it. Default deny after ~2 min.
- const pendingApprovals=new Map(); // cardId -> {cmdId,command,timer}
+ // Exception: PRE-APPROVED commands. When main/ops dispatch a command that answers an EXPLICIT user
+ // instruction, the worker signs it (HMAC-SHA256 over id\nkind\nts\npayload with a shared secret).
+ // A valid signature swaps the blocking card for an informational one that auto-executes after 5s
+ // (cancelable) - so explicit instructions don't stall when he is away from the PC. A missing/invalid
+ // signature falls back to the ordinary blocking card (fail-closed); an invalid one is also audited.
+ const pendingApprovals=new Map(); // cardId -> {cmdId,kind,command,action,task,timer,pre}
  const APPROVAL_TTL=+process.env.GLASSWIDGETS_APPROVAL_TTL_MS||120000;
- function runCommand(id,command){
+ const PRE_TTL_MS=300000,AUTO_RUN_MS=+process.env.GLASSWIDGETS_AUTO_RUN_MS||5000;
+ function validPreapproval(m,payload){
+  if(!signKey||!m||!m.sig||m.ts==null)return false;
+  const ts=+m.ts;if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>PRE_TTL_MS)return false;
+  const expect=crypto.createHmac('sha256',signKey).update([String(m.id),String(m.kind),String(ts),payload].join('\n')).digest('hex');
+  const got=String(m.sig);
+  return got.length===expect.length&&crypto.timingSafeEqual(Buffer.from(got),Buffer.from(expect));
+ }
+ function execPending(p){
+  if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
+  if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
+  execRun(p.cmdId,p.command);
+ }
+ function runCommand(id,command,msg){
   const cmd=String(command||'').trim();
   if(!cmd)return ack(id,'failed','missing command');
   if(cmd.length>1000)return ack(id,'failed','command too long');
@@ -97,6 +117,16 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
+  if(msg&&validPreapproval(msg,cmd)){
+   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+    audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
+   timer.unref&&timer.unref();
+   pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true});
+   audit({kind:'run_command',stage:'preapprove_card',command:cmd});
+   broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   return;
+  }
+  if(msg&&msg.sig)audit({kind:'run_command',stage:'bad_sig',command:cmd});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'run_command',stage:'expired',command:p.command});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
@@ -110,11 +140,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   pendingApprovals.delete(cardId);clearTimeout(pend.timer);
   if(p.button_id==='approve'){
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
-   if(pend.kind==='media_control'){mediaApproved=true;execMedia(pend.cmdId,pend.action);return {ok:true}}
-   if(pend.kind==='web_task'){execWebTask(pend.cmdId,pend.task);return {ok:true}}
-   execRun(pend.cmdId,pend.command);return {ok:true}}
-  audit({kind:pend.kind||'run_command',stage:'denied',command:pend.command,action:pend.action});
-  ack(pend.cmdId,'failed','denied - המשתמש דחה מהאי');return {ok:true}}
+   execPending(pend);return {ok:true}}
+  audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action});
+  ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':'denied - המשתמש דחה מהאי');return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
 
  // media_control: play/pause/toggle/next/prev via the Windows media bridge (SMTC). An island approval
@@ -303,18 +331,33 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(rawSteps.length>20){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'plan too long',steps:rawSteps.length});return ack(id,'failed','plan too long to review safely (max 20 steps) - rejected')}
   const plan=webTaskPlan(url,rawSteps);
   if(plan.length>1400){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'plan too long',chars:plan.length});return ack(id,'failed','plan too long to review safely ('+plan.length+' chars) - rejected')}
+  const steps=rawSteps;
+  const label=String(task.label||'').slice(0,200);
+  // pre-approval payload the worker signs for web_task: url + "\n" + JSON.stringify(steps as sent)
+  const pre=validPreapproval(task,url+'\n'+JSON.stringify(rawSteps));
+  // the card he approves must show the COMPLETE url+plan - never a truncated review. The overflow check
+  // runs BEFORE any pending-slot registration, so a rejected plan never parks an invisible 2-min slot.
+  const core='השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר.';
+  const body=core+(pre?'\nמתבצע אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.':'\nבלי אישור - תידחה אוטומטית בעוד כ-2 דקות.');
+  if(body.length>1900){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'review card overflow',chars:body.length});return ack(id,'failed','plan too long to review safely (card limit) - rejected')}
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
-  const steps=rawSteps;
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
+  if(pre){
+   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+    audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
+   timer.unref&&timer.unref();
+   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true});
+   audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
+   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   return;
+  }
+  if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
-  const label=String(task.label||'').slice(0,200);
-  const body='השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.';
-  if(body.length>1900){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'review card overflow',chars:body.length});return ack(id,'failed','plan too long to review safely (card limit) - rejected')} // the card he approves must show the COMPLETE url+plan - never a truncated review
   broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
@@ -454,7 +497,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
    if(m.kind==='open_path')return openPathCmd(m.id,m.path);
-   if(m.kind==='run_command')return runCommand(m.id,m.command);
+   if(m.kind==='run_command')return runCommand(m.id,m.command,m);
    if(m.kind==='update_app')return updateAppCmd(m.id);
    if(m.kind==='media_control')return mediaControl(m.id,m.action);
    if(m.kind==='clipboard_read')return clipboardRead(m.id);
@@ -474,7 +517,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web,sig'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task; sig: HMAC pre-approved commands accepted (auto-run with cancelable info card)
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;
