@@ -529,22 +529,26 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
    islandCtl:async action=>{
     if(!['open','close'].includes(String(action)))return {ok:false,error:'bad action'};
     const id=chatIslandInstance();if(!id)return {ok:false,error:'no island'};
-    const ws=[];if(wins[id]&&!wins[id].isDestroyed())ws.push(wins[id]);for(const w of chatCompanions.values())if(!w.isDestroyed())ws.push(w);
-    if(!ws.length)return {ok:false,error:'no island window'};
+    const main=wins[id];
+    if(!main||main.isDestroyed())return {ok:false,error:'island primary window unavailable'}; // companions alone never count: no primary, no verified state
+    const ws=[main];for(const w of chatCompanions.values())if(!w.isDestroyed())ws.push(w);
     try{
      for(const w of ws)w.webContents.send('chat:pill',action);
-     // 'done' must mean the island renderer actually reached the state - poll it, bounded
-     const main=wins[id],want=action==='open';
-     if(main&&!main.isDestroyed()){
-      const deadline=Date.now()+3000;let reached=false;
-      while(Date.now()<deadline){
-       const cur=await main.webContents.executeJavaScript("!!document.getElementById('pill')&&document.getElementById('pill').classList.contains('open')").catch(()=>null);
-       if(cur===want){reached=true;break}
-       await new Promise(r=>setTimeout(r,120));
-      }
-      if(!reached)return {ok:false,error:'renderer did not reach '+action};
+     // 'done' must mean the island renderer actually reached the state - poll it, bounded twice:
+     // outer 3s deadline AND an 800ms race per probe so a hung renderer cannot stall the await
+     const want=action==='open'?'open':'closed';
+     const deadline=Date.now()+3000;
+     while(Date.now()<deadline){
+      const cur=await Promise.race([
+       // explicit pill-present state string: 'absent' can never masquerade as 'closed'
+       main.webContents.executeJavaScript("(()=>{const p=document.getElementById('pill');if(!p)return 'absent';return p.classList.contains('open')?'open':'closed'})()").catch(()=>null),
+       new Promise(r=>setTimeout(()=>r('probe-timeout'),800))
+      ]);
+      if(cur===want)return {ok:true,state:action};
+      if(main.isDestroyed())return {ok:false,error:'island window destroyed mid-command'};
+      await new Promise(r=>setTimeout(r,120));
      }
-     return {ok:true,state:action};
+     return {ok:false,error:'renderer did not reach '+action};
     }catch(e){return {ok:false,error:String(e&&e.message||e)}}
    }})}catch(e){bootLog('agent '+(e&&e.message))}
   try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // check on launch + every 10 min, quiet
