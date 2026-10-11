@@ -641,11 +641,30 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }catch(e){audit({kind:'update_app',stage:'failed',error:String(e&&e.message||e)});return ack(id,'failed','updater error')}
  }
 
+ // Transmit-time envelope invariant - enforced, never assumed: result JSON <=3500 AND the full raw
+ // body (key/id/note included) <=3900. Shrink result.stdout when available (metadata preserved);
+ // otherwise bound the note contribution and stub the result; a still-oversize body is audited, not sent blind.
+ function fitAckBody(body){
+  const RES_MAX=3500,BODY_MAX=3900;
+  const ok=()=>{const w=JSON.stringify(body);return w.length<=BODY_MAX&&(!body.result||JSON.stringify(body.result).length<=RES_MAX)};
+  if(ok())return JSON.stringify(body);
+  const r=body.result;
+  if(r&&typeof r.stdout==='string'){
+   if(!r.stdout_full)r.stdout_full=String(r.stdout).length;
+   while(r.stdout.length&&!ok())r.stdout=r.stdout.slice(0,Math.floor(r.stdout.length*0.8));
+   r.truncated=true;
+  }
+  if(!ok()){
+   body.note=String(body.note||'').slice(0,200); // the note/id/key share of the envelope is bounded explicitly
+   body.result={truncated:true,guard:true};
+   if(!ok())audit({kind:'ack',stage:'envelope_fail',id:String(body.id||''),status:body.status,bytes:JSON.stringify(body).length});
+  }
+  return JSON.stringify(body);
+ }
  async function ack(id,status,note,result){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
   if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m}}body.result=result}
-  let wire=JSON.stringify(body);
-  if(wire.length>3900){audit({kind:'ack',stage:'oversize_guard',id:String(id||''),status,bytes:wire.length});body.result={truncated:true,guard:true};wire=JSON.stringify(body)} // last-resort raw-body bound (worker cap 4000)
+  const wire=fitAckBody(body);
   try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
    const respText=await r.text().catch(()=> '');
    if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return} // a rejected ack is EVIDENCE, never a silent drop
