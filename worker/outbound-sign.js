@@ -58,7 +58,19 @@ async function buildCommandEnvelope(env, { id, kind, device, data, ttlMs }) {
   if (typeof data !== 'object' || Array.isArray(data)) throw new Error('data must be a plain object'); // no silent array/primitive -> {}
   // pre-roundtrip: every object value in data must be a PLAIN object or an array - a Date (or any
   // class instance) would silently serialize to a string and change meaning on the wire. Refuse early.
-  (function plain(o) { for (const k of Object.keys(o)) { const v = o[k]; if (typeof v === 'function') throw new Error('function in data'); if (v && typeof v === 'object') { const p = Object.getPrototypeOf(v); if (p !== Object.prototype && p !== null && !Array.isArray(v)) throw new Error('non-plain object in data (Date/class instances serialize ambiguously)'); plain(v); } } })(data);
+  (function plain(o, d, seen, count) {
+    if (d > DATA_DEPTH_CAP) throw new Error('data too deep'); // depth bounded HERE too - the prewalk must never recurse unbounded before the cap
+    if ((count.n += Object.keys(o).length) > 10000) throw new Error('data too wide'); // node-count guard: bounded validation, no deep-stack DoS
+    for (const k of Object.keys(o)) { const v = o[k];
+      if (typeof v === 'function') throw new Error('function in data');
+      if (v && typeof v === 'object') {
+        if (seen.has(v)) throw new Error('cyclic data refused'); // a cycle would RangeError the recursion - refuse it as a validation error instead
+        seen.add(v);
+        const p = Object.getPrototypeOf(v); if (p !== Object.prototype && p !== null && !Array.isArray(v)) throw new Error('non-plain object in data (Date/class instances serialize ambiguously)');
+        plain(v, d + 1, seen, count);
+      }
+    }
+  })(data, 0, new Set([data]), { n: 0 });
   let canonData; try { canonData = JSON.parse(JSON.stringify(data)); } catch { throw new Error('unserializable data'); }
   // the SERIALIZED object must STILL be a plain object: a toJSON() returning [] / 7 / null (or a Date,
   // which serializes to a string) used to slip past the pre-roundtrip check and get signed - the PC

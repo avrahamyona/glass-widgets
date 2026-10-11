@@ -52,5 +52,9 @@ const verify=(fields,sig)=>crypto.verify(null,Buffer.from(fields.join('\n'),'utf
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0015',kind:'find_files',device:DEV,data:deep}),'data over depth cap refused');
  const okNested=await buildCommandEnvelope(env,{id:'cmd-0016',kind:'find_files',device:DEV,data:{queries:['a','b','c']}}); // nested arrays are legitimate
  assert(verify([DEV,'cmd-0016','find_files',String(okNested.ts),String(okNested.exp),JSON.stringify(okNested.data)],okNested.sig),'nested array payload signs+verifies');
+ const cyc={a:1};cyc.self=cyc;
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0017',kind:'find_files',device:DEV,data:cyc}),'cyclic data refused as a validation error, not a RangeError');
+ const wide={};for(let i=0;i<11000;i++)wide['k'+i]=i;
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0018',kind:'find_files',device:DEV,data:wide}),'over-wide data refused by the node-count guard');
  console.log('WORKER-OUTBOUND-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});
