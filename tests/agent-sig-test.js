@@ -139,14 +139,27 @@ const launch=async()=>{
  await sleep(2500);
  const refusals=ACK.filter(x=>String(x.id).startsWith('slot')&&/too many/.test(x.note||''));
  assert.equal(refusals.length,0,'no phantom slot blocks later cards: '+JSON.stringify(refusals));
+ for(let k=0;k<5;k++)await clickBtn('echo slot'+k,'דחה'); // free the five approval slots for the pairing section
+ for(let k=0;k<5;k++)await waitAck('slot'+k,'failed');
 
  // 10) REAL enroll_device on the REAL agent runtime (vertical slice): challenge-bound identity
  // mint on this PC, durable device.json, narrow bootstrap read binding, local fingerprint source.
  const CH='chal-'+Date.now().toString(36)+'-abcdefgh';
  ts=Date.now();exp=EX();const ePay=JSON.stringify({challenge:CH});
  pushCmd({id:'enr1',kind:'enroll_device',data:{challenge:CH},ts,exp,sig:sign('enr1','enroll_device',ts,exp,ePay)});
+ // PAIRING GATE: a signed enroll PARKS an on-PC approval card; nothing persists before the human tap
+ const cP=await card('אישור צימוד טלפון');
+ assert(cP.cid==='local-approve-enr1','pairing card bound to THIS command id: '+cP.cid);
+ const cardFp=(cP.body.match(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/)||[])[0];
+ assert(cardFp,'pairing card shows the LOCAL candidate fingerprint: '+cP.body);
+ assert(cP.body.includes('אשר רק אם יזמת צימוד'),'pairing card carries explicit compare-and-deny copy');
+ assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'NO key persisted while the pairing card is parked');
+ assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending.json'),'durable pairing-pending record exists while parked');
+ await A.screenshot({path:'/downloads/pairing-card.png'}); // REAL UI pixels of the pairing card
+ await clickBtn('אישור צימוד טלפון','אשר צימוד');
  const aE=await waitAck('enr1','done');
  assert(aE.result&&aE.result.deviceId&&aE.result.pubkey&&aE.result.challengeSig,'enroll returns identity+proof: '+JSON.stringify(aE.result));
+ assert(aE.result.pairing&&aE.result.pairing.fingerprint===cardFp&&aE.result.pairing.cardId==='local-approve-enr1'&&aE.result.pairing.approvedAt>0,'the SAME approval (fingerprint+card+time) propagates to the registry-adapter terminal: '+JSON.stringify(aE.result.pairing));
  const devIdE=aE.result.deviceId,pubE=aE.result.pubkey;
  assert(devIdE===crypto.createHash('sha256').update(pubE).digest('hex').slice(0,16),'deviceId derives from the pubkey');
  assert(crypto.verify(null,Buffer.from([CH,pubE,devIdE].join('\n'),'utf8'),crypto.createPublicKey({key:Buffer.from(pubE,'base64'),format:'der',type:'spki'}),Buffer.from(aE.result.challengeSig,'hex')),'challenge proof verifies against the returned key');
@@ -154,6 +167,7 @@ const launch=async()=>{
  assert(devJ.pub===pubE&&devJ.priv&&crypto.createHash('sha256').update(devJ.pub).digest('hex').slice(0,16)===devIdE,'device identity persisted durably (pub+priv, id derives)');
  const{fingerprint:fpFn}=require(REPO+'/src/lib/fingerprint');
  const fpE=fpFn(pubE);
+ assert(fpE===cardFp,'the card fingerprint is EXACTLY the minted key fingerprint (binding, not a generic approve)');
  // narrow bootstrap reads against the REAL local server (port 47732): exactly the pending command's /task under '-'
  const readHdr=(dev,path,q)=>{const rts=Date.now(),rn='n'+Math.random().toString(36).slice(2,10);const rs=crypto.sign(null,Buffer.from(['GET',path,q,String(rts),rn,dev].join('\n'),'utf8'),PRIV).toString('hex');return{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rn,'X-GW-Read-Sig':rs,'X-GW-Read-Device':dev}};
  const read=async(dev,path,q)=>{const r=await fetch('http://127.0.0.1:47732'+path+(q?'?'+q:''),{headers:readHdr(dev,path,q)});let b=null;try{b=await r.json()}catch{}return{status:r.status,body:b}};
@@ -283,5 +297,43 @@ const launch=async()=>{
  const devJ2=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8'));
  assert(devJ2.pub===pubE,'identity unchanged across the restart');
  ctl.close();
+
+ // 12) PAIRING GATE terminals: deny, restart-during-pending, expiry - each a DURABLE terminal
+ // with NO key persisted; the bootstrap pending-read still lets the sender reconcile.
+ await a.close();
+ fs.rmSync(cfg+'/glasswidgets/device',{recursive:true,force:true}); // back to a NEVER-ENROLLED pc
+ ({a,A}=await launch());
+ const CH3='deny-'+Date.now().toString(36)+'-abcdefgh';
+ ts=Date.now();exp=EX();pushCmd({id:'enr3',kind:'enroll_device',data:{challenge:CH3},ts,exp,sig:sign('enr3','enroll_device',ts,exp,JSON.stringify({challenge:CH3}))});
+ await card('אישור צימוד טלפון');
+ await clickBtn('אישור צימוד טלפון','דחה');
+ const aDeny=await waitAck('enr3','failed');
+ assert(/denied/.test(aDeny.note),'denied pairing is a durable failed terminal: '+aDeny.note);
+ assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'deny persists NO key');
+ assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending.json'),'deny clears the pending record');
+ // restart while parked: the boot recovery writes the durable terminal
+ const CH4='rst-'+Date.now().toString(36)+'-abcdefgh';
+ ts=Date.now();exp=EX();pushCmd({id:'enr4',kind:'enroll_device',data:{challenge:CH4},ts,exp,sig:sign('enr4','enroll_device',ts,exp,JSON.stringify({challenge:CH4}))});
+ await card('אישור צימוד טלפון');
+ assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending.json'),'pending record on disk before the restart');
+ await a.close();
+ ({a,A}=await launch());
+ const aRst=await waitAck('enr4','failed');
+ assert(/הופעלה מחדש/.test(aRst.note),'restart-during-parking is a durable failed terminal: '+aRst.note);
+ assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'restart persists NO key');
+ // the pending-read record SURVIVES the restart (set by the boot recovery), but /task stays
+ // closed without a device key (reviewed endpoint boundary) - the sender reconciles a failed
+ // pairing by retrying, which surfaces a NEW pairing card to the human
+ const rT4=await read('-','/task','id=enr4');
+ assert(rT4.status===503&&rT4.body&&rT4.body.error==='no_device_key','failed pairing on a never-enrolled pc: /task closed without a device key (503), pending record not cancelled');
+ // expiry without a tap
+ const CH5='exp-'+Date.now().toString(36)+'-abcdefgh';
+ ts=Date.now();exp=EX();pushCmd({id:'enr5',kind:'enroll_device',data:{challenge:CH5},ts,exp,sig:sign('enr5','enroll_device',ts,exp,JSON.stringify({challenge:CH5}))});
+ await card('אישור צימוד טלפון');
+ const aExp=await waitAck('enr5','failed');
+ assert(/expired/.test(aExp.note),'untouched pairing expires into a durable failed terminal: '+aExp.note);
+ assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'expiry persists NO key');
+ const aud2=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(aud2.includes('"stage":"pairing_requested"')&&aud2.includes('"stage":"pairing_expired"')&&aud2.includes('"stage":"pairing_restart_cancel"')&&aud2.includes('"stage":"denied"'),'pairing audit trail complete: requested/approved-or-denied/expired/restart-cancel');
  console.log('AGENT-SIG TESTS PASSED');await a.close();srv.close();process.exit(0);
 })().catch(e=>{console.error('FAIL',e);try{console.error('AUDIT-TAIL:\n'+fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').split('\n').slice(-12).join('\n'))}catch{}try{console.error('ACKS:',JSON.stringify(ACK.slice(-8)))}catch{}process.exit(1)});

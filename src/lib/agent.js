@@ -177,6 +177,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
  if(p.kind==='island_control'){execIsland(p.cmdId,p.task.action);return}
+  if(p.kind==='enroll_device'){execEnroll(p);return}
   execRun(p.cmdId,p.command);
  }
  function runCommand(id,command,msg,intake){
@@ -215,13 +216,14 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!pend)return {ok:false,reason:'expired'};
   pendingApprovals.delete(cardId);clearTimeout(pend.timer);
   if(p.button_id==='approve'){
-   if(pend.texp&&Date.now()>=pend.texp){audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action});settleCard(cardId,'expired');ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
-   audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
+   if(pend.texp&&Date.now()>=pend.texp){if(pend.kind==='enroll_device')clearPairingPending(pend.cmdId);audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});settleCard(cardId,'expired');ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
+   audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
    settleCard(cardId,'approved');execPending(pend);return {ok:true}}
   if(pend.pre)markSeen(pend.cmdId,'cancelled');
-  audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action});
+  if(pend.kind==='enroll_device')clearPairingPending(pend.cmdId);
+  audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
   settleCard(cardId,pend.pre?'cancelled':'denied');
-  ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':'denied - המשתמש דחה מהאי');return {ok:true}}
+  ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':(pend.kind==='enroll_device'?'denied - המשתמש דחה את הצימוד מהאי':'denied - המשתמש דחה מהאי'));return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
 
  // media_control: play/pause/toggle/next/prev via the Windows media bridge (SMTC). An island approval
@@ -831,7 +833,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  }
 
  const SSE_UNSIGNED_WINDOW_MS=10*60*1000; // unsigned SSE commands carry no signed expiry: their dedup window is bounded, never "at-most-once forever"
- const PARKED_KINDS=new Set(['run_command','web_task','media_control','ui_automation','island_control']); // effect starts at approval (execPending), not at dispatch
+ const PARKED_KINDS=new Set(['run_command','web_task','media_control','ui_automation','island_control','enroll_device']); // effect starts at approval (execPending), not at dispatch - enroll's approval is the PAIRING card
  async function handle(m,intake){
   if(!m||typeof m!=='object'||!m.id)return;
   const id=String(m.id);
@@ -1045,22 +1047,60 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if('challenge' in eData&&(typeof eData.challenge!=='string'||!ENROLL_CHALLENGE_RE.test(eData.challenge))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // malformed OR wrong-typed: refused explicitly, never silently ignored (no String() coercion past the shape check)
   const ePayload=Object.keys(eData).length?JSON.stringify(eData):'';
   if(!tun&&!(validPreapproval(m,ePayload)||(m.device!=null&&validPreapproval(m,ePayload,m.device)))){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
-  const chProof=()=>{ // A1 challenge binding: prove key possession for THIS enrollment episode
-   const ch='challenge' in eData?String(eData.challenge):null;
-   return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
-  if(devKey&&devId){pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000};audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProof()})}
+  if(devKey&&devId){pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000};audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)})}
+  // PAIRING GATE (release gate): founding the device identity requires an on-PC human approval.
+  // The candidate keypair is minted IN MEMORY ONLY (never persisted before approval); the parked
+  // card binds THIS command id, THIS challenge episode, THIS candidate pubkey/fingerprint and its
+  // expiry. Cancel/expiry/restart all produce a DURABLE TERMINAL without persisting any key.
+  if(!broadcastCard){audit({kind:'enroll_device',stage:'pairing_no_ui',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','pairing requires the on-PC UI')}
+  if(pendingApprovals.size>=5)return ack(m.id,'failed','too many pending approvals');
   const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
   const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
   const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
-  if(!persistDevice(pubB64,privB64))return ack(m.id,'failed','device key persist failed');
+  const fp=fingerprint(pubB64); // LOCAL, computed from the in-memory candidate - the trusted display the owner compares
+  const cardId='local-approve-'+String(m.id).replace(/[^\w-]/g,'').slice(0,60);
+  const texp=intake&&+intake.exp||0;
+  writePairingPending({cmdId:String(m.id),fingerprint:fp,exp:texp||Date.now()+APPROVAL_TTL}); // durable pending record: a restart turns it into a durable terminal, never a silent drop
+  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   clearPairingPending(p.cmdId);audit({kind:'enroll_device',stage:'pairing_expired',id:String(p.cmdId).slice(0,40),fingerprint:p.fp});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - הצימוד לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+  timer.unref&&timer.unref();
+  pendingApprovals.set(cardId,{cmdId:String(m.id),kind:'enroll_device',timer,texp,fp,enroll:{pubB64,privB64,eData}});
+  audit({kind:'enroll_device',stage:'pairing_requested',id:String(m.id).slice(0,40),fingerprint:fp});
+  broadcastCard({id:cardId,title:'🔗 אישור צימוד טלפון',expiresAt:Date.now()+APPROVAL_TTL,body:'התקבלה בקשת צימוד חתומה למחשב הזה.\n\nטביעת המכשיר החדשה: '+fp+'\n\nאשר רק אם יזמת צימוד מהטלפון עכשיו. אחרי האישור תוצג בטלפון אותה טביעת - אם הן שונות, דחה ונתק. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר צימוד',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+ }
+ const chProofFor=eData=>{ // A1 challenge binding: prove key possession for THIS enrollment episode
+  const ch=eData&&'challenge' in eData?String(eData.challenge):null;
+  return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
+ // pairing-pending durability: one record in userData (NO key material) so a restart between park
+ // and decision becomes a durable terminal the sender can reconcile, not a silently lost enroll.
+ const pairingPendingFile=()=>path.join(app.getPath('userData'),'pairing-pending.json');
+ const writePairingPending=r=>{try{fs.writeFileSync(pairingPendingFile(),JSON.stringify(r),{mode:0o600})}catch{}};
+ const clearPairingPending=cmdId=>{try{const cur=JSON.parse(fs.readFileSync(pairingPendingFile(),'utf8'));if(!cmdId||String(cur.cmdId)===String(cmdId))fs.unlinkSync(pairingPendingFile())}catch{}};
+ function execEnroll(p){
+  const{pubB64,privB64,eData}=p.enroll||{};
+  if(!pubB64||!privB64){audit({kind:'enroll_device',stage:'pairing_payload_missing',id:String(p.cmdId||'').slice(0,40)});return ack(p.cmdId,'failed','pairing payload missing')}
+  if(devKey&&devId){ // enrolled while the card was parked: the EXISTING identity wins - no rotation, nothing rewritten
+   clearPairingPending(p.cmdId);pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000};
+   audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});
+   return ack(p.cmdId,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)});
+  }
+  if(!persistDevice(pubB64,privB64)){clearPairingPending(p.cmdId);return ack(p.cmdId,'failed','device key persist failed')}
   loadDevice();
-  if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
-  pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000}; // the preEnroll sender fetches THIS command's terminal under '-' until it learns the id
+  if(!devKey||devPubB64!==pubB64){clearPairingPending(p.cmdId);audit({kind:'enroll_device',stage:'persist_fail'});return ack(p.cmdId,'failed','device key persist failed')}
+  clearPairingPending(p.cmdId);
+  pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000}; // the preEnroll sender fetches THIS command's terminal under '-' until it learns the id
   audit({kind:'enroll_device',stage:'enrolled',device:devId,fingerprint:fingerprint(pubB64)});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
-  ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProof()}); // PUBLIC key only travels
+  // the SAME approval reaches the owner registry adapter through this terminal: the episode-bound
+  // challenge proof + pairing evidence is exactly what the adapter consumes for registration
+  ack(p.cmdId,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProofFor(eData),pairing:{fingerprint:p.fp,approvedAt:Date.now(),cardId:'local-approve-'+String(p.cmdId).replace(/[^\w-]/g,'').slice(0,60)}}); // PUBLIC key only travels
  }
  let pendingEnrollRead=null; // {id,device,until}: the ONE bootstrap /task fetch allowed under '-' (set on EVERY accepted enroll_device - fresh mint AND already-enrolled, so a post-restart re-enroll still lets the preEnroll sender fetch its result)
+ try{const pp=JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'pairing-pending.json'),'utf8'));
+  if(pp&&pp.cmdId){fs.unlinkSync(path.join(app.getPath('userData'),'pairing-pending.json'));
+   pendingEnrollRead={id:String(pp.cmdId),device:devId,until:Date.now()+120000}; // the sender can still fetch THIS terminal under '-'
+   audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:String(pp.cmdId).slice(0,40),fingerprint:pp.fingerprint||undefined});
+   ack(pp.cmdId,'failed','cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר')}}catch{} // restart between park and decision: durable terminal, NO key was ever persisted
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
  async function publishTunnel(url){

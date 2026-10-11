@@ -356,6 +356,10 @@ const launch=async()=>{
  assert(/unsigned/.test(aE0.note||''),'unsigned enroll refused: '+aE0.note);
  ts=Date.now();exp=EX();
  pushCmd({id:'e1',kind:'enroll_device',ts,exp,sig:sign('e1','enroll_device',ts,exp,'')});
+ const cardE1=await card('אישור צימוד טלפון'); // pairing gate: signed enroll parks an on-PC approval card
+ assert(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/.test(cardE1.body),'pairing card shows the candidate fingerprint');
+ assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'no key persisted while the pairing card is parked');
+ await clickBtn('אישור צימוד טלפון','אשר צימוד');
  const aE1=await waitAck('e1','done');
  assert(aE1.result&&/^[0-9a-f]{16}$/.test(aE1.result.deviceId)&&aE1.result.pubkey,'enrolled: deviceId+pubkey acked');
  assert(!JSON.stringify(aE1.result).includes('priv'),'PRIVATE KEY NEVER travels');
