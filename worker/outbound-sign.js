@@ -9,6 +9,8 @@ const CMD_TTL_MS = 60000; // command envelope validity: short - replay windows s
 const { signerId, assertKind, assertNoReserved, assertTtl } = require('../src/lib/command-contract.js');
 const READ_PATHS = new Set(['/task', '/info']); // exact paths only - the signing oracle never signs arbitrary routes
 const READ_QUERY_CAP = 200; // bytes
+const DATA_BYTES_CAP = 8192; // max serialized data payload - the helper must never emit an unbounded wire body for a late network reject
+const DATA_DEPTH_CAP = 8; // max nesting depth of the serialized data object
 
 async function signerKey(env) {
   if (!env || !env.GW_SIGN_PRIVATE) throw new Error('GW_SIGN_PRIVATE missing');
@@ -54,11 +56,21 @@ async function buildCommandEnvelope(env, { id, kind, device, data, ttlMs }) {
   assertTtl(ttlMs);
   if (data == null) data = {};
   if (typeof data !== 'object' || Array.isArray(data)) throw new Error('data must be a plain object'); // no silent array/primitive -> {}
+  // pre-roundtrip: every object value in data must be a PLAIN object or an array - a Date (or any
+  // class instance) would silently serialize to a string and change meaning on the wire. Refuse early.
+  (function plain(o) { for (const k of Object.keys(o)) { const v = o[k]; if (typeof v === 'function') throw new Error('function in data'); if (v && typeof v === 'object') { const p = Object.getPrototypeOf(v); if (p !== Object.prototype && p !== null && !Array.isArray(v)) throw new Error('non-plain object in data (Date/class instances serialize ambiguously)'); plain(v); } } })(data);
   let canonData; try { canonData = JSON.parse(JSON.stringify(data)); } catch { throw new Error('unserializable data'); }
+  // the SERIALIZED object must STILL be a plain object: a toJSON() returning [] / 7 / null (or a Date,
+  // which serializes to a string) used to slip past the pre-roundtrip check and get signed - the PC
+  // normalizes non-object data to {} so the signature then fails the wire. Refuse before reserved/sign.
+  if (typeof canonData !== 'object' || canonData === null || Array.isArray(canonData)) throw new Error('data must serialize to a plain object');
+  let payloadJson; try { payloadJson = JSON.stringify(canonData); } catch { throw new Error('unserializable data'); }
+  if (new TextEncoder().encode(payloadJson).length > DATA_BYTES_CAP) throw new Error('data too large'); // byte cap at the helper, not at the network
+  (function depth(o, d) { if (d > DATA_DEPTH_CAP) throw new Error('data too deep'); if (o && typeof o === 'object') for (const k of Object.keys(o)) depth(o[k], d + 1); })(canonData, 0); // nested arrays are fine - only the nesting DEPTH is capped; own keys only
   assertNoReserved(canonData); // reserved check on the SERIALIZED object - a toJSON spoof ({id:'spoof'}) can never smuggle an envelope field past it
   const key = await signerKey(env);
   const ts = Date.now(), exp = ts + (ttlMs == null ? CMD_TTL_MS : ttlMs);
-  const payload = JSON.stringify(canonData);
+  const payload = payloadJson;
   if (device != null) { // v2: device-first canonical
     device = String(device); if (!/^[0-9a-f]{16}$/.test(device)) throw new Error('bad device id');
     const sig = await signCanon(key, [device, String(id), kind, String(ts), String(exp), payload]);
@@ -68,4 +80,4 @@ async function buildCommandEnvelope(env, { id, kind, device, data, ttlMs }) {
   return { id: String(id), kind, ts, exp, sig, data: canonData };
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { signReadRequest, buildCommandEnvelope, CMD_TTL_MS };
+if (typeof module !== 'undefined' && module.exports) module.exports = { signReadRequest, buildCommandEnvelope, CMD_TTL_MS, DATA_BYTES_CAP, DATA_DEPTH_CAP };

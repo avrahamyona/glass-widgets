@@ -42,5 +42,15 @@ const verify=(fields,sig)=>crypto.verify(null,Buffer.from(fields.join('\n'),'utf
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0009',kind:'find_files',device:DEV,data:['a','b']}),'array data refused, no silent {}');
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0010',kind:'find_files',device:DEV,data:'just-a-string'}),'primitive data refused, no silent {}');
  await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0011',kind:'find_files',device:DEV,data:{device:'spoof'}}),'device in data refused (shared RESERVED union)');
+ // round-4: post-serialization type + caps (ops repros: toJSON returning [] / 7 / null, and Date->string)
+ const mk=j=>({toJSON(){return j}});
+ for(const bad of [[],7,null]) await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0012',kind:'find_files',device:DEV,data:mk(bad)}),'toJSON -> '+JSON.stringify(bad)+' refused');
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0013',kind:'find_files',device:DEV,data:{when:new Date(0)}}),'Date field refused (serializes to a string, not an object - wire would mismatch)');
+ const big='x'.repeat(9000);
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0014',kind:'find_files',device:DEV,data:{q:big}}),'data over byte cap refused at the helper');
+ let deep={},p=deep; for(let i=0;i<12;i++){p.n={};p=p.n}
+ await assert.rejects(()=>buildCommandEnvelope(env,{id:'cmd-0015',kind:'find_files',device:DEV,data:deep}),'data over depth cap refused');
+ const okNested=await buildCommandEnvelope(env,{id:'cmd-0016',kind:'find_files',device:DEV,data:{queries:['a','b','c']}}); // nested arrays are legitimate
+ assert(verify([DEV,'cmd-0016','find_files',String(okNested.ts),String(okNested.exp),JSON.stringify(okNested.data)],okNested.sig),'nested array payload signs+verifies');
  console.log('WORKER-OUTBOUND-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});
