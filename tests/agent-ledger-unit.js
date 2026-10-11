@@ -1,48 +1,67 @@
-// Unit tests for the unified tunnel intake ledger.
+// Unit tests for the unified tunnel intake ledger (lifecycle, schema, caps, replay-eviction safety).
 const assert=require('assert'),fs=require('fs'),path=require('path');
-const {createLedger,RESULT_CAP}=require('../src/lib/ledger.js');
+const {createLedger,RESULT_CAP,MAX_LIVE,SCHEMA_V}=require('../src/lib/ledger.js');
 const dir=fs.mkdtempSync('/tmp/gw-ledger-unit-');const F=path.join(dir,'ledger.json');
 const now=Date.now();
 
-// lifecycle: accepted -> terminal, terminal is final
+// lifecycle: accepted -> running -> terminal; terminal is final
 let l=createLedger(F);
 assert(l.put('cmd-1',{status:'accepted',exp:now+300000})===true,'put accepted');
-assert(l.get('cmd-1').status==='accepted','get accepted');
-assert(l.put('cmd-1',{status:'done',note:'ok',result:{n:1}})===true,'put terminal');
-assert(l.get('cmd-1').terminal===true&&l.get('cmd-1').status==='done','terminal');
-assert(l.put('cmd-1',{status:'failed',note:'late'})===true,'terminal rewrite is a no-op true');
-assert(l.get('cmd-1').status==='done','terminal never rewritten');
-// durability
+assert(l.get('cmd-1').status==='accepted'&&l.get('cmd-1').terminal===false,'accepted, not final');
+assert(l.transition('cmd-1','running')===true,'accepted -> running');
+assert(l.get('cmd-1').status==='running','running recorded');
+assert(l.put('cmd-1',{status:'done',note:'ok',result:{n:1}})===true,'terminal');
+assert(l.get('cmd-1').terminal===true&&l.get('cmd-1').status==='done','done is final');
+assert(l.put('cmd-1',{status:'failed',note:'late'})===true&&l.get('cmd-1').status==='done','terminal never rewritten');
+assert(l.transition('cmd-1','running')===true&&l.get('cmd-1').status==='done','final never transitions');
+// result kept 24h regardless of the envelope exp
+{const r=l.get('cmd-1');assert(r.resultExp>now+23*3600*1000&&r.dedupExp===now+300000,'envelope exp bounds dedup only; result retention is 24h')}
+// durability + crash reconciliation: non-final records become UNKNOWN on reload, never retried
+l.put('cmd-2',{status:'accepted',exp:now+300000});
 l=createLedger(F);
-assert(l.get('cmd-1').status==='done','survives reload');
-// pending expiry policy: an accepted record expires at the envelope exp (prune-on-get)
+{const r=l.get('cmd-2');assert(r.status==='unknown'&&r.terminal===true,'crashed mid-flight -> unknown (evidence)')}
+assert(l.put('cmd-2',{status:'done',note:'late ack'})===true&&l.get('cmd-2').status==='unknown','unknown is final - never overwritten, never auto-retried');
+assert(l.has('cmd-2')===true,'unknown still dedups (replay -> 409 at intake)');
+// prune: dead dedup window + dead result window only
 l=createLedger(F);
-assert(l.put('cmd-2',{status:'accepted',exp:now-1000})===true,'already-expired accepted accepted by put');
-assert(l.get('cmd-2')===null,'expired accepted pruned on get (sender treats 404 as lost, retries)');
-// terminal retention: expiry set to RESULT_TTL on terminal
-{const r=l.get('cmd-1');assert(r.exp>now+23*3600*1000,'terminal retained ~24h: '+((r.exp-now)/3600000).toFixed(1)+'h')}
-// strict ids: prototype tricks and bad formats rejected
-for(const bad of ['__proto__','constructor','a b','x'.repeat(81),'',null,42])assert(l.put(bad,{status:'accepted',exp:now+1000})===false,'bad id refused: '+String(bad));
+assert(l.put('cmd-3',{status:'accepted',exp:now-1000})===true,'put accepted (already past envelope exp)');
+assert(l.get('cmd-3')!==null,'non-final past-exp record remains until restart reconciliation');
+l=createLedger(F); // reload converts to unknown with fresh 24h result retention
+assert(l.get('cmd-3').status==='unknown','reloaded past-exp accepted -> unknown');
+// strict ids
+for(const bad of ['__proto__','constructor','prototype','a b','x'.repeat(81),'',null,42])assert(l.put(bad,{status:'accepted',exp:now+1000})===false,'bad id refused: '+String(bad));
 assert(l.get('__proto__')===null&&!l.has('__proto__'),'proto id never reads');
-// result capping: raw payloads never exceed RESULT_CAP in the record
-l.put('cmd-3',{status:'done',note:'big',result:{blob:'x'.repeat(RESULT_CAP*3)}});
-{const r=l.get('cmd-3');assert(r.result&&r.result.truncated===true&&r.result.full_bytes>RESULT_CAP,'oversize result stored as metadata only: '+JSON.stringify(r.result))}
-// caps: MAX_RECORDS eviction, non-terminal first
-for(let i=0;i<210;i++)l.put('cmd-x'+i,{status:'accepted',exp:now+300000});
-assert(l.get('cmd-1').status==='done','terminal survives accepted-flood eviction');
-// strict schema on load: ANY invalid record = store down, and a down store REFUSES writes
-fs.writeFileSync(F,JSON.stringify({'cmd-1':{status:'weird',note:'',at:1,exp:now+100000,terminal:false}}));
-l=createLedger(F);
-assert(l.ok()===false,'invalid record schema -> store down');
-assert(l.put('cmd-9',{status:'accepted',exp:now+1000})===false,'put on down store refuses');
+// result capping (bytes)
+l.put('cmd-4',{status:'done',note:'big',result:{blob:'x'.repeat(RESULT_CAP*3)}});
+{const r=l.get('cmd-4');assert(r.result&&r.result.truncated===true&&r.result.full_bytes>RESULT_CAP,'oversize result capped (metadata), not raw')}
+// REPLAY-VIA-EVICTion (ops repro): a saturated live set REFUSES new intake - live tombstones are never evicted
+{const l2=createLedger(path.join(dir,'l2.json'));
+ for(let i=0;i<MAX_LIVE;i++)assert(l2.put('live-'+i,{status:'accepted',exp:now+300000})===true,'fill live '+i);
+ assert(l2.put('live-new',{status:'accepted',exp:now+300000})==='full','live window saturated -> full (caller 429s)');
+ assert(l2.get('live-0')!==null,'the OLDEST live tombstone survives - its envelope can never re-run');
+ // terminal results may be stripped under byte pressure, tombstones stay
+ const l3=createLedger(path.join(dir,'l3.json'));
+ for(let i=0;i<MAX_LIVE;i++)l3.put('b-'+i,{status:'accepted',exp:now+1000});
+ for(let i=0;i<60;i++)l3.put('b-'+i,{status:'done',note:'x'.repeat(150),result:{blob:'y'.repeat(1800)}});
+ for(let i=0;i<MAX_LIVE;i++){const r=l3.get('b-'+i);assert(r!==null&&r.dedupExp===now+1000,'tombstone survives byte pressure: b-'+i)}
+}
+// strict cross-field schema on load
+const badRec=(o)=>{fs.writeFileSync(F,JSON.stringify({'cmd-x':{v:SCHEMA_V,status:'done',note:'',at:1,dedupExp:now+100000,resultExp:now+100000,terminal:true,...o}}));return createLedger(F).ok()};
+assert(badRec({})===true,'valid record loads');
+assert(badRec({status:'accepted'})===false,'accepted with terminal:true -> store down (cross-field)');
+assert(badRec({status:'done',terminal:false})===false,'done with terminal:false -> down');
+assert(badRec({result:{blob:'x'.repeat(RESULT_CAP+300)}})===false,'oversize stored result -> down');
+assert(badRec({at:1.5})===false,'non-integer timestamp -> down');
+assert(badRec({v:2})===false,'unknown schema version -> down');
+fs.writeFileSync(F,JSON.stringify({'cmd-x':{v:SCHEMA_V,status:'accepted',note:'',at:1,dedupExp:now+100000,resultExp:now+100000,terminal:false,result:{leak:1}}}));
+assert(createLedger(F).ok()===false,'non-final record carrying a result -> down');
+// corrupt/down store refuses writes
 fs.writeFileSync(F,'{corrupt');
 l=createLedger(F);
-assert(l.ok()===false&&l.put('cmd-9',{status:'accepted',exp:now+1000})===false,'corrupt JSON -> down + refuses');
+assert(l.ok()===false&&l.put('c9',{status:'accepted',exp:now+1000})===false&&l.transition('c9','running')===false,'down store refuses all writes');
 fs.writeFileSync(F,'null');
-l=createLedger(F);
-assert(l.ok()===false,'null JSON -> down (not a silent fresh store)');
-// clean tmp files: no *.tmp litter after successful writes
-const tmps=fs.readdirSync(dir).filter(f=>f.includes('.tmp'));
+assert(createLedger(F).ok()===false,'null JSON -> down');
+// no tmp litter
 fs.writeFileSync(F,JSON.stringify({}));l=createLedger(F);l.put('a',{status:'accepted',exp:now+1000});
-assert(fs.readdirSync(dir).filter(f=>f.includes('.tmp')).length===0,'no tmp litter');
+assert(fs.readdirSync(dir).filter(f=>f.startsWith('ledger.json')&&f.includes('.tmp')).length===0,'no tmp litter');
 console.log('AGENT-LEDGER-UNIT: PASS');

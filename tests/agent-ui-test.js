@@ -383,38 +383,55 @@ const launch=async()=>{
 
  // 15g) /task + /info on the own server: PRIVATE reads (worker-signed, request-bound, replay-safe)
  // over durable ledger records - the direct-mode ack semantics. Records survive the 15e restart.
- const signRead=(p,q)=>{const rts=Date.now(),rnonce=crypto.randomBytes(12).toString('base64url');
-  const rsig=crypto.sign(null,Buffer.from(['GET',p,q,String(rts),rnonce].join('\n'),'utf8'),PRIV).toString('hex');
-  return {'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig}};
+ const signRead=(p,q,dev,ts0)=>{const rts=ts0||Date.now(),rnonce=crypto.randomBytes(12).toString('base64url');
+  const rsig=crypto.sign(null,Buffer.from(['GET',p,q,String(rts),rnonce,dev].join('\n'),'utf8'),PRIV).toString('hex');
+  return {headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Device':dev,'X-GW-Read-Sig':rsig},rts,rnonce}};
  const devPub=()=>crypto.createPublicKey({key:Buffer.from(aE1.result.pubkey,'base64'),format:'der',type:'spki'});
- const readJson=async(p,q)=>{const r=await fetch('http://127.0.0.1:47731'+p+(q?'?'+q:''),{headers:signRead(p,q)});const t=await r.text();
-  return {status:r.status,body:(()=>{try{return JSON.parse(t)}catch{return null}})(),raw:t,dev:r.headers.get('x-gw-device'),dsig:r.headers.get('x-gw-device-sig')}};
+ const DEV_ID=aE1.result.deviceId;
+ const shaH=t=>crypto.createHash('sha256').update(t,'utf8').digest('hex');
+ const readJson=async(p,q)=>{const sr=signRead(p,q,DEV_ID);const r=await fetch('http://127.0.0.1:47731'+p+(q?'?'+q:''),{headers:sr.headers});const t=await r.text();
+  const dsig=r.headers.get('x-gw-device-sig');
+  return {status:r.status,body:(()=>{try{return JSON.parse(t)}catch{return null}})(),raw:t,dev:r.headers.get('x-gw-device'),dsig,
+   // response verification: the device signature binds the RESPONSE to THIS REQUEST (device, method,
+   // path, query, read ts+nonce, HTTP status, body hash) - a signed body can never be replayed
+   verified:!!dsig&&r.headers.get('x-gw-device')===DEV_ID&&crypto.verify(null,Buffer.from([DEV_ID,'GET',p,q,String(sr.rts),sr.rnonce,String(r.status),shaH(t)].join('\n'),'utf8'),devPub(),Buffer.from(dsig,'hex'))}};
  // the public baked key alone is NOT enough for private reads
  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key'}})).status===403,'/task with only the public key -> 403');
  assert((await fetch('http://127.0.0.1:47731/info',{headers:{'X-GW-Key':'cmd-key'}})).status===403,'/info with only the public key -> 403');
  assert((await fetch('http://127.0.0.1:47731/task?id=t2')).status===403,'no key at all -> 403');
  const inf=await readJson('/info','');
  assert(inf.status===200&&inf.body.deviceId===aE1.result.deviceId&&inf.body.pubkey===aE1.result.pubkey,'/info self-describes the enrolled device');
- assert(inf.dev===aE1.result.deviceId&&crypto.verify(null,Buffer.from(inf.raw,'utf8'),devPub(),Buffer.from(inf.dsig,'hex')),'/info response is DEVICE-SIGNED over the exact body');
+ assert(inf.dev===aE1.result.deviceId&&inf.verified,'/info response is DEVICE-SIGNED over the request-bound canonical (device+method+path+query+ts+nonce+status+body hash)');
  const tT2=await readJson('/task','id=t2');
  assert(tT2.body.status==='done'&&tT2.body.terminal===true&&tT2.body.result&&Array.isArray(tT2.body.result.matches),'t2 terminal record via /task (survived restart)');
- assert(crypto.verify(null,Buffer.from(tT2.raw,'utf8'),devPub(),Buffer.from(tT2.dsig,'hex')),'/task response is DEVICE-SIGNED over the exact body');
+ assert(tT2.verified,'/task response is DEVICE-SIGNED over the request-bound canonical');
+ // UNKNOWN-AFTER-RESTART: t6 was accepted (parked card) when the app last exited; the crash-safe
+ // load marks it unknown - a final EVIDENCE state, never auto-retried
  const tT6=await readJson('/task','id=t6');
- assert(tT6.body.ok&&(tT6.body.status==='accepted'||tT6.body.status==='failed'),'parked t6 has a ledger record: '+tT6.body.status);
- assert((await readJson('/task','id=never')).status===404,'unknown task -> 404');
+ assert(tT6.body.ok&&tT6.body.status==='unknown'&&tT6.body.terminal===true,'crashed-accepted t6 -> unknown (final): '+JSON.stringify(tT6.body));
+ assert(tT6.verified,'unknown record response is device-signed too');
+ // an unknown id still dedups: a signed replay of the SAME envelope -> 409, never re-executed
+ {ts=Date.now();exp=EX();
+  const dup=await tunPost({id:'t6',kind:'run_command',ts,exp,sig:sign('t6','run_command',ts,exp,JSON.stringify(dataC)),data:dataC});
+  assert(dup.status===409,'replay of an unknown-record id -> 409 (never retried): '+dup.status)}
+ // a 404 means the id was NEVER accepted: only then is it safe for the sender to create a NEW id
+ {const nf=await readJson('/task','id=never');
+  assert(nf.status===404&&nf.verified,'unknown task -> 404, device-signed (404 cannot be replayed onto another id)')}
+ // device binding: a read signed for a DIFFERENT device -> 403
+ {const sr=signRead('/task','id=t2','otherdevice0000');
+  const r=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
+  assert(r.status===403,'read bound to a different device -> 403 (cross-device collection closed)')}
  // read replay: the SAME signed read twice -> 403 (nonce replay-cached)
- {const h=signRead('/task','id=t2');
-  const r1=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:h});
-  const r2=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:h});
+ {const sr=signRead('/task','id=t2',DEV_ID);
+  const r1=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
+  const r2=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers});
   assert(r1.status===200&&r2.status===403,'read replay with the same nonce -> 403')}
  // stale read ts -> 403
- {const rts=Date.now()-120000,rnonce=crypto.randomBytes(12).toString('base64url');
-  const rsig=crypto.sign(null,Buffer.from(['GET','/task','id=t2',String(rts),rnonce].join('\n'),'utf8'),PRIV).toString('hex');
-  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig}})).status===403,'stale read ts -> 403')}
+ {const sr=signRead('/task','id=t2',DEV_ID,Date.now()-120000);
+  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers})).status===403,'stale read ts -> 403')}
  // request binding: a signature for /info does not authorize /task
- {const rts=Date.now(),rnonce=crypto.randomBytes(12).toString('base64url');
-  const rsig=crypto.sign(null,Buffer.from(['GET','/info','',String(rts),rnonce].join('\n'),'utf8'),PRIV).toString('hex');
-  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig}})).status===403,'signature bound to a different path -> 403')}
+ {const sr=signRead('/info','',DEV_ID);
+  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:sr.headers})).status===403,'signature bound to a different path -> 403')}
 
  // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
  // envelope expired is refused - the command never runs

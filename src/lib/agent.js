@@ -159,6 +159,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return false;
  }
  function execPending(p){
+  try{if(ledger.has(p.cmdId))ledger.transition(p.cmdId,'running')}catch{} // the effect starts NOW
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
@@ -664,7 +665,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return JSON.stringify(body);
  }
  async function ack(id,status,note,result){
-  try{if(ledger.has(id))ledger.put(id,{status,note,result})}catch{} // tunnel-originated commands only; local truth for /task polling even when the network ack fails
+  try{if(ledger.has(id)&&ledger.put(id,{status,note,result})!==true)audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status})}catch(e){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status})} // tunnel-originated commands only; a terminal that cannot persist is AUDITED (evidence for reconciliation), never silently dropped
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
   if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
   const wire=fitAckBody(body);
@@ -788,8 +789,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }catch(e){await ack(id,'failed','index error')}
  }
 
+ const PARKED_KINDS=new Set(['run_command','web_task','media_control','ui_automation','island_control']); // effect starts at approval (execPending), not at dispatch
  async function handle(m,intake){
   if(!m||typeof m!=='object'||!m.id)return;
+  if(!PARKED_KINDS.has(m.kind)){try{if(ledger.has(m.id))ledger.transition(m.id,'running')}catch{}} // immediate-execution kinds: the effect starts at dispatch
   // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
   // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
   if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return;
@@ -852,13 +855,17 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  function verifyReadAuth(method,pathName,query,headers){
   if(!signPub)return false;
   const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
+  const device=String(headers['x-gw-read-device']||'');
+  // the signed request is bound to the TARGET DEVICE: a read captured on one device never
+  // authorizes another (multi-device safe); '-' addresses a not-yet-enrolled device.
+  if(devId){if(device!==devId)return false}else if(device!=='-')return false;
   if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
   if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
   const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
   const key=String(ts)+'|'+nonce;
   if(readNonces.has(key))return false; // replay
   let okV=false;
-  try{okV=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{okV=false}
+  try{okV=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce,device].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{okV=false}
   if(okV)readNonces.set(key,ts+120000);
   return okV;
  }
@@ -892,7 +899,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(ledger.has(m.id)){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}} // a replayed envelope gets a stable 409 AND its terminal record stays pollable
     // durable commit BEFORE any effect: the accepted record IS the dispatch permit. If it cannot
     // be committed, nothing runs and the sender may retry the same envelope (it was not consumed).
-    if(!ledger.put(m.id,{status:'accepted',exp:+m.exp})){audit({kind:'server',stage:'ledger_fail',id:String(m.id).slice(0,40)});return {accepted:false,status:503,reason:'ledger'}}
+    const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
+    if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:String(m.id).slice(0,40)});return {accepted:false,status:429,reason:'ledger_full'}} // live window saturated - retry later; NO live tombstone was evicted
+    if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:String(m.id).slice(0,40)});return {accepted:false,status:503,reason:'ledger'}}
     handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
     return {accepted:true};
    }});

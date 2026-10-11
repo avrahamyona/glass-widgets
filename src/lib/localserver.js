@@ -3,7 +3,7 @@
 // Electron-free by design so tests/agent-server-unit.js can run it directly.
 // Auth: every request must carry the agent command key (X-GW-Key); the listener binds to
 // 127.0.0.1 only, so it is unreachable from the LAN - the tunnel is the only way in.
-const http=require('http');
+const http=require('http'),crypto=require('crypto');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
@@ -11,13 +11,18 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
-  // device-signed responses: when the enrolled device key exists, the exact response body is
-  // signed (headers X-GW-Device / X-GW-Device-Sig) so the sender verifies the endpoint holds the
-  // key BEFORE trusting a byte of the payload.
+  // device-signed responses: the signature binds the RESPONSE to the REQUEST - deviceId, method,
+  // path, query, the request's read ts+nonce, the HTTP status and the sha256 of the exact body -
+  // so a signed body can never be replayed onto another request, endpoint or nonce. Errors are
+  // signed too (whenever a device key exists).
   const reply=(code,obj,sign)=>{
    const s=JSON.stringify(obj);const h={'content-type':'application/json','content-length':Buffer.byteLength(s)};
    if(sign){const d=getDevice&&getDevice();
-    if(d&&d.deviceId&&d.deviceSign){try{h['x-gw-device']=d.deviceId;h['x-gw-device-sig']=d.deviceSign(s)}catch{}}}
+    if(d&&d.deviceId&&d.deviceSign){try{
+     const bh=crypto.createHash('sha256').update(s,'utf8').digest('hex');
+     h['x-gw-device']=d.deviceId;
+     h['x-gw-device-sig']=String(d.deviceSign([d.deviceId,req.method,req.url.split('?')[0],(req.url.split('?')[1]||''),String(req.headers['x-gw-read-ts']||''),String(req.headers['x-gw-read-nonce']||''),String(code),bh].join('\n'))).replace(/[\r\n]/g,''); // hex in production; single-line enforced for header safety
+    }catch{}}}
    res.writeHead(code,h);res.end(s)};
   // private-read gate for /task and /info: the baked key is public; reads need the worker-signed
   // request-bound proof (verifyReadAuth) ON TOP of it.
@@ -39,7 +44,7 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
   if(req.method==='GET'&&req.url.split('?')[0]==='/info'){
    // self-description for the sender: version, capabilities, device identity (pubkey is public
    // by nature). PRIVATE READ: signed-read auth required; device-signed response when enrolled.
-   if(!readOk())return reply(403,{ok:false,error:'read_auth'});
+   if(!readOk())return reply(403,{ok:false,error:'read_auth'},true);
    const base={ok:true,v:version||'',caps:caps||''};
    const info=getInfo?getInfo():null;
    const body=info&&typeof info==='object'?{...base,...info}:{...base,deviceless:true};
@@ -49,13 +54,13 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
    // (paths, clipboard, command output): signed-read auth AND an enrolled device key (the
    // response is device-signed; without a key the endpoint is closed). Unknown id -> 404;
    // a broken ledger -> 503 (fail-closed, never a pretend answer).
-   if(!readOk())return reply(403,{ok:false,error:'read_auth'});
+   if(!readOk())return reply(403,{ok:false,error:'read_auth'},true);
    const d=getDevice&&getDevice();
-   if(!d||!d.deviceId||!d.deviceSign)return reply(503,{ok:false,error:'no_device_key'});
-   if(tasksOk&&!tasksOk())return reply(503,{ok:false,error:'ledger'});
+   if(!d||!d.deviceId||!d.deviceSign)return reply(503,{ok:false,error:'no_device_key'},true);
+   if(tasksOk&&!tasksOk())return reply(503,{ok:false,error:'ledger'},true);
    const id=(req.url.split('id=')[1]||'').split('&')[0];
    const t=id&&getTask?getTask(id):null;
-   if(!t)return reply(404,{ok:false,error:'unknown_task'});
+   if(!t)return reply(404,{ok:false,error:'unknown_task'},true);
    return reply(200,{ok:true,id,status:t.status,note:t.note,result:t.result,at:t.at,terminal:!!t.terminal},true)}
   if(req.method==='POST'&&req.url==='/cmd'){
    let n=0,chunks=[];

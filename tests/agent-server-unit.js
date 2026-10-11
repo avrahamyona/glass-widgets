@@ -2,6 +2,9 @@
 const{startLocalServer,BODY_CAP}=require('../src/lib/localserver');
 const assert=(c,msg)=>{if(!c){console.error('FAIL:',msg);process.exit(1)}};
 const TOKEN='test-key-123';
+const crypto=require('crypto');
+// device-signed responses bind the response to the REQUEST: deviceId,method,path,query,readTs,readNonce,status,sha256(body)
+const canon=(dev,method,path,q,ts,nonce,status,body)=>Buffer.from('sig:'+[dev,method,path,q,ts,nonce,String(status),crypto.createHash('sha256').update(body,'utf8').digest('hex')].join('\n')).toString('base64url');
 
 async function main(){
  // 1) refuses to start without a token
@@ -94,11 +97,12 @@ async function main(){
 
  // 10) /info: signed-read auth passes; device-signed response when enrolled, deviceless marker else
  {const r5=await startLocalServer({port:0,token:TOKEN,version:'0.4.62',caps:'approve,update',onCommand:()=>({accepted:true}),
-   verifyReadAuth:()=>true,getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'}),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>'sig('+t+')'})});
+   verifyReadAuth:()=>true,getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'}),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>Buffer.from('sig:'+t).toString('base64url')})});
   const U5='http://127.0.0.1:'+r5.port,H={headers:{'X-GW-Key':TOKEN}};
   const res=await fetch(U5+'/info',H);const txt=await res.text();const i=JSON.parse(txt);
   assert(i.ok&&i.v==='0.4.62'&&i.deviceId==='dev-9'&&i.pubkey==='cHVi','info body: '+txt);
-  assert(res.headers.get('x-gw-device')==='dev-9'&&res.headers.get('x-gw-device-sig')==='sig('+txt+')','info response is device-signed over the exact body');
+  assert(res.headers.get('x-gw-device')==='dev-9'&&res.headers.get('x-gw-device-sig')===canon('dev-9','GET','/info','','','',200,txt),'info response signed over the request-bound canonical (not the bare body)');
+  assert(res.headers.get('x-gw-device-sig')!==txt&&res.headers.get('x-gw-device-sig')!=='sig('+txt+')','the old body-only replayable scheme is gone');
   await r5.stop()}
  {const r5b=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),verifyReadAuth:()=>true}); // not enrolled
   const res=await fetch('http://127.0.0.1:'+r5b.port+'/info',{headers:{'X-GW-Key':TOKEN}});const i=await res.json();
@@ -116,16 +120,18 @@ async function main(){
    assert((await fetch('http://127.0.0.1:'+r6.port+'/task?id=t1',H)).status===503,'no enrolled device -> /task closed (503 no_device_key)');
    await r6.stop()}
   const r7=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
-   verifyReadAuth:()=>true,getTask:id=>store.get(id),tasksOk:()=>store.ok(),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>'sig('+t+')'})});
+   verifyReadAuth:()=>true,getTask:id=>store.get(id),tasksOk:()=>store.ok(),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>Buffer.from('sig:'+t).toString('base64url')})});
   const U7='http://127.0.0.1:'+r7.port;
-  assert((await fetch(U7+'/task?id=nope',H)).status===404,'unknown task -> 404');
+  {const resE=await fetch(U7+'/task?id=nope',H);const txtE=await resE.text();
+   assert(resE.status===404,'unknown task -> 404');
+   assert(resE.headers.get('x-gw-device-sig')===canon('dev-9','GET','/task','id=nope','','',404,txtE),'ERROR responses are device-signed too (a 404 cannot be replayed onto another task)');}
   store.put('t1',{status:'accepted',exp:Date.now()+300000});
   let res=await fetch(U7+'/task?id=t1',H);let j=await res.json();
   assert(j.status==='accepted'&&j.terminal===false,'accepted record visible');
   store.put('t1',{status:'done',note:'2 matches',result:{matches:2}});
   res=await fetch(U7+'/task?id=t1',H);const txt=await res.text();j=JSON.parse(txt);
   assert(j.status==='done'&&j.terminal===true&&j.result.matches===2,'terminal record served');
-  assert(res.headers.get('x-gw-device-sig')==='sig('+txt+')','task response device-signed over the exact body');
+  assert(res.headers.get('x-gw-device-sig')===canon('dev-9','GET','/task','id=t1','','',200,txt),'task response signed over the request-bound canonical');
   store.put('t1',{status:'failed',note:'late'});
   j=await (await fetch(U7+'/task?id=t1',H)).json();
   assert(j.status==='done','terminal record idempotent (a late write cannot clobber)');
