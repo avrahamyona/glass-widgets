@@ -2,8 +2,18 @@
 // Electron-free. Every op: input validation, hard bounds, no generic exec.
 const fs=require('fs'),path=require('path'),crypto=require('crypto');
 
+const{RESULT_CAP}=require('../../src/lib/ledger');
 const READ_CAP=512*1024; // hard refusal above this size
-const INLINE_CAP=1024; // max file bytes returned INLINE - must fit the ledger's result budget; larger files are metadata-only with an EXPLICIT truncated marker (file transfer is a separate, future op - never a silent round-trip claim)
+const INLINE_CAP=1024; // max file bytes returned inline - NEVER a promise: the real budget is dynamic (below)
+// dynamic inline budget: the result JSON must fit the ledger's RESULT_CAP TOGETHER with the
+// path, sha256 and the truncation descriptor. base64 inflates bytes 4/3; when the computed
+// budget cannot hold a useful prefix we return a metadata-only descriptor instead - the
+// explicit truncation marker must survive the ledger cap, never collapse into a generic stub.
+function inlineBytes(rp){
+ const overhead=Buffer.byteLength(JSON.stringify({path:rp,size:0,sha256:'x'.repeat(64),truncated:true,inline_cap:0,note:'x'.repeat(120)}));
+ const budget=RESULT_CAP-overhead-64; // 64B slack for JSON structure drift
+ return Math.max(0,Math.min(INLINE_CAP,Math.floor(budget*3/4)));
+}
 const FIND_MAX_RESULTS=50, FIND_MAX_DIRS=20000, FIND_TIMEOUT_MS=15000;
 
 // path allowlist: resolved real path must live under one of the configured roots
@@ -50,8 +60,10 @@ function readFile(data,ctx){
  if(st.size>READ_CAP)return {ok:false,error:'too_large',size:st.size};
  const buf=fs.readFileSync(rp);
  const result={path:rp,size:st.size,sha256:crypto.createHash('sha256').update(buf).digest('hex')};
- if(buf.length<=INLINE_CAP){result.content_base64=buf.toString('base64');result.truncated=false}
- else{result.content_base64=buf.subarray(0,INLINE_CAP).toString('base64');result.truncated=true;result.inline_cap=INLINE_CAP;result.note='content cut at '+INLINE_CAP+' bytes to fit the ledger - full file transfer is a separate op'}
+ const cap=inlineBytes(rp);
+ if(buf.length<=cap){result.content_base64=buf.toString('base64');result.truncated=false}
+ else if(cap>=128){result.content_base64=buf.subarray(0,cap).toString('base64');result.truncated=true;result.inline_cap=cap;result.note='prefix of '+cap+' bytes (dynamic ledger budget) - full file transfer is a separate op'}
+ else{result.truncated=true;result.inline_cap=0;result.note='no inline budget at this path length - metadata only; full file transfer is a separate op'}
  return {ok:true,result};
 }
 

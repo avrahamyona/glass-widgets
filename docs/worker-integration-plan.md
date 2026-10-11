@@ -9,8 +9,8 @@ Base: agent through PR #70 (4849b70), worker route v4 (PR #69, df5b311), contrac
 - What (safe bootstrap order - the PC never receives a sender secret):
   1. Owner backend (holds X-GW-Reply-Key / GW_REPLY_KEY - a private sender credential that must NEVER be provisioned to the PC) authorizes and signs the enroll intent.
   2. PC mints its device keypair locally and persists it ACL-hardened + atomically (EXISTS in src/lib/agent.js; the standalone server skeleton now does the same - tmp exclusive-create + rename + load-time private/public pair check).
-  3. PC publishes its PUBLIC key only (device-signed) as the enroll ACK.
-  4. Owner backend verifies the device identity against the authorized intent.
+  3. The PC answers the enroll CHALLENGE: the owner backend issues a one-time nonce over the verified PC channel, and the PC signs {challenge, pubkey, deviceId} with its fresh device key. A bare self-signed pubkey proves NOTHING (anyone can mint a pair) - only the challenge-bound signature ties the key to the actual PC in this enrollment episode.
+  4. Owner backend verifies the signature against the published pubkey, checks the challenge is the exact nonce it issued to this PC session, and only then accepts the device identity.
   5. Worker enroll registry records device_id = sha256(pubkey)[:16] with the atomic device limit (route EXISTS, static-cleared).
   6. Signed tunnel-pointer publish + nonce proof (health nonce flow EXISTS).
   The code as written only mints worker-signed enroll_device envelopes; the /enroll endpoint requires the private reply key, so the order above is the only safe wiring.
@@ -20,7 +20,7 @@ Base: agent through PR #70 (4849b70), worker route v4 (PR #69, df5b311), contrac
 ### A2. Read signer (MISSING)
 - What: worker route that authorizes /task (and /info) reads: signs the six-field read canonical exactly as the handler verifies it - [method, path, query, ts, nonce, device] joined by newlines - with GW_SIGN_PRIVATE, so the agent's verifyReadAuth (EXISTS, device-bound) returns 200; wrong sig / stale ts / replayed nonce -> 403 read_auth. (403 device_required is only the STRICT_ENVELOPES v1-command refusal; read failures surface as read_auth.)
 - Locus: new worker route (e.g. /glasswidgets/agent/read-sign or proxied read), agent verifyReadAuth in src/lib/agent.js:881 (EXISTS).
-- Verify: read proof - signed read 200 with correct body, tampered sig 403, replayed stale ts0 403, v1 read on strict-enrolled device 403 device_required.
+- Verify: read proof - signed read 200 with correct body, tampered sig 403 read_auth, replayed stale ts 403 read_auth, replayed nonce 403 read_auth.
 
 ### A3. v2 device wiring (MISSING live)
 - What: worker stamps every command envelope with the enrolled device field and signs the device-first 6-field canonical; agent STRICT_ENVELOPES gate (EXISTS, opt-in env GLASSWIDGETS_STRICT_ENVELOPES=1) then refuses v1 with device_required.
@@ -59,7 +59,7 @@ Ack retry with backoff: MISSING on the agent side. The worker's current updated=
 - C3. SSE stays the command path until B1-B4 pass live; cutover behind a feature flag with .bak / git tag recovery. The 03:00 rollout (worker/indexes) is independent of this plan.
 
 ## Gates (unchanged)
-1. #69 Windows runtime ACL fixture (user can run it now - tools/acl-windows-fixture.js, commit 41ca75e).
+1. ~~#69 Windows runtime ACL fixture~~ CLOSED 2026-10-11 22:04 IDT: the user ran tools/acl-windows-fixture.js (41ca75e) on the real Windows target - FIXTURE: PASS 4/4, verified pixel-by-pixel by ops. No rerun at 03:00.
 2. This plan's A-items.
 3. Strict device active at multidevice cutover.
 4. B-proofs live.

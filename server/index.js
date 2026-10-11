@@ -12,7 +12,8 @@ const{createLedger,RESULT_TTL_MS}=require('../src/lib/ledger');
 const{OPS}=require('./lib/ops');
 
 const CONFIG=process.env.GW_SERVER_CONFIG||path.join(process.env.GW_SERVER_DATA||path.join(os.homedir(),'.glasswidgets-server'),'config.json');
-const cfg=JSON.parse(fs.readFileSync(CONFIG,'utf8'));
+let cfg={}; // config.json is OPTIONAL: env-only provisioning must boot without any file
+try{cfg=JSON.parse(fs.readFileSync(CONFIG,'utf8'))}catch(e){if(!e||e.code!=='ENOENT')throw e}
 const dataDir=path.dirname(CONFIG);
 // secrets: env wins, config.json is the LOCAL-DEV path only. Production provisioning is a
 // vault/managed-secret handoff - the token and sender pubkey never sit in a repo or a backup.
@@ -24,33 +25,35 @@ const signPub=crypto.createPublicKey({key:Buffer.from(cfg.senderPub,'base64'),fo
 
 // device identity: generated ON this machine on first boot, private key never leaves
 const devFile=path.join(dataDir,'device.json');
-function aclHardenWin(p,isDir){ // same icacls shape as the reviewed src/lib helpers
+const{aclHarden,aclOwnerOnly}=require('../src/lib/acl-win'); // the SHARED reviewed harden+verify module (icacls + Get-Acl/evalAclDump verification), same code as the Electron agent
+function hardenOrThrow(p,isDir){ // harden AND verify; explicit ACEs that /grant:r does not remove fail the verification -> we fail closed
  if(process.platform!=='win32')return;
- const{execFileSync}=require('child_process');
- const sid=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-Command','[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],{windowsHide:true,timeout:8000}).toString().trim();
- if(!/^S-1-5-[0-9-]+$/.test(sid))throw new Error('no SID for ACL harden');
- execFileSync('icacls',[p,'/inheritance:r','/grant:r','*'+sid+(isDir?':(OI)(CI)(F)':':(R,W)')],{windowsHide:true,timeout:8000});
+ if(!aclHarden(p,isDir))throw new Error('ACL harden+verify failed on '+p);
 }
 function derivePub(privB64){
  const pub=crypto.createPublicKey(crypto.createPrivateKey({key:Buffer.from(privB64,'base64'),format:'der',type:'pkcs8'}));
  return pub.export({format:'der',type:'spki'}).toString('base64');
 }
 let device=null;
-const devRaw=(()=>{try{return fs.readFileSync(devFile,'utf8')}catch{return null}})();
-if(devRaw===null){ // first boot ONLY: mint, ACL-harden the dir, atomic unique-tmp + rename
+let devRaw=null;
+try{devRaw=fs.readFileSync(devFile,'utf8')}catch(e){if(!e||e.code!=='ENOENT')throw e} // ONLY a missing file means first boot; EACCES/EIO/corrupt filesystems fail CLOSED
+if(devRaw===null){ // first boot ONLY: mint, ACL-harden the dir (verified), atomic unique-tmp + rename
  const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
  device={pub:publicKey.export({format:'der',type:'spki'}).toString('base64'),priv:privateKey.export({format:'der',type:'pkcs8'}).toString('base64')};
  device.id=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
- aclHardenWin(dataDir,true);
+ hardenOrThrow(dataDir,true);
  const tmp=path.join(dataDir,'.device-'+process.pid+'-'+Date.now()+'.tmp');
- fs.writeFileSync(tmp,JSON.stringify(device),{mode:0o600,flag:'wx'}); // exclusive create - a pre-planted tmp is never overwritten
- aclHardenWin(tmp,false);
- fs.renameSync(tmp,devFile); // atomic same-dir rename
+ try{
+  fs.writeFileSync(tmp,JSON.stringify(device),{mode:0o600,flag:'wx'}); // exclusive create - a pre-planted tmp is never overwritten
+  hardenOrThrow(tmp,false); // harden+verify BEFORE the rename
+  fs.renameSync(tmp,devFile); // atomic same-dir rename
+ }finally{try{fs.unlinkSync(tmp)}catch{}} // a failed mint never leaves a tmp behind
 }else{
  device=JSON.parse(devRaw); // a CORRUPT file throws here - boot fails loud, identity never silently renews
  if(!device||!device.priv||!device.pub||derivePub(device.priv)!==device.pub)throw new Error('device identity file failed the private/public pair check - refusing to boot over a corrupt identity');
  const want=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
  if(device.id!==want)throw new Error('device id does not match its pubkey - refusing to boot over a corrupt identity');
+ if(process.platform==='win32'&&!aclOwnerOnly(devFile))throw new Error('device private key is readable by others - refusing to boot'); // load-time ACL check, same as the agent
 }
 const privK=crypto.createPrivateKey({key:Buffer.from(device.priv,'base64'),format:'der',type:'pkcs8'});
 const deviceSign=t=>crypto.sign(null,Buffer.from(t,'utf8'),privK).toString('hex');
@@ -94,6 +97,7 @@ async function main(){
    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
    for(const k of['id','kind','ts','exp','sig','device'])if(k in data)return {accepted:false,status:400,reason:'reserved_field'};
    if(m.device!=null&&String(m.device)!==device.id){log('warn',{stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
+   if(process.env.GW_SERVER_STRICT_ENVELOPES==='1'&&m.device==null)return {accepted:false,status:403,reason:'device_required'}; // opt-in strict: enrolled devices take v2 device-bound envelopes only (mirrors the agent's STRICT_ENVELOPES)
    if(!validEnvelope(m,JSON.stringify(data))){log('warn',{stage:'unsigned_cmd',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'unsigned'}}
    if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
    if(ledger.has(m.id))return {accepted:false,status:409,reason:'duplicate'};

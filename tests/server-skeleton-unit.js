@@ -14,7 +14,7 @@ const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const signRead=(p,q,dev)=>{const ts=Date.now(),nonce=crypto.randomBytes(12).toString('base64url');
  return{'X-GW-Key':'srv-key','X-GW-Read-Ts':String(ts),'X-GW-Read-Nonce':nonce,'X-GW-Read-Device':dev,
  'X-GW-Read-Sig':crypto.sign(null,Buffer.from(['GET',p,q,String(ts),nonce,dev].join('\n'),'utf8'),PRIV).toString('hex')}};
-const boot=()=>{const cp=spawn(process.execPath,['server/index.js'],{env:{...process.env,GW_SERVER_CONFIG:path.join(dir,'config.json')},stdio:['ignore','pipe','pipe']});
+const boot=(extra)=>{const cp=spawn(process.execPath,['server/index.js'],{env:{...process.env,GW_SERVER_CONFIG:path.join(dir,'config.json'),...(extra||{})},stdio:['ignore','pipe','pipe']});
  let out='',err='';cp.stdout.on('data',d=>out+=d);cp.stderr.on('data',d=>err+=d);return{cp,out:()=>out,err:()=>err}};
 const waitUp=async(b,label)=>{for(let i=0;i<60&&!b.out().includes('server up');i++)await sleep(200);
  assert(b.out().includes('server up'),label+' booted: '+b.out()+' STDERR: '+b.err());
@@ -22,10 +22,11 @@ const waitUp=async(b,label)=>{for(let i=0;i<60&&!b.out().includes('server up');i
 const post=(U,body)=>fetch(U+'/cmd',{method:'POST',headers:{'content-type':'application/json','X-GW-Key':'srv-key'},body:JSON.stringify(body)});
 const task=async(U,id,dev)=>{let j=null;for(let i=0;i<50;i++){j=await(await fetch(U+'/task?id='+id,{headers:signRead('/task','id='+id,dev)})).json();if(j.terminal)break;await sleep(200)}return j};
 const kill=cp=>new Promise(res=>{if(!cp||cp.exitCode!==null)return res();cp.once('exit',()=>res());cp.kill('SIGTERM');setTimeout(res,3000).unref()});
-let b1=null,b2=null;
+let b1=null,b2=null,bS=null,b4=null;
 (async()=>{try{
  b1=boot();const U=await waitUp(b1,'server');
- const dev=JSON.parse(fs.readFileSync(path.join(dir,'device.json'),'utf8'));
+ const devJson=fs.readFileSync(path.join(dir,'device.json'),'utf8');
+ const dev=JSON.parse(devJson);
  assert(/^[0-9a-f]{16}$/.test(dev.id),'device id minted locally');
  assert(dev.priv&&dev.pub,'device keypair persisted');
  // health proof
@@ -79,14 +80,28 @@ let b1=null,b2=null;
  assert(j2.status==='done'&&j2.result.matches.length===2,'terminal record survives restart');
  await kill(b2.cp);b2=null;
  // corrupt device file: boot fails LOUD, identity never silently renews
- const bad=JSON.parse(fs.readFileSync(path.join(dir,'device.json'),'utf8'));bad.pub=bad.pub.split('').reverse().join('');
+ const bad=JSON.parse(devJson);bad.pub=bad.pub.split('').reverse().join('');
  fs.writeFileSync(path.join(dir,'device.json'),JSON.stringify(bad));
  const b3=boot();let dead=false;b3.cp.once('exit',()=>dead=true);
  for(let i=0;i<40&&!dead;i++)await sleep(200);
  assert(dead&&!b3.out().includes('server up'),'corrupt device file -> boot refused (no silent identity renew): '+b3.out());
  await kill(b3.cp);
+ fs.writeFileSync(path.join(dir,'device.json'),devJson); // restore the valid identity
+ // strict envelopes opt-in (mirrors the agent's STRICT_ENVELOPES): v1 -> 403 device_required, v2 device-bound -> 202
+ bS=boot({GW_SERVER_STRICT_ENVELOPES:'1'});const US=await waitUp(bS,'strict');
+ ts=Date.now();exp=ts+300000;const dV={query:'dad'};
+ assert((await post(US,{id:'s1',kind:'find_files',ts,exp,sig:sign('s1','find_files',ts,exp,JSON.stringify(dV)),data:dV})).status===403,'strict: v1 -> 403 device_required');
+ const sigV=crypto.sign(null,Buffer.from([dev.id,'s2','find_files',String(ts),String(exp),JSON.stringify(dV)].join('\n'),'utf8'),PRIV).toString('hex');
+ assert((await post(US,{id:'s2',kind:'find_files',device:dev.id,ts,exp,sig:sigV,data:dV})).status===202,'strict: v2 device-bound accepted');
+ await kill(bS.cp);bS=null;
+ // unreadable (non-ENOENT) device path: fail CLOSED, never minted over
+ fs.rmSync(path.join(dir,'device.json'));fs.mkdirSync(path.join(dir,'device.json'));
+ b4=boot();let dead4=false;b4.cp.once('exit',()=>dead4=true);
+ for(let i=0;i<40&&!dead4;i++)await sleep(200);
+ assert(dead4&&!b4.out().includes('server up'),'unreadable device path -> fail closed, no mint-over: '+b4.out());
+ await kill(b4.cp);b4=null;
  console.log('SERVER-SKELETON-UNIT: PASS');
 }catch(e){console.error('FAIL',e);process.exitCode=1}
-finally{await kill(b1&&b1.cp);await kill(b2&&b2.cp);
+finally{for(const b of [b1,b2,bS,b4])await kill(b&&b.cp);
  try{fs.rmSync(dir,{recursive:true,force:true})}catch(e){console.error('cleanup failed:',e.message)}
  process.exit(process.exitCode||0)}})();
