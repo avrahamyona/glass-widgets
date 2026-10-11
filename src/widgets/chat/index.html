@@ -142,6 +142,8 @@ function incomingCard(c){if(!c||!c.id)return;
  const ex=H.cards.find(x=>x.id===c.id);
  const rec={id:String(c.id),kind:typeof c.kind==='string'?String(c.kind).slice(0,20):'',title:String(c.title||''),body:String(c.body||''),ends_at:+c.ends_at||0,buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,file:c.file&&typeof c.file==='object'?{name:String(c.file.name||''),size:+c.file.size||0,mime:String(c.file.mime||''),url:String(c.file.url||''),path:String(c.file.path||'')}:undefined,at:+c.at||Date.now(),acted:ex?ex.acted:false,actedButton:ex?ex.actedButton:'',doneNotified:ex?ex.doneNotified:false};
  if(ex)Object.assign(ex,rec);else H.cards.push(rec);
+ const tgt=ex||rec;
+ if(tgt.kind==='timer'&&tgt.ends_at){if(!ex||ex.ends_at!==tgt.ends_at)tgt.doneNotified=false;ensureTimerSched(tgt)} // a refreshed deadline re-arms the timer
  save();render(log);
  if(ex){if(island&&pillMode==='open')render(pillBodyLog());return} // in-place refresh (e.g. pc-status) updates silently - no second alert
  if(!island)return;
@@ -200,11 +202,9 @@ function cardEl(c){const d=document.createElement('div');d.className='card nd'+(
  const t=document.createElement('div');t.className='ct';t.textContent=(c.kind&&KIND_ICON[c.kind]?KIND_ICON[c.kind]+' ':'')+c.title;d.append(t);
  if(c.kind==='timer'&&c.ends_at){
   const cd=document.createElement('div');cd.className='cdown';
-  const upd=()=>{const left=c.ends_at-Date.now();
-   if(left<=0){cd.textContent='הטיימר הסתיים!';cd.classList.add('done');
-    if(!c.doneNotified){c.doneNotified=true;save();chime();setUnread(true);pill.classList.add('bump');setTimeout(()=>pill.classList.remove('bump'),700)}}
-   else{const s=Math.ceil(left/1000);cd.textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}};
-  upd();if(!c.doneNotified)tickers.push(setInterval(upd,1000));d.append(cd)}
+  const left=c.ends_at-Date.now();
+  cd.textContent=left>0?fmtClock(left):'הטיימר הסתיים!';if(left<=0)cd.classList.add('done');
+  d.append(cd)}
  if(c.body){const b=document.createElement('div');b.className='cb';b.innerHTML=linkify(esc(c.body));wireLinks(b);d.append(b)}
  if(c.graph&&c.graph.series&&c.graph.series.length)d.append(graphSvg(c.graph));
  if(c.file&&c.file.name)d.append(fileBox(c));
@@ -214,6 +214,28 @@ function cardEl(c){const d=document.createElement('div');d.className='card nd'+(
    btn.onclick=()=>cardClick(c,b,d);row.append(btn)}
   d.append(row)}
  return d}
+// one scheduler per timer-card ID, independent of any render target: updates every mounted countdown
+// node for that card, cleans itself up on completion/removal, re-arms on a new deadline.
+const timerScheds={};
+function fmtClock(ms){const s=Math.ceil(ms/1000),h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=String(s%60).padStart(2,'0');
+ return h>0?h+':'+String(m).padStart(2,'0')+':'+ss:String(m).padStart(2,'0')+':'+ss}
+function ensureTimerSched(c){
+ const ex=timerScheds[c.id];
+ if(ex&&ex.ends_at===c.ends_at)return;
+ if(ex)clearInterval(ex.iv);
+ timerScheds[c.id]={iv:setInterval(()=>tickTimer(c.id),1000),ends_at:c.ends_at};
+ tickTimer(c.id);
+}
+function tickTimer(id){
+ const sch=timerScheds[id];if(!sch)return;
+ const c=(H.cards||[]).find(x=>x.id===id);
+ if(!c){clearInterval(sch.iv);delete timerScheds[id];return}
+ const left=sch.ends_at-Date.now(),done=left<=0;
+ const txt=done?'הטיימר הסתיים!':fmtClock(left);
+ for(const el of document.querySelectorAll('.card[data-cid="'+id+'"] .cdown')){el.textContent=txt;el.classList.toggle('done',done)}
+ if(done){clearInterval(sch.iv);delete timerScheds[id];
+  if(!c.doneNotified){c.doneNotified=true;save();chime();setUnread(true);pill.classList.add('bump');setTimeout(()=>pill.classList.remove('bump'),700)}}
+}
 const fmtSize=n=>n>1048576?(n/1048576).toFixed(1)+' MB':Math.max(1,Math.round((+n||0)/1024))+' KB';
 const FILE_ICONS={pdf:'\u{1F4C4}',doc:'\u{1F4DD}',docx:'\u{1F4DD}',txt:'\u{1F4DD}',rtf:'\u{1F4DD}',odt:'\u{1F4DD}',png:'\u{1F5BC}\uFE0F',jpg:'\u{1F5BC}\uFE0F',jpeg:'\u{1F5BC}\uFE0F',gif:'\u{1F5BC}\uFE0F',webp:'\u{1F5BC}\uFE0F',heic:'\u{1F5BC}\uFE0F',mp3:'\u{1F3B5}',m4a:'\u{1F3B5}',wav:'\u{1F3B5}',mp4:'\u{1F3AC}',mov:'\u{1F3AC}',avi:'\u{1F3AC}',xls:'\u{1F4CA}',xlsx:'\u{1F4CA}',csv:'\u{1F4CA}',ppt:'\u{1F4FD}\uFE0F',pptx:'\u{1F4FD}\uFE0F',zip:'\u{1F5DC}\uFE0F',rar:'\u{1F5DC}\uFE0F'};
 const fileIcon=n=>FILE_ICONS[(String(n||'').split('.').pop()||'').toLowerCase()]||'\u{1F4CE}';
@@ -238,9 +260,7 @@ async function cardClick(c,b,el){if(c.acted||c.busy)return;c.busy=true;c.busyBut
  c.busy=false;c.busyButton='';
  if(r.ok||r.reason==='already_acted'||r.reason==='expired'){c.acted=true;c.actedButton=b.id;save()}
  if(document.contains(fresh))fresh.replaceWith(cardEl(c));else{render(log);if(island&&pillMode==='open')render(pillBodyLog())}}
-let tickers=[];
-function clearTickers(){for(const t of tickers)clearInterval(t);tickers=[]}
-function render(into){clearTickers();into.innerHTML='';for(const it of timeline())into.append(it.m?bubble(it.m):cardEl(it.c));into.scrollTop=into.scrollHeight;updatePillSt()}
+function render(into){into.innerHTML='';for(const it of timeline())into.append(it.m?bubble(it.m):cardEl(it.c));into.scrollTop=into.scrollHeight;updatePillSt()}
 async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
@@ -316,7 +336,8 @@ if(island){document.body.classList.add('island');card.style.display='none';pill.
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
-(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];
+ for(const c of H.cards)if(c&&c.kind==='timer'&&+c.ends_at>0)ensureTimerSched(c);readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  if(api.onChatMsg)api.onChatMsg(incoming);
  if(api.onChatCard)api.onChatCard(incomingCard);
