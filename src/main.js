@@ -229,7 +229,8 @@ function startMedia(){
  p.on('exit',()=>{mediaProcess=null;if(!quitting)setTimeout(startMedia,10000)});
 }
 ipcMain.handle('media:get',()=>({...media,age:Date.now()-mediaAt}));
-ipcMain.handle('media:cmd',(_,c)=>{if(!['toggle','next','prev','play','pause'].includes(c))return {ok:false};if(!mediaProcess||!mediaProcess.stdin.writable)return {ok:false,error:'רכיב המדיה אינו זמין'};mediaProcess.stdin.write(c+'\n');return {ok:true}});
+function mediaCmdWrite(c){if(!['toggle','next','prev','play','pause'].includes(c))return {ok:false};if(!mediaProcess||!mediaProcess.stdin.writable)return {ok:false,error:'רכיב המדיה אינו זמין'};mediaProcess.stdin.write(c+'\n');return {ok:true}}
+ipcMain.handle('media:cmd',(_,c)=>mediaCmdWrite(c));
 // ---- user feedback to the fixes center (Avi Music Cloudflare worker, separate path/table)
 const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/report';
 // chat widget: messages go to the fixes-center worker; Chaim replies by poll.
@@ -524,7 +525,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite})}catch(e){bootLog('agent '+(e&&e.message))}
   try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // check on launch + every 10 min, quiet
   try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
