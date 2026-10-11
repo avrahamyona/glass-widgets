@@ -841,16 +841,31 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
  let srvStop=null;
  if(cmdKey&&srvCfg.enabled)resolveFolders().then(async()=>{
-  if(!folders.length)return;
+  if(stop||!folders.length)return; // stop() during folder resolution must not bring the listener up
   const{startLocalServer}=require('./localserver');
   const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
+   deviceId:devId||undefined,deviceSign:devKey?(nonce)=>deviceSign(devId+'\n'+nonce):undefined,
    log:(lvl,o)=>audit({lvl,...o}),
    onCommand:(m)=>{
-    if(!KNOWN_KINDS.has(m.kind))return {accepted:false,reason:'unknown_kind'};
-    if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return {accepted:false,reason:'duplicate'};
-    handle(m);
+    // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
+    // and proves nothing about the sender. Every tunnel command must arrive as a signed envelope
+    // {id,kind,ts,exp,sig,data} - Ed25519 over id\nkind\nts\nexp\nJSON.stringify(data), signed by the
+    // worker's private key (never in the EXE). Unsigned/stale/expired -> 403, audited, never handled.
+    // The signature proves sender authority at INTAKE ONLY: downstream the command runs with ordinary
+    // unsigned semantics - approval cards for sensitive kinds exactly as before.
+    if(!KNOWN_KINDS.has(m.kind))return {accepted:false,status:400,reason:'unknown_kind'};
+    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
+    if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
+     audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
+     return {accepted:false,status:403,reason:'unsigned'}}
+    if(checkDup(m.id,m.kind,{}))return {accepted:false,status:409,reason:'duplicate'};
+    // durable replay record for kinds with no downstream seen-marking; card-parking kinds own theirs
+    const parked=m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control';
+    if(!parked&&!markSeen(m.id,'tunnel_intake',m.exp))return {accepted:false,status:503,reason:'replay_store'};
+    handle({id:m.id,kind:m.kind,...data});
     return {accepted:true};
    }});
+  if(stop){if(r.started)r.stop();return} // stop() raced the listen() call - tear it back down
   if(r.started){srvStop=r.stop;startTunnelLeg(r.port)}else audit({kind:'server',stage:'not_started',reason:String(r.reason||'')});
  });
 
@@ -860,9 +875,18 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const tunnelCfg={enabled:true,...((cfg.tunnel&&typeof cfg.tunnel==='object')?cfg.tunnel:{})};
  if(process.env.GLASSWIDGETS_TUNNEL_ENABLED!==undefined)tunnelCfg.enabled=process.env.GLASSWIDGETS_TUNNEL_ENABLED==='1';
  const discoveryUrl=base.replace(/\/chat$/,'/agent/tunnel');
+ // per-device credential, provisioned OUTSIDE the public EXE (delivered by a worker-signed command
+ // into userData/agent.json localServer.deviceId/devicePriv). The publish and the health proof are
+ // signed with it; the baked cmd key is public and never proves device identity.
+ const devId=String((srvCfg.deviceId)||process.env.GLASSWIDGETS_DEVICE_ID||'').slice(0,64);
+ const devPrivB64=String((srvCfg.devicePriv)||process.env.GLASSWIDGETS_DEVICE_PRIV||'');
+ let devKey=null;try{if(devPrivB64)devKey=crypto.createPrivateKey({key:Buffer.from(devPrivB64.trim(),'base64'),format:'der',type:'pkcs8'})}catch{}
+ const deviceSign=devKey?text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex'):null;
  let tunnelStop=null,heartbeat=null;
  async function publishTunnel(url){
-  try{const r=await fetch(discoveryUrl,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':cmdKey},body:JSON.stringify({url,v:app.getVersion()}),signal:AbortSignal.timeout(15000)});
+  if(!deviceSign||!devId){audit({kind:'tunnel',stage:'no_device_key'});return} // never publish under the public baked key
+  const ts=Date.now();
+  try{const r=await fetch(discoveryUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({deviceId:devId,url,v:app.getVersion(),ts,sig:deviceSign(devId+'\n'+url+'\n'+ts)}),signal:AbortSignal.timeout(15000)});
    if(!r.ok)audit({kind:'tunnel',stage:'publish_fail',status:r.status});
   }catch(e){audit({kind:'tunnel',stage:'publish_error',err:String(e&&e.message||e).slice(0,120)})}
  }
@@ -870,8 +894,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!tunnelCfg.enabled)return;
   const{ensureCloudflared,startTunnel}=require('./tunnel');
   const exe=await ensureCloudflared(path.join(app.getPath('userData'),'bin'),{log:(stage,obj)=>audit({kind:'tunnel',stage,...obj})});
+  if(stop)return; // stop() raced the download - never bring the tunnel up afterwards
   if(!exe){audit({kind:'tunnel',stage:'no_binary'});return}
-  const t=startTunnel({exePath:exe,port,log:(stage,obj)=>audit({kind:'tunnel',stage,...obj}),
+  const t=startTunnel({exePath:exe,port,isStopped:()=>stop,log:(stage,obj)=>audit({kind:'tunnel',stage,...obj}),
+   onDown:()=>{clearInterval(heartbeat);heartbeat=null;audit({kind:'tunnel',stage:'down'});publishTunnel('')}, // pointer goes stale NOW, not after 90s of false-fresh
    onUrl:(url)=>{
     audit({kind:'tunnel',stage:'published',url});
     publishTunnel(url);
