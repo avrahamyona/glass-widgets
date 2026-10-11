@@ -435,14 +435,18 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  const UI_PS1=path.join(__dirname,'ui-input.ps1');
  const UI_TASK_MS=+process.env.GLASSWIDGETS_UI_TASK_MS||120000; // hard whole-task deadline
  function dipRect(d){ // one display's PHYSICAL-pixel rect from the OS conversion, never a hand-rolled multiply
-  try{if(typeof screen.dipToScreenRect==='function'){const r=screen.dipToScreenRect(null,{x:d.bounds.x,y:d.bounds.y,width:d.bounds.width,height:d.bounds.height});
-    return {x:r.x,y:r.y,w:r.width,h:r.height}}}catch{}
-  const sf=d.scaleFactor||1; // fallback for platforms without the Win32 conversion (scaleFactor 1 there)
-  return {x:Math.round(d.bounds.x*sf),y:Math.round(d.bounds.y*sf),w:Math.round(d.bounds.width*sf),h:Math.round(d.bounds.height*sf)};
+  if(typeof screen.dipToScreenRect!=='function'){
+   if(process.platform==='win32')throw new Error('dipToScreenRect unavailable - refusing to guess the physical transform'); // fail closed on Windows
+   const sf=d.scaleFactor||1; // dev/test platforms only, where scaleFactor is 1
+   return {x:Math.round(d.bounds.x*sf),y:Math.round(d.bounds.y*sf),w:Math.round(d.bounds.width*sf),h:Math.round(d.bounds.height*sf)};
+  }
+  const r=screen.dipToScreenRect(null,{x:d.bounds.x,y:d.bounds.y,width:d.bounds.width,height:d.bounds.height});
+  return {x:r.x,y:r.y,w:r.width,h:r.height};
  }
- function uiDisplays(){ // physical-pixel rects, one entry per ACTUAL display
+ function uiDisplays(){ // physical-pixel rects, one entry per ACTUAL display; empty = conversion refused (fail closed)
   try{return screen.getAllDisplays().map(dipRect)}catch{return []}
  }
+ // a Windows box that cannot convert refuses every plan (uiPointOk over the empty list) and every screenshot (dipRect throw)
  function uiPointOk(x,y){return uiDisplays().some(r=>x>=r.x&&x<r.x+r.w&&y>=r.y&&y<r.y+r.h)}
  function uiStepsOk(raw){
   if(!Array.isArray(raw)||!raw.length||raw.length>20)return false;
@@ -460,7 +464,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  function uiStep(d,x,y,timeoutMs){return new Promise(res=>{
   if(UI_DRYRUN)return res({ok:true,dry:true});
   if(process.platform!=='win32')return res({ok:false,error:'ui input is supported on Windows only'});
-  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',UI_PS1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:Math.max(500,Math.floor(timeoutMs)),windowsHide:true},
+  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',UI_PS1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:Math.max(1,Math.floor(timeoutMs)),windowsHide:true},
    (e,so,se)=>res(e?{ok:false,error:String(se||so||e.message||e).replace(/\s+/g,' ').trim().slice(0,150)}:{ok:true}));
  })}
  async function execUi(id,steps){
@@ -479,7 +483,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    const x=Math.round(+st.x),y=Math.round(+st.y);
    if(!uiPointOk(x,y)){out.steps.push({do:d,x,y,ok:false,error:'point no longer inside a display'});
     audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,ok:false,error:'pre-exec revalidation failed'});break}
-   const r=await uiStep(d,x,y,Math.min(10000,remain)); // the subprocess never outlives the task budget
+   remain=deadline-Date.now(); // recomputed AFTER revalidation, right before launch
+   if(remain<=0){blow(i);break}
+   const r=await uiStep(d,x,y,Math.min(10000,remain)); // the subprocess never outlives the task budget - exact remaining, no floor
    if(Date.now()>deadline){out.steps.push({do:d,x,y,ok:!!r.ok,injected:!!r.ok,late:true});blow(i);break} // completed past the deadline: not a success
    out.steps.push({do:d,x,y,ok:r.ok,injected:!!r.ok,...(r.error?{error:r.error}:{}),...(r.dry?{dry:true}:{})});
    audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,injected:!!r.ok,error:r.error});

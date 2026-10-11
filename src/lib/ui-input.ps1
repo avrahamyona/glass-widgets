@@ -6,7 +6,7 @@ $hr=$t::SetProcessDpiAwareness(2) # per-monitor DPI aware: SetCursorPos below ta
 if($hr -ne 0 -and $hr -ne -2147024891){Write-Error "SetProcessDpiAwareness failed hr=$hr";exit 1} # E_ACCESSDENIED = context already set by the manifest
 $aw=-1;$hr2=$t::GetProcessDpiAwareness([Diagnostics.Process]::GetCurrentProcess().Handle,[ref]$aw)
 if($hr2 -ne 0){Write-Error "GetProcessDpiAwareness failed hr=$hr2";exit 1}
-if($aw -lt 1){Write-Error "process is still DPI-unaware - physical mapping unverified";exit 1} # fail closed: no awareness, no physical contract
+if($aw -ne 2){Write-Error "DPI awareness is $aw, need per-monitor (2) for the physical contract";exit 1} # fail closed: system-aware(1)/unaware(0) cannot prove mixed-DPI physical mapping
 if(-not $t::SetCursorPos($X,$Y)){Write-Error "SetCursorPos refused ($X,$Y)";exit 1}
 Start-Sleep -Milliseconds 50
 Add-Type -AN System.Windows.Forms
