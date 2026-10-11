@@ -7,6 +7,5 @@ native/**/publish/
 native/**/build/
 native/**/*.spec
 __pycache__/
-package-lock.json
 build/icon.png
 build/tray.png
