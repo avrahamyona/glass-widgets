@@ -83,6 +83,48 @@ async function main(){
   assert(h.status===200,'serves after restart');
   await r2.stop()}
 
+ // 9) /info: self-description for the authenticated sender, incl. enrolled device identity
+ {const r4=await startLocalServer({port:0,token:TOKEN,version:'0.4.62',caps:'approve,update',onCommand:()=>({accepted:true}),
+   getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'})});
+  const U4='http://127.0.0.1:'+r4.port;
+  const i=await (await fetch(U4+'/info',{headers:{'X-GW-Key':TOKEN}})).json();
+  assert(i.ok&&i.v==='0.4.62'&&i.caps==='approve,update'&&i.deviceId==='dev-9'&&i.pubkey==='cHVi','info carries version/caps/device: '+JSON.stringify(i));
+  assert((await fetch(U4+'/info')).status===403,'info requires the key');
+  await r4.stop()}
+ {const r5=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true})}); // no getInfo: plain base shape
+  const i=await (await fetch('http://127.0.0.1:'+r5.port+'/info',{headers:{'X-GW-Key':TOKEN}})).json();
+  assert(i.ok&&!i.deviceId,'info without getInfo -> base shape only');
+  await r5.stop()}
+
+ // 10) /task: idempotent result polling over the durable store
+ {const{createTaskStore}=require('../src/lib/taskstore');
+  const fs2=require('fs'),os2=require('os'),path2=require('path');
+  const tf=path2.join(fs2.mkdtempSync('/tmp/gw-tasks-'),'tasks.json');
+  const store=createTaskStore(tf);
+  const r6=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+   getTask:id=>store.get(id),tasksOk:()=>store.ok()});
+  const U6='http://127.0.0.1:'+r6.port;
+  const H={headers:{'X-GW-Key':TOKEN}};
+  assert((await fetch(U6+'/task?id=nope',H)).status===404,'unknown task -> 404');
+  store.put('t1',{status:'accepted'});
+  let j=await (await fetch(U6+'/task?id=t1',H)).json();
+  assert(j.status==='accepted'&&j.terminal===false,'accepted record visible: '+JSON.stringify(j));
+  store.put('t1',{status:'done',note:'2 matches',result:{matches:2}});
+  j=await (await fetch(U6+'/task?id=t1',H)).json();
+  assert(j.status==='done'&&j.terminal===true&&j.result.matches===2,'terminal record served');
+  store.put('t1',{status:'failed',note:'late'}); // a terminal record never changes
+  j=await (await fetch(U6+'/task?id=t1',H)).json();
+  assert(j.status==='done','terminal record idempotent (a late write cannot clobber)');
+  const store2=createTaskStore(tf); // restart: the record survives
+  assert(store2.get('t1').status==='done','record durable across reload');
+  fs2.writeFileSync(tf,'{corrupt'); // a broken store fails closed
+  const store3=createTaskStore(tf);
+  assert(store3.ok()===false,'corrupt store -> ok() false');
+  const r7=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+   getTask:id=>store3.get(id),tasksOk:()=>store3.ok()});
+  assert((await fetch('http://127.0.0.1:'+r7.port+'/task?id=t1',H)).status===503,'broken store -> 503, never a pretend answer');
+  await r6.stop();await r7.stop()}
+
  console.log('AGENT-SERVER-UNIT: PASS');
 }
 main().catch(e=>{console.error('FAIL',e);process.exit(1)});

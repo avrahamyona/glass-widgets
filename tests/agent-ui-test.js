@@ -381,6 +381,17 @@ const launch=async()=>{
  const aE5=await waitAck('e5','done');
  assert(aE5.result.deviceId===aE1.result.deviceId&&aE5.result.pubkey===aE1.result.pubkey,'enroll after restart returns the persisted identity');
 
+ // 15g) /task + /info on the own server: durable idempotent result polling (the direct-mode ack
+ // semantics) - records survive the 15e restart because the store is on disk
+ const inf=await (await fetch('http://127.0.0.1:47731/info',{headers:{'X-GW-Key':'cmd-key'}})).json();
+ assert(inf.ok&&inf.deviceId===aE1.result.deviceId&&inf.pubkey===aE1.result.pubkey,'/info self-describes the enrolled device: '+JSON.stringify(inf));
+ const tT2=await (await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key'}})).json();
+ assert(tT2.status==='done'&&tT2.terminal===true&&tT2.result&&Array.isArray(tT2.result.matches),'t2 terminal record via /task (survived restart): '+JSON.stringify(tT2).slice(0,120));
+ const tT6=await (await fetch('http://127.0.0.1:47731/task?id=t6',{headers:{'X-GW-Key':'cmd-key'}})).json();
+ assert(tT6.ok&&(tT6.status==='accepted'||tT6.status==='failed'),'parked t6 has a task record: '+tT6.status);
+ assert((await fetch('http://127.0.0.1:47731/task?id=never',{headers:{'X-GW-Key':'cmd-key'}})).status===404,'unknown task -> 404');
+ assert((await fetch('http://127.0.0.1:47731/task?id=t2')).status===403,'/task requires the key');
+
  // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
  // envelope expired is refused - the command never runs
  ts=Date.now();exp=Date.now()+1500; // live at intake, dead by approval time

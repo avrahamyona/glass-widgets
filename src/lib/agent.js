@@ -664,6 +664,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return JSON.stringify(body);
  }
  async function ack(id,status,note,result){
+  try{taskStore.put(id,{status,note,result})}catch{} // local truth for /task polling - recorded even when the network ack fails
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
   if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
   const wire=fitAckBody(body);
@@ -843,6 +844,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // record and the regular approval flow keeps its own semantics. Corrupt/unwritable = tunnel
  // intake closed (503), never a pretend guard.
  const tSeenFile=()=>path.join(app.getPath('userData'),'agent-tunnel-seen.json');
+ // durable task records for /task polling (the own-server ack semantics): accepted at intake,
+ // terminal at ack, idempotent reads, fail-closed store.
+ const{createTaskStore}=require('./taskstore');
+ const taskStore=createTaskStore(path.join(app.getPath('userData'),'agent-tasks.json'));
  const tSeen={};let tSeenOk=true;
  try{const j=JSON.parse(fs.readFileSync(tSeenFile(),'utf8'));for(const k of Object.keys(j))if(+j[k].exp>Date.now())tSeen[k]=j[k]}
  catch(e){if(!e||e.code!=='ENOENT')tSeenOk=false}
@@ -862,6 +867,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const{startLocalServer}=require('./localserver');
   const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
    getDevice:()=>devKey&&devId?{deviceId:devId,deviceSign:(t)=>deviceSign(t)}:null,
+   getTask:id=>taskStore.get(id),tasksOk:()=>taskStore.ok(),
+   getInfo:()=>({...(devId?{deviceId:devId,pubkey:devPubB64}:{})}),
    log:(lvl,o)=>audit({lvl,...o}),
    onCommand:(m)=>{
     // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
@@ -880,6 +887,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(!tSeenOk)return {accepted:false,status:503,reason:'replay_store'};
     if(tSeen[String(m.id)]){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}}
     if(!tMark(m.id,m.exp))return {accepted:false,status:503,reason:'replay_store'};
+    if(!taskStore.put(m.id,{status:'accepted'}))audit({kind:'server',stage:'task_store_fail',id:String(m.id).slice(0,40)});
     handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
     return {accepted:true};
    }});

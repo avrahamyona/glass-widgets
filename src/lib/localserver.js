@@ -7,7 +7,7 @@ const http=require('http');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log,getDevice}){
+function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
@@ -21,6 +21,20 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice}){
    if(d&&d.deviceId&&d.deviceSign){const nonce=(req.url.split('nonce=')[1]||'').split('&')[0];
     if(/^[A-Za-z0-9_-]{8,64}$/.test(nonce)){try{body.deviceId=d.deviceId;body.sig=d.deviceSign(d.deviceId+'\n'+nonce)}catch{}}}
    return reply(200,body)}
+  if(req.method==='GET'&&req.url==='/info'){
+   // self-description for the sender (authenticated): version, capabilities, device identity.
+   // The pubkey is public by nature; it lets the sender verify enrollment without the worker.
+   const base={ok:true,v:version||'',caps:caps||''};
+   const info=getInfo?getInfo():null;
+   return reply(200,info&&typeof info==='object'?{...base,...info}:base)}
+  if(req.method==='GET'&&req.url.startsWith('/task')){
+   // idempotent task-result polling: accepted at intake, terminal at ack. Unknown id -> 404;
+   // a broken store -> 503 (fail-closed, never a pretend answer).
+   if(tasksOk&&!tasksOk())return reply(503,{ok:false,error:'task_store'});
+   const id=(req.url.split('id=')[1]||'').split('&')[0];
+   const t=id&&getTask?getTask(id):null;
+   if(!t)return reply(404,{ok:false,error:'unknown_task'});
+   return reply(200,{ok:true,id,status:t.status,note:t.note,result:t.result,at:t.at,terminal:!!t.terminal})}
   if(req.method==='POST'&&req.url==='/cmd'){
    let n=0,chunks=[];
    req.on('data',c=>{n+=c.length;if(n>BODY_CAP){say('warn',{kind:'server',stage:'body_cap',bytes:n});reply(413,{ok:false,error:'too_large'});req.destroy()}else chunks.push(c)});
