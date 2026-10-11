@@ -1,6 +1,6 @@
 {
   "name": "glasswidgets",
-  "version": "0.4.59",
+  "version": "0.4.60",
   "private": true,
   "description": "Rounded-card desktop widgets for Windows",
   "main": "src/main.js",
@@ -25,7 +25,7 @@
       "target": "nsis",
       "icon": "build/icon.png"
     },
-    "icon": "build/icon.png",
+    "icon": "build/icon.ico",
     "nsis": {
       "artifactName": "GlassWidgets-Setup-${version}.exe",
       "oneClick": true,
