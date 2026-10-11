@@ -20,8 +20,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  const CMD_KEY_BAKED='__GW_CMD_KEY__'; // CI replaces the placeholder from the GW_CMD_KEY secret; stays dormant when not injected
  const cmdKey=process.env.GLASSWIDGETS_AGENT_CMD_KEY||cfg.cmdKey||(CMD_KEY_BAKED.slice(0,5)==='__GW_'?'':CMD_KEY_BAKED);
  module.exports.cmdKey=cmdKey;
- const SIGN_KEY_BAKED='__GW_SIGN_KEY__'; // CI replaces the placeholder from the GW_SIGN_KEY secret; stays dormant when not injected
- const signKey=process.env.GLASSWIDGETS_AGENT_SIGN_KEY||cfg.signKey||(SIGN_KEY_BAKED.slice(0,5)==='__GW_'?'':SIGN_KEY_BAKED);
+ const SIGN_PUB_BAKED='__GW_SIGN_PUB__'; // CI replaces the placeholder from the GW_SIGN_PUB secret (base64 DER spki of the worker's Ed25519 PUBLIC key); dormant when not injected. Asymmetric on purpose: nothing secret ships inside the public EXE, the signing private key exists only on the worker.
+ const signPubB64=process.env.GLASSWIDGETS_AGENT_SIGN_PUB||cfg.signPub||(SIGN_PUB_BAKED.slice(0,5)==='__GW_'?'':SIGN_PUB_BAKED);
+ let signPub=null;
+ try{if(signPubB64)signPub=crypto.createPublicKey({key:Buffer.from(String(signPubB64).trim(),'base64'),format:'der',type:'spki'})}catch{}
 
  let folders=[];
  async function resolveFolders(){
@@ -90,19 +92,37 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  // run_command NEVER executes on worker say-so: it parks as a pending approval, the island pops an
  // unmissable card with the exact command, and only the user's אשר tap runs it. Default deny after ~2 min.
  // Exception: PRE-APPROVED commands. When main/ops dispatch a command that answers an EXPLICIT user
- // instruction, the worker signs it (HMAC-SHA256 over id\nkind\nts\npayload with a shared secret).
+ // instruction, the worker signs it (Ed25519 over id\nkind\nts\nexp\npayload; private key only on
+ // the worker, public key baked at build time - nothing secret inside the public EXE).
  // A valid signature swaps the blocking card for an informational one that auto-executes after 5s
  // (cancelable) - so explicit instructions don't stall when he is away from the PC. A missing/invalid
  // signature falls back to the ordinary blocking card (fail-closed); an invalid one is also audited.
- const pendingApprovals=new Map(); // cardId -> {cmdId,kind,command,action,task,timer,pre}
+ const pendingApprovals=new Map(); // cardId -> {cmdId,kind,command,action,task,timer,pre,exp}
  const APPROVAL_TTL=+process.env.GLASSWIDGETS_APPROVAL_TTL_MS||120000;
  const PRE_TTL_MS=300000,AUTO_RUN_MS=+process.env.GLASSWIDGETS_AUTO_RUN_MS||5000;
+ // Ed25519 pre-approval: the worker signs id\nkind\nts\nexp\npayload with its private key; the client
+ // only verifies. Strict field formats, freshness AND an explicit expires_at (checked at receipt and
+ // again before the auto-run timer fires). ANY anomaly -> ordinary blocking card (fail-closed).
  function validPreapproval(m,payload){
-  if(!signKey||!m||!m.sig||m.ts==null)return false;
-  const ts=+m.ts;if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>PRE_TTL_MS)return false;
-  const expect=crypto.createHmac('sha256',signKey).update([String(m.id),String(m.kind),String(ts),payload].join('\n')).digest('hex');
-  const got=String(m.sig);
-  return got.length===expect.length&&crypto.timingSafeEqual(Buffer.from(got),Buffer.from(expect));
+  try{
+   if(!signPub||!m||m.ts==null||m.exp==null)return false;
+   const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false; // strict hex - never feed arbitrary bytes to verify
+   const ts=+m.ts,exp=+m.exp,now=Date.now();
+   if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
+   if(Math.abs(now-ts)>PRE_TTL_MS||exp<=now||exp-ts>PRE_TTL_MS)return false;
+   return crypto.verify(null,Buffer.from([String(m.id),String(m.kind),String(ts),String(exp),payload].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
+  }catch{return false}
+ }
+ // replay guard: signed command ids are remembered (persisted) with their decision for the validity
+ // window, so the same signed message cannot re-run after a burst, reconnect or app restart.
+ const seenFile=()=>path.join(app.getPath('userData'),'agent-seen.json');
+ const seen={};
+ try{const j=JSON.parse(fs.readFileSync(seenFile(),'utf8'));for(const k of Object.keys(j))if(j[k]&&+j[k].at>Date.now()-PRE_TTL_MS)seen[k]=j[k]}catch{}
+ function markSeen(id,decision){seen[String(id)]={at:Date.now(),decision};try{fs.writeFileSync(seenFile(),JSON.stringify(seen))}catch{}}
+ function dupSigned(id,kind,detail){
+  const sid=String(id),prev=seen[sid];if(!prev)return false;
+  audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:prev.decision});
+  ack(id,'failed','duplicate command id - already '+prev.decision);return true;
  }
  function execPending(p){
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
@@ -118,10 +138,13 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(msg&&validPreapproval(msg,cmd)){
+   if(dupSigned(id,'run_command',{command:cmd}))return;
+   markSeen(id,'pending');
    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
+    if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true});
+   pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
    audit({kind:'run_command',stage:'preapprove_card',command:cmd});
    broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
@@ -141,6 +164,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(p.button_id==='approve'){
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
    execPending(pend);return {ok:true}}
+  if(pend.pre)markSeen(pend.cmdId,'cancelled');
   audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action});
   ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':'denied - המשתמש דחה מהאי');return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
@@ -344,10 +368,13 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(pre){
+   if(dupSigned(id,'web_task',{url:url.slice(0,200)}))return;
+   markSeen(id,'pending');
    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-    audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
+    if(p.exp&&Date.now()>p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true});
+   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
