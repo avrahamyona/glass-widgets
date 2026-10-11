@@ -1035,7 +1035,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   // PRESENCE is preserved via own-property: a wrong-typed challenge (123, null) reaches the
   // explicit bad_challenge refusal instead of collapsing to {} (parity across both intakes).
   const eData=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:(Object.prototype.hasOwnProperty.call(m,'challenge')?{challenge:m.challenge}:{});
-  if('challenge' in eData&&!ENROLL_CHALLENGE_RE.test(String(eData.challenge||''))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // a malformed challenge is refused, never silently ignored
+  if('challenge' in eData&&(typeof eData.challenge!=='string'||!ENROLL_CHALLENGE_RE.test(eData.challenge))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // malformed OR wrong-typed: refused explicitly, never silently ignored (no String() coercion past the shape check)
   const ePayload=Object.keys(eData).length?JSON.stringify(eData):'';
   if(!tun&&!(validPreapproval(m,ePayload)||(m.device!=null&&validPreapproval(m,ePayload,m.device)))){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
   const chProof=()=>{ // A1 challenge binding: prove key possession for THIS enrollment episode
