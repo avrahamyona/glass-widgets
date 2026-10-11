@@ -1,8 +1,12 @@
 param([int]$X=0,[int]$Y=0,[string]$Action='click')
 $ErrorActionPreference='Stop'
-$sig='[DllImport("shcore.dll")]public static extern int SetProcessDpiAwareness(int v);[DllImport("user32.dll")]public static extern bool SetCursorPos(int X,int Y);[DllImport("user32.dll")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,UIntPtr e);'
+$sig='[DllImport("shcore.dll")]public static extern int SetProcessDpiAwareness(int v);[DllImport("shcore.dll")]public static extern int GetProcessDpiAwareness(System.IntPtr h,out int v);[DllImport("user32.dll")]public static extern bool SetCursorPos(int X,int Y);[DllImport("user32.dll")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,UIntPtr e);'
 $t=Add-Type -MemberDefinition $sig -Name UI -Namespace GW -PassThru
-[void]$t::SetProcessDpiAwareness(2) # per-monitor DPI aware: SetCursorPos below takes PHYSICAL pixels
+$hr=$t::SetProcessDpiAwareness(2) # per-monitor DPI aware: SetCursorPos below takes PHYSICAL pixels
+if($hr -ne 0 -and $hr -ne -2147024891){Write-Error "SetProcessDpiAwareness failed hr=$hr";exit 1} # E_ACCESSDENIED = context already set by the manifest
+$aw=-1;$hr2=$t::GetProcessDpiAwareness([Diagnostics.Process]::GetCurrentProcess().Handle,[ref]$aw)
+if($hr2 -ne 0){Write-Error "GetProcessDpiAwareness failed hr=$hr2";exit 1}
+if($aw -lt 1){Write-Error "process is still DPI-unaware - physical mapping unverified";exit 1} # fail closed: no awareness, no physical contract
 if(-not $t::SetCursorPos($X,$Y)){Write-Error "SetCursorPos refused ($X,$Y)";exit 1}
 Start-Sleep -Milliseconds 50
 Add-Type -AN System.Windows.Forms
