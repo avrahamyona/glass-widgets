@@ -14,19 +14,43 @@ const{OPS}=require('./lib/ops');
 const CONFIG=process.env.GW_SERVER_CONFIG||path.join(process.env.GW_SERVER_DATA||path.join(os.homedir(),'.glasswidgets-server'),'config.json');
 const cfg=JSON.parse(fs.readFileSync(CONFIG,'utf8'));
 const dataDir=path.dirname(CONFIG);
+// secrets: env wins, config.json is the LOCAL-DEV path only. Production provisioning is a
+// vault/managed-secret handoff - the token and sender pubkey never sit in a repo or a backup.
+cfg.token=process.env.GW_SERVER_TOKEN||cfg.token;
+cfg.senderPub=process.env.GW_SENDER_PUB||cfg.senderPub;
 if(!cfg.token||!cfg.senderPub)throw new Error('config requires token + senderPub (base64 SPKI)');
 const roots=Array.isArray(cfg.roots)&&cfg.roots.length?cfg.roots:[path.join(os.homedir(),'Documents'),path.join(os.homedir(),'Desktop'),path.join(os.homedir(),'Downloads')].filter(p=>{try{return fs.statSync(p).isDirectory()}catch{return false}});
 const signPub=crypto.createPublicKey({key:Buffer.from(cfg.senderPub,'base64'),format:'der',type:'spki'});
 
 // device identity: generated ON this machine on first boot, private key never leaves
 const devFile=path.join(dataDir,'device.json');
-let device;
-try{device=JSON.parse(fs.readFileSync(devFile,'utf8'))}catch{}
-if(!device||!device.priv||!device.pub){
+function aclHardenWin(p,isDir){ // same icacls shape as the reviewed src/lib helpers
+ if(process.platform!=='win32')return;
+ const{execFileSync}=require('child_process');
+ const sid=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-Command','[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],{windowsHide:true,timeout:8000}).toString().trim();
+ if(!/^S-1-5-[0-9-]+$/.test(sid))throw new Error('no SID for ACL harden');
+ execFileSync('icacls',[p,'/inheritance:r','/grant:r','*'+sid+(isDir?':(OI)(CI)(F)':':(R,W)')],{windowsHide:true,timeout:8000});
+}
+function derivePub(privB64){
+ const pub=crypto.createPublicKey(crypto.createPrivateKey({key:Buffer.from(privB64,'base64'),format:'der',type:'pkcs8'}));
+ return pub.export({format:'der',type:'spki'}).toString('base64');
+}
+let device=null;
+const devRaw=(()=>{try{return fs.readFileSync(devFile,'utf8')}catch{return null}})();
+if(devRaw===null){ // first boot ONLY: mint, ACL-harden the dir, atomic unique-tmp + rename
  const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
  device={pub:publicKey.export({format:'der',type:'spki'}).toString('base64'),priv:privateKey.export({format:'der',type:'pkcs8'}).toString('base64')};
  device.id=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
- fs.writeFileSync(devFile,JSON.stringify(device),{mode:0o600});
+ aclHardenWin(dataDir,true);
+ const tmp=path.join(dataDir,'.device-'+process.pid+'-'+Date.now()+'.tmp');
+ fs.writeFileSync(tmp,JSON.stringify(device),{mode:0o600,flag:'wx'}); // exclusive create - a pre-planted tmp is never overwritten
+ aclHardenWin(tmp,false);
+ fs.renameSync(tmp,devFile); // atomic same-dir rename
+}else{
+ device=JSON.parse(devRaw); // a CORRUPT file throws here - boot fails loud, identity never silently renews
+ if(!device||!device.priv||!device.pub||derivePub(device.priv)!==device.pub)throw new Error('device identity file failed the private/public pair check - refusing to boot over a corrupt identity');
+ const want=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
+ if(device.id!==want)throw new Error('device id does not match its pubkey - refusing to boot over a corrupt identity');
 }
 const privK=crypto.createPrivateKey({key:Buffer.from(device.priv,'base64'),format:'der',type:'pkcs8'});
 const deviceSign=t=>crypto.sign(null,Buffer.from(t,'utf8'),privK).toString('hex');
@@ -66,7 +90,7 @@ async function main(){
   getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub}),
   verifyReadAuth,log,
   onCommand:(m)=>{
-   if(!OPS[m.kind])return {accepted:false,status:400,reason:'unknown_kind'};
+   if(!Object.prototype.hasOwnProperty.call(OPS,String(m.kind)))return {accepted:false,status:400,reason:'unknown_kind'};
    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
    for(const k of['id','kind','ts','exp','sig','device'])if(k in data)return {accepted:false,status:400,reason:'reserved_field'};
    if(m.device!=null&&String(m.device)!==device.id){log('warn',{stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
@@ -79,8 +103,9 @@ async function main(){
    (async()=>{ // dispatch AFTER the durable commit; the running gate decides before any effect
     if(ledger.transition(m.id,'running')!==true){log('warn',{stage:'running_gate_fail',id:String(m.id).slice(0,40)});try{ledger.put(m.id,{status:'failed',note:'running gate failed'})}catch{}return}
     try{const out=await OPS[m.kind](data,{roots});
-     ledger.put(m.id,out.ok?{status:'done',note:m.kind+' ok',result:out.result}:{status:'failed',note:String(out.error||'failed')});
-    }catch(e){try{ledger.put(m.id,{status:'failed',note:'op error'})}catch{}}
+     const w=ledger.put(m.id,out.ok?{status:'done',note:m.kind+' ok',result:out.result}:{status:'failed',note:String(out.error||'failed')});
+     if(w!==true)log('error',{stage:'terminal_put_failed',id:String(m.id).slice(0,40),reason:String(w)});
+    }catch(e){let w2='thrown';try{w2=ledger.put(m.id,{status:'failed',note:'op error'})}catch{}if(w2!==true)log('error',{stage:'terminal_put_failed',id:String(m.id).slice(0,40),reason:String(w2)})}
    })();
    return {accepted:true};
   }});
