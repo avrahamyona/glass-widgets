@@ -657,14 +657,15 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!ok()){
    body.note=String(body.note||'').slice(0,200); // the note/id/key share of the envelope is bounded explicitly
    body.result={truncated:true,guard:true};
-   if(!ok())audit({kind:'ack',stage:'envelope_fail',id:String(body.id||''),status:body.status,bytes:JSON.stringify(body).length});
+   if(!ok()){audit({kind:'ack',stage:'envelope_fail',id:String(body.id||''),status:body.status,bytes:JSON.stringify(body).length});return null} // unfittable: audited and NEVER transmitted blind
   }
   return JSON.stringify(body);
  }
  async function ack(id,status,note,result){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
-  if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m}}body.result=result}
+  if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
   const wire=fitAckBody(body);
+  if(wire==null)return; // fitAckBody already audited envelope_fail - the fetch must not happen
   try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
    const respText=await r.text().catch(()=> '');
    if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return} // a rejected ack is EVIDENCE, never a silent drop

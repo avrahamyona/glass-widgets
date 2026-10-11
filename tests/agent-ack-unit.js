@@ -40,13 +40,47 @@ const check=(body,label)=>{
  assert(String(p.note).length<=200,'note bounded to 200, got '+String(p.note).length);
  assert(p.result&&p.result.guard===true,'result stubbed')}
 
-// 6) matches array (find_files shape)
-{const m=Array.from({length:50},(_,i)=>({path:'/x/'.repeat(30)+i}));const p=check(mk({result:{matches:m}}),'matches')}
+// 6) matches array (find_files shape) via the FULL ack path: shrink marks entry loss explicitly
+{
+ const aStart=src.indexOf('async function ack(id,status,note,result){');assert(aStart>=0,'ack found');
+ let d=0,i=src.indexOf('{',aStart);for(;i<src.length;i++){if(src[i]==='{')d++;else if(src[i]==='}'){d--;if(!d)break}}
+ globalThis.__ackSrc=src.slice(aStart,i+1);
+}
+const mkAck=(onSend)=>{let sent=null;const audits=[];
+ const fn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch',globalThis.__ackSrc+';return ack;')
+ ('k',{noteLen:2000,resultLen:3000},o=>audits.push(o),fit,'http://x/ack',
+  async(u,o)=>{sent=o.body;return {ok:true,text:async()=>'{"updated":1}'}});
+ return {fn,getSent:()=>sent,audits}};
+
 
 // 7) generic oversize result WITHOUT stdout field: stub replacement
 {const big={blob:'b'.repeat(5000)};const p=check(mk({result:big}),'generic');assert(p.result&&p.result.guard===true,'generic result stubbed with guard metadata')}
 
-// 8) still-oversize pathological (huge id+key+note, stub cannot save): audited, not silent
+// 8) still-oversize pathological (huge id+key+note, stub cannot save): audited AND no wire to send
 {auditLog.length=0;const b=mk({id:'i'.repeat(5000),note:'n'.repeat(5000),result:{blob:'b'.repeat(5000)}});const wire=fit(b);
+ assert(wire===null,'unfittable body yields NO wire (never transmitted blind)');
  assert(auditLog.some(l=>l.kind==='ack'&&l.stage==='envelope_fail'),'unfittable envelope audited: '+JSON.stringify(auditLog))}
-console.log('AGENT-ACK-UNIT: PASS');
+
+// 9) extracted ack integration: on an unfittable body the fetch is NEVER called
+{
+ let fetches=0;const audits2=[];
+ const ackFn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch',
+  globalThis.__ackSrc+';return ack;')('k',{noteLen:2000,resultLen:3000},o=>audits2.push(o),fit,'http://x/ack',
+  async()=>{fetches++;return {ok:true,text:async()=>'{"updated":1}'}});
+ (async()=>{
+  await ackFn('i'.repeat(5000),'done','n'.repeat(5000),{blob:'b'.repeat(5000)});
+  assert(fetches===0,'unfittable body: fetch NOT called, got '+fetches);
+  assert(auditLog.some(l=>l.kind==='ack'&&l.stage==='envelope_fail'),'envelope_fail audited on the ack path (fit-level audit sink): '+JSON.stringify(auditLog.slice(-3)));
+  await ackFn('ok1','done','ok',{stdout:'GWOK',stderr:'',exit:0});
+  assert(fetches===1,'fittable body: fetch called exactly once');
+  // 6b) matches through the full ack path: entries shrink with explicit loss metadata
+  const big=Array.from({length:50},(_,i)=>({path:'/x/'.repeat(30)+i}));
+  await ackFn('m1','done','ok',{matches:big});
+  // fetch mock above does not capture body; use mkAck for the capture
+  const cap=mkAck();await cap.fn('m2','done','ok',{matches:big});
+  const wire=JSON.parse(cap.getSent());
+  assert(wire.result.matches.length<50,'matches shrunk on the ack path');
+  assert(wire.result.truncated===true&&wire.result.matches_full===50,'matches loss marked: '+JSON.stringify({t:wire.result.truncated,f:wire.result.matches_full}));
+  console.log('AGENT-ACK-UNIT: PASS');
+ })().catch(e=>{console.error('FAIL',e);process.exit(1)});
+}
