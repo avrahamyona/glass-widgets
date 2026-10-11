@@ -162,7 +162,10 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   if(prior){
    if(!envelopeSchemaOk(prior.envelope,device))return {error:'outbox_record_corrupt',id:cmdId};
    const h=sha256(JSON.stringify({kind:prior.envelope.kind,data:prior.envelope.data,device:prior.envelope.device||null}));
-   const h2=sha256(JSON.stringify({kind:String(kind),data:data&&typeof data==='object'?JSON.parse(JSON.stringify(data)):data,device:String(device)}));
+   // null-device normalization must MATCH on both sides: preEnroll carries device==null, so the
+   // requested side normalizes to null too - never String(undefined), or an identical retry
+   // throws a phantom content-mismatch against its own stored null
+   const h2=sha256(JSON.stringify({kind:String(kind),data:data&&typeof data==='object'?JSON.parse(JSON.stringify(data)):data,device:device==null?null:String(device)}));
    if(h!==h2)throw new Error('id reuse with different content refused - a retry resends the EXACT stored envelope');
    return {id:cmdId,reused:true};
   }
@@ -178,6 +181,10 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  // is SECRETLESS: X-GW-Key (public) + the signed envelope - the reply key is not even in scope here.
  async function send(prep){
   if(prep&&prep.error)return {id:prep.id,status:'unknown',reason:prep.error,trusted:false};
+  // NOTE (reviewed): a DIRECT send({id}) after a prepare that failed outbox_commit_failed still
+  // finds the committed-but-unverified record on disk and puts ONE POST on the wire; only the
+  // receipt persist reports unknown. That is the approved durability bypass - the alternative
+  // (blocking the wire on an unreadable commit state) would strand accepted commands forever.
   const id=String(prep&&prep.id||'');
   let rec=null;try{rec=await outbox.get(id)}catch(e){return {id,status:'unknown',reason:'outbox_read_failed',trusted:false};}
   if(!rec||!envelopeSchemaOk(rec.envelope,device))return {id,status:'unknown',reason:'no_valid_durable_envelope',trusted:false};

@@ -121,6 +121,14 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  const txtOnly=()=>Promise.resolve({status:200,headers:{},text:async()=>'{}'});
  assert((await mk({fetchImpl:txtOnly}).pollTask('cmd-textonly')).reason==='network','text-only transport refused by default (not stream-bounded)');
  assert(mk({fetchImpl:txtOnly,allowTextTransport:true}),'text-only transport allowed only with the explicit TEST-ONLY flag');
+ // preEnroll prepare retry with UNCHANGED content: null-device normalization must yield reused,
+ // never a phantom content-mismatch (prior null vs String(undefined)) - the round-9 ops repro
+ const boxPE=memBox(),cPE=mk({device:undefined,devicePub:undefined,preEnroll:true,outbox:boxPE});
+ const pPE=await cPE.prepare({kind:'enroll_device',data:{challenge:'abcdef123456'}});
+ assert(!pPE.error&&pPE.reused===false,'preEnroll first prepare commits: '+JSON.stringify(pPE));
+ const pPE2=await cPE.prepare({id:pPE.id,kind:'enroll_device',data:{challenge:'abcdef123456'}});
+ assert(pPE2.reused===true,'preEnroll identical retry is reused:true, not content-mismatch');
+ await assert.rejects(()=>cPE.prepare({id:pPE.id,kind:'enroll_device',data:{challenge:'ZZZZZZ999999'}}),'preEnroll retry with DIFFERENT content still refused');
  // TTL contract: 120s/300s roundtrip prepare+send; out-of-contract ttls refused at prepare
  const cT=mk();
  const p120=await cT.prepare({kind:'find_files',data:{},ttlMs:120000});
