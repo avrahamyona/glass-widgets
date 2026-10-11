@@ -219,7 +219,7 @@ async function cardClick(c,b,el){if(c.acted||c.busy)return;c.busy=true;c.busyBut
  c.busy=false;c.busyButton='';
  if(r.ok||r.reason==='already_acted'||r.reason==='expired'){c.acted=true;c.actedButton=b.id;save()}
  if(document.contains(fresh))fresh.replaceWith(cardEl(c));else{render(log);if(island&&pillMode==='open')render(pillBodyLog())}}
-function render(into){into.innerHTML='';for(const it of timeline())into.append(it.m?bubble(it.m):cardEl(it.c));into.scrollTop=into.scrollHeight;updatePillSt()}
+function render(into){const pillView=into.id==='pillLog';into.innerHTML='';for(const it of timeline()){if(pillView&&it.c&&String(it.c.id).startsWith('local-approve-')&&(it.c.acted||Date.now()-(+it.c.at||0)>150000))continue;into.append(it.m?bubble(it.m):cardEl(it.c))}into.scrollTop=into.scrollHeight;updatePillSt()} // pill settles acted/stale approval cards; the chat log keeps full history
 async function save(){try{await api.chatSave(H)}catch{}}
 
 function grow(el){el.style.height='auto';el.style.height=Math.min(el.scrollHeight,78)+'px'}
@@ -291,7 +291,7 @@ if(window.api&&api.pillCmd)api.pillCmd(a=>{if(a==='open'&&pillMode!=='open')open
  if(api.onChatRead)api.onChatRead(u=>applyRead(u));
  pill.addEventListener('mouseleave',()=>{if(pillMode!=='open')api.chatPassthrough(true)});
  document.addEventListener('mousemove',e=>{if(!pill.contains(e.target)&&pillMode!=='open')api.chatPassthrough(true)});
- pill.addEventListener('mouseenter',()=>api.chatPassthrough(false));
+ pill.addEventListener('mouseenter',()=>{api.chatPassthrough(false);if(window.api&&api.pillHover)api.pillHover(pillMode)}); // hover audit: proves (with fire-time mode) which delivery path reached the renderer
  document.addEventListener('mousedown',e=>{if(pillMode==='open'&&!pill.contains(e.target))closePill()});
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});

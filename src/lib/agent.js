@@ -551,7 +551,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCt
   if(!islandCtl){audit({kind:'island_control',stage:'failed',error:'no island bridge in this build'});return ack(id,'failed','island_control unsupported in this build')}
   let r;try{r=await islandCtl(action)}catch(e){r={ok:false,error:String(e&&e.message||e)}}
   if(r&&r.ok)audit({kind:'island_control',stage:'executed',action});else audit({kind:'island_control',stage:'failed',action,error:(r&&r.error)||'unknown'});
-  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+action+')':String((r&&r.error)||'unknown'));
+  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+(action==='close'?'closed':action)+')':String((r&&r.error)||'unknown'));
  }
  function islandControl(id,m){
   const action=String(m.action||'').toLowerCase();
