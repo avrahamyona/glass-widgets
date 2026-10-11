@@ -3,6 +3,15 @@
 Status legend: EXISTS = code reviewed statically | MISSING = not written | UNVERIFIED = written, no live proof.
 Base: agent through PR #70 (4849b70), worker route v4 (PR #69, df5b311), contract: docs/sender-tunnel-contract.md.
 
+## Architecture direction (user-directed, 2026-10-11)
+
+Local-first: the "brain" of the server-side product lives ENTIRELY on the user's PC. The PC is
+the brain; any cloud component (worker, tunnel) is a dumb relay only - no quotas, no external
+limits, no logic the user depends on. An always-open window/process on the PC is an accepted
+cost (explicit user choice). The standalone server (server/index.js) is designed to this: state,
+identity, ledger and ops are all local; the plan below must keep cloud pieces replaceable.
+Quota rollout / external-service gates are never on the critical path of the PC brain.
+
 ## A. Live worker wiring
 
 ### A1. Enrollment wiring (MISSING end-to-end)

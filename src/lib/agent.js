@@ -925,8 +925,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
   const device=String(headers['x-gw-read-device']||'');
   // the signed request is bound to the TARGET DEVICE: a read captured on one device never
-  // authorizes another (multi-device safe); '-' addresses a not-yet-enrolled device.
-  if(devId){if(device!==devId)return false}else if(device!=='-')return false;
+  // authorizes another (multi-device safe); '-' addresses a not-yet-enrolled device - and, for a
+  // short post-enroll grace window, the bootstrap reader that cannot know the fresh id yet.
+  if(devId){if(device!==devId&&!(device==='-'&&Date.now()<enrollGraceUntil))return false}
+  else if(device!=='-')return false;
   if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
   if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
   const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
@@ -1055,10 +1057,12 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!persistDevice(pubB64,privB64))return ack(m.id,'failed','device key persist failed');
   loadDevice();
   if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
+  enrollGraceUntil=Date.now()+60000; // bootstrap: the sender still reads with '-' until it learns the id
   audit({kind:'enroll_device',stage:'enrolled',device:devId});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
   ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProof()}); // PUBLIC key only travels
  }
+ let enrollGraceUntil=0; // set at identity mint: 60s where '-' reads still pass (bootstrap terminal fetch)
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
  async function publishTunnel(url){

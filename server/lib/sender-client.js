@@ -232,10 +232,15 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  const CONTROL_GET_PATHS=new Set(['/glasswidgets/agent/tunnel']); // read endpoints on the control origin
  const CONTROL_POST_PATHS=new Set(['/glasswidgets/agent/enroll']); // write endpoints on the control origin
  // the reply key goes to these allowlisted registry endpoints on the CONTROL origin ONLY - never the device
- async function controlGet(path,budgetMs){
+ async function controlGet(path,{device:devSel,budgetMs}={}){
   if(!cbase)throw new Error('no controlUrl configured');
   if(!CONTROL_GET_PATHS.has(String(path)))throw new Error('control path not allowlisted - the reply key goes to known registry endpoints ONLY');
-  return req(cbase+path,{method:'GET',headers:{'X-GW-Reply-Key':replyKey}},budgetMs);
+  let q='';
+  if(path==='/glasswidgets/agent/tunnel'){ // the live route REQUIRES ?device=<16hex> (400 otherwise)
+   if(!/^[0-9a-f]{16}$/.test(String(devSel||'')))throw new Error('tunnel discovery requires device=<16 hex>');
+   q='?device='+devSel;
+  }
+  return req(cbase+path+q,{method:'GET',headers:{'X-GW-Reply-Key':replyKey}},budgetMs);
  }
  async function controlPost(path,body,budgetMs){
   if(!cbase)throw new Error('no controlUrl configured');

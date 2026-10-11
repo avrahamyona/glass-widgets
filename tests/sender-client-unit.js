@@ -65,8 +65,10 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  await new Promise(r=>ctl.listen(0,'127.0.0.1',r));
  const cCtl=mk({controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test'});
  await assert.rejects(()=>cCtl.controlGet('/health'),'non-allowlisted control endpoint refused');
- const cg=await cCtl.controlGet('/glasswidgets/agent/tunnel');
- assert(cg.status===200&&seenHeaders.some(([u,h])=>u.startsWith('CONTROL')&&h['x-gw-reply-key']==='rk-test'),'reply key rides the CONTROL origin on an allowlisted endpoint');
+ await assert.rejects(()=>cCtl.controlGet('/glasswidgets/agent/tunnel'),'tunnel discovery without device refused (live route 400s without ?device=)');
+ await assert.rejects(()=>cCtl.controlGet('/glasswidgets/agent/tunnel',{device:'nothex'}),'non-16hex device refused');
+ const cg=await cCtl.controlGet('/glasswidgets/agent/tunnel',{device:'0123456789abcdef'});
+ assert(cg.status===200&&seenHeaders.some(([u,h])=>u==='CONTROL/glasswidgets/agent/tunnel?device=0123456789abcdef'&&h['x-gw-reply-key']==='rk-test'),'reply key rides the CONTROL origin with ?device=<16hex>');
  for(const[u,h]of seenHeaders)if(!u.startsWith('CONTROL'))assert(h&&!('x-gw-reply-key' in h),'reply key still never on the device origin');
  ctl.close();
  // health TTL: cached within TTL, re-proven after TTL, resetIdentity forces re-proof

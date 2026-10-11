@@ -1,0 +1,99 @@
+# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 2
+# =================================================================
+#
+# הרצה (דרך אחת מדויקת):
+#   1. שמור את הקובץ הזה בשם boot-test.ps1 על שולחן העבודה
+#   2. פתח PowerShell (תפריט התחל -> PowerShell)
+#   3. הדבק שורה אחת:
+#      powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\boot-test.ps1"
+#   4. החלון לא ייסגר לבד - בסוף תתבקש ללחוץ Enter
+#   5. שלח בחזרה: את כל הטקסט על המסך, וגם את הקובץ boot-test-log.txt
+#      שנוצר לצד הסקריפט (על שולחן העבודה)
+#
+# פלט צפוי - 7 שורות PASS ו-DONE:
+#   PASS 1: node נמצא (v...)
+#   PASS 2: הקוד ירד ונפתח
+#   PASS 3: boot ראשון עלה + זהות נוצרה (device <16 תווים hex>)
+#   PASS 4: ACL על קובץ הזהות - משתמש נוכחי בלבד
+#   PASS 5: /health בלי מפתח -> 403, עם מפתח -> 200
+#   PASS 6: boot שני - אותה זהות בדיוק
+#   PASS 7: זהות משובשת -> סירוב עלייה (fail-loud)
+#   DONE - כל הבדיקות עברו
+#
+# גם אם משהו נכשל - הכל נשמר ב-boot-test-log.txt. שלח אותו כמו שהוא.
+# =================================================================
+$ErrorActionPreference='Stop'
+$scriptDir=$PSScriptRoot; if(-not $scriptDir){$scriptDir=(Get-Location).Path}
+$logPath=Join-Path $scriptDir 'boot-test-log.txt'
+try{Start-Transcript -Path $logPath -Force | Out-Null}catch{}
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+function Say($m){Write-Host $m}
+$script:gwPids=@()
+$base=Join-Path $env:TEMP ('gw-boot-'+[guid]::NewGuid().ToString('N').Substring(0,8))
+New-Item -ItemType Directory -Path $base -Force | Out-Null
+$code=Join-Path $base 'code'; $data=Join-Path $base 'data'
+try{
+  $nv=(node -v 2>$null); if(-not $nv){throw 'node not found in PATH'}
+  Say ("PASS 1: node נמצא ({0})" -f $nv)
+  $zip=Join-Path $base 'gw.zip'
+  Invoke-WebRequest -Uri 'https://codeload.github.com/avrahamyona/glass-widgets/zip/refs/heads/wip-0465' -OutFile $zip -UseBasicParsing
+  Expand-Archive -Path $zip -DestinationPath $code -Force
+  $root=Get-ChildItem $code -Directory | Select-Object -First 1
+  Say 'PASS 2: הקוד ירד ונפתח'
+  $pubFile=Join-Path $base 'sender-pub.txt'
+  node -e "const c=require('crypto');const{publicKey}=c.generateKeyPairSync('ed25519');require('fs').writeFileSync(process.argv[1],publicKey.export({format:'der',type:'spki'}).toString('base64'))" $pubFile
+  if($LASTEXITCODE -ne 0){throw 'sender keypair generation failed'}
+  $senderPub=(Get-Content $pubFile -Raw).Trim()
+  $env:GW_SERVER_TOKEN='boot-test-token-123'
+  $env:GW_SENDER_PUB=$senderPub
+  $env:GW_SERVER_DATA=$data
+  $env:GW_SERVER_PORT='47711'
+  function Boot([string]$tag){
+    $o=Join-Path $base "out-$tag.log"; $e=Join-Path $base "err-$tag.log"
+    $p=Start-Process -FilePath 'node' -ArgumentList (Join-Path $root.FullName 'server\index.js') -WorkingDirectory $root.FullName -RedirectStandardOutput $o -RedirectStandardError $e -PassThru
+    $script:gwPids+=$p.Id
+    $ok=$false
+    for($i=0;$i -lt 40;$i++){Start-Sleep -Milliseconds 500
+      if((Test-Path $o) -and ((Get-Content $o -Raw -ErrorAction SilentlyContinue) -match 'server up')){$ok=$true;break}
+      if($p.HasExited){break}}
+    return @{P=$p;Ok=$ok;Out=$o;Err=$e}
+  }
+  $b1=Boot 'first'
+  if(-not $b1.Ok){Say (Get-Content $b1.Out,$b1.Err -Raw -ErrorAction SilentlyContinue);throw 'boot 1 failed'}
+  $devFile=Join-Path $data 'device.json'
+  if(-not (Test-Path $devFile)){throw 'device.json missing'}
+  $dev1=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop).id
+  Say ("PASS 3: boot ראשון עלה + זהות נוצרה (device {0})" -f $dev1)
+  $acl=Get-Acl $devFile
+  if($acl.AreAccessRulesProtected -and @($acl.Access).Count -eq 1 -and $acl.Access[0].IdentityReference.Value.EndsWith($env:USERNAME)){Say 'PASS 4: ACL על קובץ הזהות - משתמש נוכחי בלבד'}
+  else{throw ('ACL unexpected: protected='+$acl.AreAccessRulesProtected+' rules='+@($acl.Access).Count)}
+  $code403=$false
+  try{Invoke-WebRequest -Uri 'http://127.0.0.1:47711/health' -UseBasicParsing | Out-Null}
+  catch{ if($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 403){$code403=$true} }
+  $r=Invoke-WebRequest -Uri 'http://127.0.0.1:47711/health?nonce=boottest1234' -Headers @{'X-GW-Key'='boot-test-token-123'} -UseBasicParsing
+  $h=$r.Content | ConvertFrom-Json -EA Stop
+  if($code403 -and $h.ok -eq $true -and $h.deviceId -eq $dev1 -and $h.sig){Say 'PASS 5: /health בלי מפתח -> 403, עם מפתח -> 200'}
+  else{throw 'health gate wrong'}
+  Stop-Process -Id $b1.P.Id -Force -ErrorAction SilentlyContinue
+  $b2=Boot 'second'
+  if(-not $b2.Ok){throw 'boot 2 failed'}
+  $dev2=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop).id
+  if($dev2 -eq $dev1){Say 'PASS 6: boot שני - אותה זהות בדיוק'}else{throw 'identity changed across boots'}
+  Stop-Process -Id $b2.P.Id -Force -ErrorAction SilentlyContinue
+  Add-Content -Path $devFile -Value 'corrupt'
+  $e3=Join-Path $base 'err-third.log'; $o3=Join-Path $base 'out-third.log'
+  $p3=Start-Process -FilePath 'node' -ArgumentList (Join-Path $root.FullName 'server\index.js') -WorkingDirectory $root.FullName -RedirectStandardOutput $o3 -RedirectStandardError $e3 -PassThru -Wait
+  $errTxt=(Get-Content $e3 -Raw -ErrorAction SilentlyContinue)
+  if($p3.ExitCode -ne 0 -and $errTxt -match 'refusing to boot'){Say 'PASS 7: זהות משובשת -> סירוב עלייה (fail-loud)'}
+  else{throw ('corrupt identity boot not refused: exit='+$p3.ExitCode)}
+  Say 'DONE - כל הבדיקות עברו'
+}catch{
+  Say ('FAIL: '+$_.Exception.Message)
+  Say ($_.ScriptStackTrace)
+  Say 'שלח את כל הפלט הזה בחזרה + את boot-test-log.txt'
+}finally{
+  foreach($gp in $script:gwPids){Stop-Process -Id $gp -Force -ErrorAction SilentlyContinue}
+  Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
+  try{Stop-Transcript | Out-Null}catch{}
+  Read-Host 'Enter לסגירת החלון'
+}
