@@ -6,7 +6,7 @@
 // folder, and every mutating/executing command lands in userData/agent-audit.log (JSON lines).
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto');
 const {screen}=require('electron');
-const {execFile,exec}=require('child_process');
+const {execFile,exec,execFileSync}=require('child_process');
 
 const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*1024*1024,resultLen:3500,noteLen:500,cmdTimeoutMs:300000};
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
@@ -165,7 +165,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  if(p.kind==='island_control'){execIsland(p.cmdId,p.task.action);return}
   execRun(p.cmdId,p.command);
  }
- function runCommand(id,command,msg){
+ function runCommand(id,command,msg,intake){
   const cmd=String(command||'').trim();
   if(!cmd)return ack(id,'failed','missing command');
   if(cmd.length>1000)return ack(id,'failed','command too long');
@@ -191,7 +191,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'run_command',stage:'expired',command:p.command});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,texp:intake&&+intake.exp||0});
   audit({kind:'run_command',stage:'requested',command:cmd});
   broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -200,6 +200,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!pend)return {ok:false,reason:'expired'};
   pendingApprovals.delete(cardId);clearTimeout(pend.timer);
   if(p.button_id==='approve'){
+   if(pend.texp&&Date.now()>=pend.texp){audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action});settleCard(cardId,'expired');ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
    settleCard(cardId,'approved');execPending(pend);return {ok:true}}
   if(pend.pre)markSeen(pend.cmdId,'cancelled');
@@ -219,7 +220,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   audit({kind:'media_control',stage:'executed',action:a,ok:!!(r&&r.ok),error:r&&r.error||undefined});
   return r&&r.ok?ack(id,'done',a):ack(id,'failed',String(r&&r.error||'media bridge unavailable').slice(0,200));
  }
- function mediaControl(id,action){
+ function mediaControl(id,action,intake){
   const a=String(action||'').trim().toLowerCase();
   if(!MEDIA_ACTIONS.includes(a))return ack(id,'failed','bad action');
   if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execMedia(id,a)}
@@ -229,7 +230,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'media_control',stage:'expired',action:p.action});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer,texp:intake&&+intake.exp||0});
   audit({kind:'media_control',stage:'requested',action:a});
   broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -386,7 +387,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    return (i+1)+'. '+d});
   return lines.join('\n');
  }
- async function webTask(id,task){
+ async function webTask(id,task,intake){
   const url=String(task&&task.url||'').trim();
   if(!webUrlOk(url))return ack(id,'failed','url refused - https only, no private/local targets');
   const rawSteps=Array.isArray(task.steps)?task.steps:[];
@@ -428,7 +429,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,texp:intake&&+intake.exp||0});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
   broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -525,7 +526,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(ok===steps.length&&!out.deadline)return ack(id,'done','ui: '+ok+'/'+steps.length+' inputs injected',out);
   return ack(id,'failed','ui: stopped ('+ok+'/'+steps.length+' injected'+(out.deadline?', task deadline':'')+') - injection is not target success, verify by screenshot',out);
  }
- function uiAutomation(id,m){
+ function uiAutomation(id,m,intake){
   const rawSteps=Array.isArray(m.steps)?m.steps:[];
   if(!uiStepsOk(rawSteps)){audit({kind:'ui_automation',stage:'failed',error:'bad plan',steps:rawSteps.length});return ack(id,'failed','bad ui plan - unknown action, out-of-screen coords or >20 steps')}
   const steps=rawSteps,plan=uiPlan(steps),label=String(m.label||'').slice(0,200);
@@ -555,7 +556,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'ui_automation',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,texp:intake&&+intake.exp||0});
   audit({kind:'ui_automation',stage:'requested',steps:steps.length});
   broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -569,7 +570,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(r&&r.ok)audit({kind:'island_control',stage:'executed',action});else audit({kind:'island_control',stage:'failed',action,error:(r&&r.error)||'unknown'});
   ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+(action==='close'?'closed':action)+')':String((r&&r.error)||'unknown'));
  }
- function islandControl(id,m){
+ function islandControl(id,m,intake){
   const action=String(m.action||'').toLowerCase();
   if(!ISLAND_ACTIONS.includes(action)){audit({kind:'island_control',stage:'failed',error:'bad action'});return ack(id,'failed','unknown island action (open/close)')}
   // pre-approval payload the worker signs for island_control: the action string
@@ -596,7 +597,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'island_control',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,texp:intake&&+intake.exp||0});
   audit({kind:'island_control',stage:'requested',action});
   broadcastCard({id:cardId,title:'🏝️ אישור פעולה על האי',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -786,7 +787,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }catch(e){await ack(id,'failed','index error')}
  }
 
- async function handle(m){
+ async function handle(m,intake){
   if(!m||typeof m!=='object'||!m.id)return;
   // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
   // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
@@ -795,18 +796,18 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
    if(m.kind==='open_path')return openPathCmd(m.id,m.path);
-   if(m.kind==='run_command')return runCommand(m.id,m.command,m);
+   if(m.kind==='run_command')return runCommand(m.id,m.command,m,intake);
    if(m.kind==='update_app')return updateAppCmd(m.id);
-   if(m.kind==='media_control')return mediaControl(m.id,m.action);
+   if(m.kind==='media_control')return mediaControl(m.id,m.action,intake);
    if(m.kind==='clipboard_read')return clipboardRead(m.id);
-   if(m.kind==='web_task')return webTask(m.id,m);
-   if(m.kind==='ui_automation')return uiAutomation(m.id,m);
-   if(m.kind==='island_control')return islandControl(m.id,m);
+   if(m.kind==='web_task')return webTask(m.id,m,intake);
+   if(m.kind==='ui_automation')return uiAutomation(m.id,m,intake);
+   if(m.kind==='island_control')return islandControl(m.id,m,intake);
    if(m.kind==='screenshot')return screenshotCmd(m.id);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
-   if(m.kind==='enroll_device')return enrollDeviceCmd(m);
+   if(m.kind==='enroll_device')return enrollDeviceCmd(m,intake);
    return ack(m.id,'failed','unknown kind');
   })();
   let tOut=null;
@@ -879,7 +880,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(!tSeenOk)return {accepted:false,status:503,reason:'replay_store'};
     if(tSeen[String(m.id)]){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}}
     if(!tMark(m.id,m.exp))return {accepted:false,status:503,reason:'replay_store'};
-    handle({...data,id:String(m.id),kind:m.kind,__tunnel:true}); // authenticated identity LAST
+    handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
     return {accepted:true};
    }});
   if(stop){if(r.started)r.stop();return} // stop() raced the listen() call - tear it back down
@@ -896,27 +897,47 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // only); the private key never leaves the machine - only the public key is acked back for
  // enrollment. The baked cmd key is public and never proves device identity.
  const devFile=()=>path.join(app.getPath('userData'),'device.json');
- let devKey=null,devId='';
+ let devKey=null,devId='',devPubB64='';
  function loadDevice(){
   try{const j=JSON.parse(fs.readFileSync(devFile(),'utf8'));
-   devKey=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});
-   devId=crypto.createHash('sha256').update(String(j.pub)).digest('hex').slice(0,16);
-  }catch{devKey=null;devId=''}
+   const priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});
+   const pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64');
+   if(pub!==String(j.pub)){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'device_mismatch'});return} // the stored pub must DERIVE from the private key - a tampered file fails closed
+   devKey=priv;devPubB64=pub;devId=crypto.createHash('sha256').update(pub).digest('hex').slice(0,16);
+  }catch{devKey=null;devId='';devPubB64=''}
+ }
+ // atomic persist (tmp+rename) + REAL owner-only ACL on Windows (mode bits are a no-op there):
+ // icacls strips inheritance and grants only the current user. Any failure = no key on disk.
+ function persistDevice(pubB64,privB64){
+  const f=devFile(),tmp=f+'.tmp';
+  try{
+   fs.writeFileSync(tmp,JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600});
+   if(process.platform==='win32')execFileSync('icacls',[tmp,'/inheritance:r','/grant:r',os.userInfo().username+':(R,W)'],{windowsHide:true,timeout:10000});
+   fs.renameSync(tmp,f);
+   return true;
+  }catch(e){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:String(e&&e.message||e).slice(0,120)});return false}
  }
  loadDevice();
  const deviceSign=text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex');
- async function enrollDeviceCmd(m){
-  // worker-signed ONLY (tunnel intake marker or flat SSE sig over an empty payload) - this
-  // operation founds the device identity, so it never parks a user card and never runs unsigned.
-  if(m.__tunnel!==true&&!validPreapproval(m,'')){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
+ async function enrollDeviceCmd(m,intake){
+  // worker-signed ONLY: the tunnel intake marker arrives as an INTERNAL parameter (never a sender
+  // field), the flat SSE path needs a sig over an empty payload. This operation founds the device
+  // identity, so it never parks a user card and never runs unsigned. IDEMPOTENT: an existing
+  // identity is RETURNED, never rewritten - replaying any valid enroll changes nothing. Only an
+  // explicit signed {rotate:true} founds a new identity.
+  const tun=!!(intake&&intake.tunnel===true);
+  if(!tun&&!validPreapproval(m,'')){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
+  const rotate=m&&m.rotate===true;
+  if(devKey&&devId&&!rotate){audit({kind:'enroll_device',stage:'already_enrolled',device:devId});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64})}
   const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
   const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
   const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
-  try{fs.writeFileSync(devFile(),JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600})}catch(e){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
+  if(!persistDevice(pubB64,privB64))return ack(m.id,'failed','device key persist failed');
   loadDevice();
-  audit({kind:'enroll_device',stage:'enrolled',device:devId});
+  if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
+  audit({kind:'enroll_device',stage:rotate?'rotated':'enrolled',device:devId});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
-  ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64}); // PUBLIC key only travels
+  ack(m.id,'done',rotate?'rotated':'enrolled',{deviceId:devId,pubkey:pubB64}); // PUBLIC key only travels
  }
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';

@@ -52,11 +52,12 @@ async function ensureCloudflared(binDir,{sha256,url,fetchImpl,log,platform}={}){
 function startTunnel({exePath,port,onUrl,onDown,log,spawnImpl,initialRetryMs,maxRetryMs,isStopped}){
  const{spawn}=spawnImpl?{spawn:spawnImpl}:require('child_process');
  const say=(stage,obj)=>{try{if(log)log(stage,obj)}catch{}};
- const down=()=>{try{if(onDown)onDown()}catch{}};
- let stopped=false,child=null,retry=initialRetryMs||2000;
+ let stopped=false,child=null,retry=initialRetryMs||2000,downFired=false;
+ const down=()=>{if(downFired)return;downFired=true;try{if(onDown)onDown()}catch{}}; // once per live episode
  const MAX=maxRetryMs||30000;
  const isDead=()=>stopped||(isStopped&&isStopped());
  function launch(){
+  downFired=false; // a new episode may publish a new pointer - its death must clear again
   if(isDead())return;
   let reported=false,buf='',dead=false; // dead: schedule recovery exactly once, whether 'error', 'exit', or both fire
   try{child=spawn(exePath,['tunnel','--url','http://127.0.0.1:'+port,'--no-autoupdate'],{windowsHide:true})}catch(e){say('spawn_fail',{err:String(e&&e.message||e).slice(0,120)});down();return schedule()}
@@ -71,7 +72,7 @@ function startTunnel({exePath,port,onUrl,onDown,log,spawnImpl,initialRetryMs,max
  }
  function schedule(){if(isDead())return;const wait=retry;retry=Math.min(retry*2,MAX);setTimeout(()=>{if(!isDead())launch()},wait).unref?.()}
  launch();
- return {stop:()=>{stopped=true;try{if(child)child.kill()}catch{}}};
+ return {stop:()=>{if(stopped)return;stopped=true;try{if(child)child.kill()}catch{};down()}}; // explicit down NOW - never rely on an exit event that may never come (kill can fail silently)
 }
 
 module.exports={CLOUDFLARED,URL_RE,validateTunnelUrl,ensureCloudflared,startTunnel};

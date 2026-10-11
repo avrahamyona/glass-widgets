@@ -98,6 +98,35 @@ async function main(){
   assert(spawns3.length===1,'isStopped blocks the relaunch after exit');
   t.stop()}
 
+ // 9) stop() fires onDown EXPLICITLY and exactly once - never relies on an exit event (kill can
+ // fail silently); a later exit event does not double-fire
+ {const spawns5=[];const mk5=()=>{const c=new EventEmitter();c.stderr=new EventEmitter();c.stdout=new EventEmitter();c.kill=()=>{};spawns5.push(c);return c};
+  const downs5=[];let urls5=0;
+  const t=startTunnel({exePath:'/x',port:1,spawnImpl:mk5,onUrl:()=>urls5++,onDown:()=>downs5.push(1),log:()=>{},initialRetryMs:5,maxRetryMs:10});
+  spawns5[0].stderr.emit('data',Buffer.from('https://up-abc.trycloudflare.com\n'));
+  assert(urls5===1,'url reported before stop');
+  t.stop(); // NO exit event follows (simulating a silent kill)
+  assert(downs5.length===1,'stop fires onDown explicitly - pointer cleared NOW, not after 90s of false-fresh');
+  spawns5[0].emit('exit',1); // a late exit must not double-fire
+  assert(downs5.length===1,'late exit after stop does not double-fire onDown');
+  t.stop();
+  assert(downs5.length===1,'second stop() is a no-op')}
+
+ // 10) down is once PER EPISODE: exit fires down, the respawned process re-arms it
+ {const spawns6=[];const mk6=()=>{const c=new EventEmitter();c.stderr=new EventEmitter();c.stdout=new EventEmitter();c.kill=()=>{};spawns6.push(c);return c};
+  const downs6=[];
+  const t=startTunnel({exePath:'/x',port:1,spawnImpl:mk6,onUrl:()=>{},onDown:()=>downs6.push(1),log:()=>{},initialRetryMs:5,maxRetryMs:10});
+  spawns6[0].emit('exit',1);
+  await new Promise(r=>setTimeout(r,30));
+  assert(spawns6.length===2&&downs6.length===1,'first episode: one down, one respawn');
+  spawns6[1].emit('exit',1);
+  await new Promise(r=>setTimeout(r,30));
+  assert(downs6.length===2,'second episode: down re-armed and fired again');
+  t.stop(); // episode 3 is live (respawned, not yet exited) - stopping it must clear explicitly
+  assert(downs6.length===3,'stop fires down for the live third episode');
+  t.stop();
+  assert(downs6.length===3,'second stop() is a no-op')}
+
  console.log('AGENT-TUNNEL-UNIT: PASS');
 }
 main().catch(e=>{console.error('FAIL',e);process.exit(1)});

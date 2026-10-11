@@ -363,6 +363,41 @@ const launch=async()=>{
  const pubK=crypto.createPublicKey({key:Buffer.from(devJ.pub,'base64'),format:'der',type:'spki'});
  assert(crypto.verify(null,Buffer.from(hE.deviceId+'\nabc12345','utf8'),pubK,Buffer.from(hE.sig,'hex')),'sender-side verification of the health proof');
 
+ // 15e) enroll is IDEMPOTENT: a second signed enroll returns the SAME identity (no silent key
+ // rewrite, durable against replay); only an explicit signed rotate founds a new identity
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e2',kind:'enroll_device',ts,exp,sig:sign('e2','enroll_device',ts,exp,'')});
+ const aE2=await waitAck('e2','done');
+ assert(aE2.result.deviceId===aE1.result.deviceId&&aE2.result.pubkey===aE1.result.pubkey,'re-enroll idempotent: same deviceId+pubkey, private never rewritten');
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e3',kind:'enroll_device',rotate:true,ts,exp,sig:sign('e3','enroll_device',ts,exp,'')});
+ const aE3=await waitAck('e3','done');
+ assert(aE3.result.deviceId!==aE1.result.deviceId&&aE3.result.pubkey!==aE1.result.pubkey,'explicit signed rotate founds a NEW identity');
+ const devJ3=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device.json','utf8'));
+ assert(devJ3.pub===aE3.result.pubkey&&devJ3.priv,'rotated identity persisted');
+ const pubK3=crypto.createPublicKey({key:Buffer.from(devJ3.pub,'base64'),format:'der',type:'spki'});
+ assert(crypto.verify(null,Buffer.from('x','utf8'),pubK3,Buffer.from(crypto.sign(null,Buffer.from('x','utf8'),crypto.createPrivateKey({key:Buffer.from(devJ3.priv,'base64'),format:'der',type:'pkcs8'})).toString('hex'),'hex')),'persisted pub derives from persisted priv');
+ ts=Date.now();exp=EX();
+ pushCmd({id:'e4',kind:'enroll_device',ts,exp,sig:sign('e4','enroll_device',ts,exp,'')});
+ const aE4=await waitAck('e4','done');
+ assert(aE4.result.deviceId===aE3.result.deviceId,'post-rotation re-enroll still idempotent');
+
+ // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
+ // envelope expired is refused - the command never runs
+ ts=Date.now();exp=Date.now()+2000; // live at intake, dead by approval time
+ const dataX={command:'echo SHOULD-NOT-RUN'};
+ const sigX=sign('t7','run_command',ts,exp,JSON.stringify(dataX));
+ const okX=await tunPost({id:'t7',kind:'run_command',ts,exp,sig:sigX,data:dataX});
+ assert(okX.status===202,'short-lived signed envelope accepted at intake: '+JSON.stringify(okX));
+ await card('SHOULD-NOT-RUN');
+ await sleep(2500); // transport authority now expired (card TTL is 4000 - still parked)
+ await clickBtn('SHOULD-NOT-RUN','אשר');
+ const aX=await waitAck('t7','failed');
+ assert(/expired/.test(aX.note||''),'approval after transport expiry refused: '+aX.note);
+ assert(!ACK.find(x=>x.id==='t7'&&x.status==='done'),'expired-transport command NEVER executed');
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"stage":"transport_expired"/.test(logA),'transport expiry audited at execution time');
+
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
  process.exit(0);
