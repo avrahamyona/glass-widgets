@@ -15,7 +15,7 @@
 // body), clamped to finite integers, timers always cleaned up.
 const crypto=require('crypto');
 const{buildCommandEnvelope,signReadRequest,CMD_TTL_MS,DATA_BYTES_CAP}=require('../../worker/outbound-sign');
-const{assertKind,strictId}=require('../../src/lib/command-contract');
+const{assertKind,assertTtl,strictId}=require('../../src/lib/command-contract');
 const CMD_PATH='/cmd'; // real local-server intake (worker proxy path TBD - not wired)
 const TASK_PATH='/task';
 const TERMINAL=new Set(['done','failed','unknown']); // 'unknown' = reconcile manually, never re-run
@@ -55,7 +55,9 @@ function envelopeSchemaOk(e,expectDevice){
   assertKind(e.kind);
   if(!/^[0-9a-f]{128}$/.test(String(e.sig||'')))return false; // shape only - authenticity is the PC's to verify
   if(String(e.device||'')!==String(expectDevice))return false; // v2 device binding REQUIRED - a missing/other device never flies
-  if(!(e.exp>e.ts)||e.exp-e.ts>CMD_TTL_MS)return false; // sane TTL window
+  if(!Number.isInteger(e.ts)||!Number.isInteger(e.exp))return false; // integer timestamps, like the builder emits
+  if(!(e.exp>e.ts))return false;
+  try{assertTtl(e.exp-e.ts)}catch{return false} // the SHARED TTL contract (1000..300000 ms) - never a narrower private cap
   if(e.data==null||typeof e.data!=='object'||Array.isArray(e.data))return false;
   if(Buffer.byteLength(JSON.stringify(e.data),'utf8')>DATA_BYTES_CAP)return false; // same bound the builder enforces
   return true;
@@ -87,36 +89,43 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  async function req(u,opt,budgetMs){
   const budget=Math.max(1,finiteMs(Math.min(requestTimeoutMs,budgetMs==null?requestTimeoutMs:budgetMs),requestTimeoutMs));
   const ac=new AbortController();
-  let timer=null,cancelBody=null;
-  // ONE race covers the whole request - headers AND body. On cap/timeout the reader is cancelled
-  // and released AND the request aborted; a signal-ignoring fetchImpl or a never-ending stream
-  // still loses to the deadline. Timers always cleared.
+  let timer=null,cancelBody=null,settled=false;
+  const cancelNow=()=>{try{ac.abort()}catch{};const cb=cancelBody;cancelBody=null;if(cb)Promise.resolve().then(()=>cb()).catch(()=>{})}; // fire-and-forget: never await a cancel inside deadline cleanup
+  const discardLate=r=>{ // a response that resolves AFTER the deadline gets NO reader of its own: cancel + release immediately
+   try{
+    if(r.body&&typeof r.body.getReader==='function'){const rd=r.body.getReader();Promise.resolve(rd.cancel()).catch(()=>{});try{rd.releaseLock()}catch{}}
+    else if(r.body&&Symbol.asyncIterator in Object(r.body)){const it=r.body[Symbol.asyncIterator]();Promise.resolve(it.next()).then(()=>it.return&&it.return()).catch(()=>{})}
+   }catch{}};
   const work=(async()=>{
-   const r=await fetchImpl(u,{...opt,signal:ac.signal,redirect:'error'});
-   if(r.status>=300&&r.status<400)throw new Error('redirect refused - credentials never follow a redirect');
-   let raw;
-   const readIt=async(next,cancel)=>{ // bounded read over ANY chunk source; cancels on cap
-    const chunks=[];let n=0;
-    for(;;){const{done,value}=await next();if(done)break;n+=value.length;
-     if(n>BODY_CAP){try{await cancel()}catch{};throw new Error('response body over cap')}
-     chunks.push(value)}
-    return Buffer.concat(chunks.map(c=>Buffer.isBuffer(c)?c:Buffer.from(c))).toString('utf8')};
-   if(r.body&&typeof r.body.getReader==='function'){
-    const rd=r.body.getReader();cancelBody=async()=>{try{await rd.cancel()}catch{}try{rd.releaseLock()}catch{}};
-    try{raw=await readIt(()=>rd.read(),()=>rd.cancel())}finally{try{rd.releaseLock()}catch{};cancelBody=null}
-   }else if(r.body&&Symbol.asyncIterator in Object(r.body)){
-    const it=r.body[Symbol.asyncIterator]();cancelBody=async()=>{try{await it.return()}catch{}};
-    try{raw=await readIt(()=>it.next(),()=>it.return())}finally{cancelBody=null}
-   }else if(typeof r.text==='function'){
-    if(!allowTextTransport)throw new Error('unbounded transport (text-only body): a stream body is required outside tests'); // post-allocation read can never be stream-bounded
-    raw=await r.text();
-    if(Buffer.byteLength(raw,'utf8')>BODY_CAP)throw new Error('response body over cap');
-   }else raw=String(r.body||'');
-   if(Buffer.byteLength(raw,'utf8')>BODY_CAP)throw new Error('response body over cap'); // utf8 BYTES, not chars
-   return {status:r.status,headers:r.headers||{},rawBody:raw};
+   let r;
+   try{
+    r=await fetchImpl(u,{...opt,signal:ac.signal,redirect:'error'});
+    if(settled){discardLate(r);throw new Error('request timeout');} // late resolution: no untracked body reader
+    if(r.status>=300&&r.status<400)throw new Error('redirect refused - credentials never follow a redirect');
+    let raw;
+    const readIt=async(next,cancel)=>{
+     const chunks=[];let n=0;
+     for(;;){const{done,value}=await next();if(settled){try{await cancel()}catch{};throw new Error('request timeout')}if(done)break;n+=value.length;
+      if(n>BODY_CAP){try{await cancel()}catch{};throw new Error('response body over cap')}
+      chunks.push(value)}
+     return Buffer.concat(chunks.map(c=>Buffer.isBuffer(c)?c:Buffer.from(c))).toString('utf8')};
+    if(r.body&&typeof r.body.getReader==='function'){
+     const rd=r.body.getReader();cancelBody=async()=>{try{await rd.cancel()}catch{}try{rd.releaseLock()}catch{}};
+     try{raw=await readIt(()=>rd.read(),()=>rd.cancel())}finally{cancelBody=null;try{rd.releaseLock()}catch{}}
+    }else if(r.body&&Symbol.asyncIterator in Object(r.body)){
+     const it=r.body[Symbol.asyncIterator]();cancelBody=async()=>{try{await it.return()}catch{}};
+     try{raw=await readIt(()=>it.next(),()=>it.return())}finally{cancelBody=null}
+    }else if(typeof r.text==='function'){
+     if(!allowTextTransport)throw new Error('unbounded transport (text-only body): a stream body is required outside tests');
+     raw=await r.text();
+     if(Buffer.byteLength(raw,'utf8')>BODY_CAP)throw new Error('response body over cap');
+    }else raw=String(r.body||'');
+    if(Buffer.byteLength(raw,'utf8')>BODY_CAP)throw new Error('response body over cap'); // utf8 BYTES, not chars
+    return {status:r.status,headers:r.headers||{},rawBody:raw};
+   }catch(e){cancelNow();throw e} // EVERY error path aborts the request and cancels any live body
   })();
-  try{return await Promise.race([work,new Promise((_,rej)=>{timer=setTimeout(()=>{try{ac.abort()}catch{};if(cancelBody)Promise.resolve(cancelBody()).catch(()=>{});rej(new Error('request timeout'))},budget)})])}
-  finally{if(timer)clearTimeout(timer)}
+  try{return await Promise.race([work,new Promise((_,rej)=>{timer=setTimeout(()=>{settled=true;cancelNow();rej(new Error('request timeout'))},budget)})])}
+  finally{settled=true;if(timer)clearTimeout(timer);cancelBody=null}
  }
   const parseJson=r=>{try{return JSON.parse(r.rawBody)}catch{return null}};
 

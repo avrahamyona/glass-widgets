@@ -119,6 +119,25 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  const txtOnly=()=>Promise.resolve({status:200,headers:{},text:async()=>'{}'});
  assert((await mk({fetchImpl:txtOnly}).pollTask('cmd-textonly')).reason==='network','text-only transport refused by default (not stream-bounded)');
  assert(mk({fetchImpl:txtOnly,allowTextTransport:true}),'text-only transport allowed only with the explicit TEST-ONLY flag');
+ // TTL contract: 120s/300s roundtrip prepare+send; out-of-contract ttls refused at prepare
+ const cT=mk();
+ const p120=await cT.prepare({kind:'find_files',data:{},ttlMs:120000});
+ assert((await cT.send(p120)).status==='accepted','ttl 120s roundtrips through the shared contract');
+ const p300=await cT.prepare({kind:'find_files',data:{},ttlMs:300000});
+ assert((await cT.send(p300)).status==='accepted','ttl 300s (contract max) roundtrips');
+ await assert.rejects(()=>cT.prepare({kind:'find_files',data:{},ttlMs:999}),'ttl under contract min refused');
+ await assert.rejects(()=>cT.prepare({kind:'find_files',data:{},ttlMs:300001}),'ttl over contract max refused');
+ await assert.rejects(()=>cT.prepare({kind:'find_files',data:{},ttlMs:1500.5}),'non-integer ttl refused');
+ // late-response cleanup: a fetchImpl that ignores abort and resolves AFTER the deadline -
+ // its late body must be cancelled/released, the request signal aborted
+ let lateCancelled=false,lateSignal=null;
+ const lateFetch=(u,o)=>{lateSignal=o.signal;return new Promise(res=>setTimeout(()=>{let closed=false;
+  res({status:200,headers:{},body:new ReadableStream({start(c){if(!closed){c.enqueue(new TextEncoder().encode('{"ok":true}'));closed=true}},cancel(){lateCancelled=true}})})},100))};
+ const pLate=await mk({fetchImpl:lateFetch,requestTimeoutMs:30}).pollTask('cmd-late0001');
+ assert(pLate.status==='unknown'&&pLate.reason==='network','late fetch loses to the deadline');
+ await new Promise(r=>setTimeout(r,200));
+ assert(lateSignal&&lateSignal.aborted===true,'request signal aborted on timeout');
+ assert(lateCancelled===true,'late response body cancelled/released, never left locked (round-8 repro)');
  // strict URLs + single-shot
  assert.throws(()=>mk({deviceUrl:'http://evil.example'}),'http origin refused');
  assert.throws(()=>mk({deviceUrl:'ftp://127.0.0.1:'+port}),'non-http(s) refused even on localhost');
