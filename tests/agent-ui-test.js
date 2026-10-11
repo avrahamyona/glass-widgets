@@ -497,6 +497,24 @@ const launch=async()=>{
  logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert(/"stage":"transport_expired"/.test(logA),'transport expiry audited at execution time');
 
+ // 15j) SSE authority window: a command whose transport expiry (expires_at) already passed is
+ // refused BEFORE any effect; the refusal is a durable terminal record
+ {pushCmd({id:'x-exp',kind:'delete_file',path:os.homedir()+'/Downloads/never.txt',expires_at:Date.now()-1000});
+  const aE=await waitAck('x-exp','failed');assert(/expired/.test(aE.note||''),'stale SSE command refused before effect: '+aE.note);
+  const tX=await readJson('/task','id=x-exp');assert(tX.body.status==='failed'&&tX.body.terminal===true,'expiry refusal is a terminal record')}
+
+ // 15k) strict envelopes: an enrolled device refuses v1 (device_required), accepts v2
+ {await a.close();global.cmdRes=null;
+  env.GLASSWIDGETS_STRICT_ENVELOPES='1';
+  ({a,A}=await launch());
+  ts=Date.now();exp=EX();const dS={query:'__none__'};
+  const v1=await tunPost({id:'sv1',kind:'find_files',ts,exp,sig:sign('sv1','find_files',ts,exp,JSON.stringify(dS)),data:dS});
+  assert(v1.status===403&&v1.body.reason==='device_required','strict: v1 refused on an enrolled device: '+JSON.stringify(v1.body));
+  ts=Date.now();exp=EX();
+  const v2=await tunPost({id:'sv2',kind:'find_files',device:DEV_ID,ts,exp,sig:signDev(DEV_ID,'sv2','find_files',ts,exp,JSON.stringify(dS)),data:dS});
+  assert(v2.status===202,'strict: v2 device-bound envelope accepted');
+  await waitAck('sv2','done')}
+
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
  process.exit(0);

@@ -47,9 +47,10 @@ const check=(body,label)=>{
  globalThis.__ackSrc=src.slice(aStart,i+1);
 }
 const mkAck=(onSend)=>{let sent=null;const audits=[];
- const fn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch',globalThis.__ackSrc+';return ack;')
+ const {capResult,RESULT_CAP}=require('../src/lib/ledger.js');
+ const fn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch','capResult','RESULT_CAP','ledger',globalThis.__ackSrc+';return ack;')
  ('k',{noteLen:2000,resultLen:3000},o=>audits.push(o),fit,'http://x/ack',
-  async(u,o)=>{sent=o.body;return {ok:true,text:async()=>'{"updated":1}'}});
+  async(u,o)=>{sent=o.body;return {ok:true,text:async()=>'{"updated":1}' }},capResult,RESULT_CAP,{has:()=>false,put:()=>true});
  return {fn,getSent:()=>sent,audits}};
 
 
@@ -64,9 +65,10 @@ const mkAck=(onSend)=>{let sent=null;const audits=[];
 // 9) extracted ack integration: on an unfittable body the fetch is NEVER called
 {
  let fetches=0;const audits2=[];
- const ackFn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch',
+ const {capResult,RESULT_CAP}=require('../src/lib/ledger.js');
+ const ackFn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch','capResult','RESULT_CAP','ledger',
   globalThis.__ackSrc+';return ack;')('k',{noteLen:2000,resultLen:3000},o=>audits2.push(o),fit,'http://x/ack',
-  async()=>{fetches++;return {ok:true,text:async()=>'{"updated":1}'}});
+  async()=>{fetches++;return {ok:true,text:async()=>'{"updated":1}'}},capResult,RESULT_CAP,{has:()=>false,put:()=>true});
  (async()=>{
   await ackFn('i'.repeat(5000),'done','n'.repeat(5000),{blob:'b'.repeat(5000)});
   assert(fetches===0,'unfittable body: fetch NOT called, got '+fetches);

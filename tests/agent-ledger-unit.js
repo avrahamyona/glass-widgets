@@ -70,6 +70,18 @@ assert(badRec({at:1.5})===false,'non-integer timestamp -> down');
 assert(badRec({v:2})===false,'unknown schema version -> down');
 fs.writeFileSync(F,JSON.stringify({'cmd-x':{v:SCHEMA_V,status:'accepted',note:'',at:1,dedupExp:now+100000,resultExp:now+100000,terminal:false,result:{leak:1}}}));
 assert(createLedger(F).ok()===false,'non-final record carrying a result -> down');
+// ATOMIC commit: a failed persist leaves the ENTIRE live map untouched (not just the current id)
+{const d2=fs.mkdtempSync('/tmp/gw-ledger-ro-'),f2=path.join(d2,'l.json');
+ const l6=createLedger(f2);
+ l6.put('ro-1',{status:'accepted',exp:now+300000});
+ l6.put('ro-2',{status:'done',note:'ok',result:{n:1}});
+ fs.chmodSync(d2,0o555); // disk write must now fail
+ const r=l6.put('ro-3',{status:'accepted',exp:now+300000});
+ assert(r===false&&l6.ok()===false,'failed persist: refused, store down');
+ assert(l6.get('ro-1')!==null&&l6.get('ro-1').status==='accepted','prior live record untouched');
+ assert(l6.get('ro-2').status==='done'&&l6.get('ro-2').result.n===1,'prior terminal record untouched');
+ assert(l6.get('ro-3')===null,'the failed candidate never entered the live map');
+ fs.chmodSync(d2,0o755)}
 // corrupt/down store refuses writes
 fs.writeFileSync(F,'{corrupt');
 l=createLedger(F);

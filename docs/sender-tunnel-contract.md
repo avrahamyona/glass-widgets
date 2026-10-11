@@ -14,7 +14,12 @@ The SSE fallback stays CONNECTED until E2E + ledger are proven; nothing in stage
    `GET /info` require X-GW-Read-Ts/Nonce/Device/Sig over
    `METHOD\nPATH\nQUERY\nTS\nNONCE\nDEVICE_ID` (worker key), ts within 60s, nonce
    replay-cached, DEVICE_ID equal to the enrolled device (`-` while unenrolled). A read
-   captured at one device never authorizes another. Responses - including errors - are
+   captured at one device never authorizes another. Command envelopes: v2 carries a signed
+   `device` field bound to the enrolled device (403 wrong_device otherwise); v1 (no device
+   field) is a bootstrap/SINGLE-device path only - with strict envelopes enabled
+   (GLASSWIDGETS_STRICT_ENVELOPES=1, required before tunnel-first multi-device) an enrolled
+   device refuses v1 with 403 device_required. /info advertises envelopeVersions for
+   negotiation. Responses - including errors - are
    device-signed over `DEVICE_ID\nMETHOD\nPATH\nQUERY\nREAD_TS\nREAD_NONCE\nSTATUS\nSHA256(BODY)`
    (X-GW-Device / X-GW-Device-Sig), so a signed response can never be replayed onto another
    request, endpoint, nonce or status. `/task` is closed (503) until a device is enrolled.
@@ -26,13 +31,24 @@ The SSE fallback stays CONNECTED until E2E + ledger are proven; nothing in stage
    loss can all return 404 for an effect that DID run, and a 202 response can itself be lost
    before the sender sees it. Therefore: any POST whose response was not grounded (202 lost,
    timeout, disconnect) is an UNKNOWN outcome - the sender polls /task until a TERMINAL
-   record; a 404 after an ungrounded send is still "unknown", never "safe to retry". Only a
-   grounded terminal record (or a rejected intake response: 400/403/409/429/503 BEFORE
-   acceptance) authorizes creating a NEW id, and an unsafe effect is never auto-retried
-   without a grounded human/owner decision.
+   record; a 404 after an ungrounded send is still "unknown", never "safe to retry". Retry
+   authorization splits by intake outcome:
+   - ABSOLUTE intake rejects, BEFORE any commit - 400 (validation), 403 (unsigned/wrong
+     device), 429 (ledger full): the id was NOT consumed; the sender may fix the cause and
+     send a NEW id.
+   - 409 duplicate: the id WAS already consumed (accepted/ran/unknown). NEVER grounds a
+     new-id retry - poll /task for the ORIGINAL id until terminal.
+   - A terminal record: `done` means executed (never re-execute); `unknown` means the outcome
+     is not known (manual reconciliation, never auto-retried); `failed` may still be a
+     PARTIAL effect - it is evidence, not permission to re-run. An unsafe effect is never
+     auto-retried without a grounded human/owner decision.
 5. **Replay stability and crash honesty.** A replayed envelope gets a stable 409 at intake
    AND its record stays pollable - one transactional ledger, no crash window between replay
-   guard and result store. Records that were `accepted`/`running` when the app last exited
+   guard and result store. "At most once" holds INSIDE the command's authority window: the
+   signed exp (tunnel/pre-approved) or the worker's private transport expiry (SSE
+   expires_at); an unsigned SSE command without either gets a bounded 10-minute dedup window
+   (a fallback resend keeps the SAME id inside that window). Expired authority refuses
+   BEFORE any effect. Records that were `accepted`/`running` when the app last exited
    reload as `unknown` (terminal): evidence that the outcome is not known, never
    auto-retried, still deduping (409) forever within the dedup window. When the live window
    is saturated (200 non-terminal records), intake REFUSES new commands with 429 -

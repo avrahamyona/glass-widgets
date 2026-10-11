@@ -53,7 +53,7 @@ function capResult(result){
 }
 
 function createLedger(file){
- let ok=true;const tasks=new Map(); // strict ids only, insertion-ordered
+ let ok=true;let tasks=new Map(); // strict ids only, insertion-ordered
  try{const j=JSON.parse(fs.readFileSync(file,'utf8'));
   if(!j||typeof j!=='object'||Array.isArray(j))throw new Error('bad ledger');
   for(const k of Object.keys(j)){
@@ -64,36 +64,40 @@ function createLedger(file){
   }
  }catch(e){if(!e||e.code!=='ENOENT')ok=false} // missing file is fine; corrupt is not
  const live=now=>{let n=0;for(const v of tasks.values())if(+v.dedupExp>now)n++;return n};
- function prune(){const now=Date.now();for(const[k,v]of tasks)if(+v.dedupExp<=now&&+v.resultExp<=now)tasks.delete(k)} // a tombstone never leaves while its window is live
- // shrinkToFit returns null when the cap cannot be met even after every legal eviction (the
- // metadata of live entries alone exceeds MAX_BYTES) - the caller then ROLLS BACK atomically
- function shrinkToFit(){
+ // shrink builds the candidate map on a COPY: pruning, stripping and eviction never touch the
+ // live map. Returns {map,s} or null when the cap cannot be met even after every legal eviction
+ // (the metadata of live entries alone exceeds MAX_BYTES). Records are never mutated in place
+ // (put/transition/strip all set NEW objects), so a shallow map copy is a consistent snapshot.
+ function shrink(cand){
   const now=Date.now();
-  // count pressure: evict DEAD-WINDOW terminal entries only, oldest first
-  if(tasks.size>MAX_ENTRIES){
-   const dead=[...tasks.entries()].filter(([,v])=>+v.dedupExp<=now&&FINAL.has(v.status)).sort((a,b)=>(+a[1].at)-(+b[1].at));
-   for(const[k]of dead){if(tasks.size<=MAX_ENTRIES)break;tasks.delete(k)}
+  for(const[k,v]of cand)if(+v.dedupExp<=now&&+v.resultExp<=now)cand.delete(k); // prune dead windows
+  if(cand.size>MAX_ENTRIES){ // count pressure: evict DEAD-WINDOW terminal entries only, oldest first
+   const dead=[...cand.entries()].filter(([,v])=>+v.dedupExp<=now&&FINAL.has(v.status)).sort((a,b)=>(+a[1].at)-(+b[1].at));
+   for(const[k]of dead){if(cand.size<=MAX_ENTRIES)break;cand.delete(k)}
   }
-  let s=JSON.stringify(Object.fromEntries(tasks));
-  if(Buffer.byteLength(s)<=MAX_BYTES&&tasks.size<=MAX_ENTRIES)return s;
+  let s=JSON.stringify(Object.fromEntries(cand));
+  if(Buffer.byteLength(s)<=MAX_BYTES&&cand.size<=MAX_ENTRIES)return{map:cand,s};
   // byte pressure: strip terminal result payloads, oldest dead-window first - tombstones stay
-  const strippable=[...tasks.entries()].filter(([,v])=>v.result!=null&&FINAL.has(v.status))
+  const strippable=[...cand.entries()].filter(([,v])=>v.result!=null&&FINAL.has(v.status))
    .sort((a,b)=>((+a[1].dedupExp>now)-(+b[1].dedupExp>now))||(+a[1].at)-(+b[1].at));
-  for(const[k,v]of strippable){if(Buffer.byteLength(s)<=MAX_BYTES)break;tasks.set(k,{...v,result:null});s=JSON.stringify(Object.fromEntries(tasks))}
+  for(const[k,v]of strippable){if(Buffer.byteLength(s)<=MAX_BYTES)break;cand.set(k,{...v,result:null});s=JSON.stringify(Object.fromEntries(cand))}
   // still over: evict whole DEAD-WINDOW terminal entries by bytes, oldest first (live tombstones never)
   if(Buffer.byteLength(s)>MAX_BYTES){
-   const dead=[...tasks.entries()].filter(([,v])=>+v.dedupExp<=now&&FINAL.has(v.status)).sort((a,b)=>(+a[1].at)-(+b[1].at));
-   for(const[k]of dead){if(Buffer.byteLength(s)<=MAX_BYTES)break;tasks.delete(k);s=JSON.stringify(Object.fromEntries(tasks))}
+   const dead=[...cand.entries()].filter(([,v])=>+v.dedupExp<=now&&FINAL.has(v.status)).sort((a,b)=>(+a[1].at)-(+b[1].at));
+   for(const[k]of dead){if(Buffer.byteLength(s)<=MAX_BYTES)break;cand.delete(k);s=JSON.stringify(Object.fromEntries(cand))}
   }
-  return Buffer.byteLength(s)<=MAX_BYTES?s:null;
+  return Buffer.byteLength(s)<=MAX_BYTES?{map:cand,s}:null;
  }
- function persist(){
-  prune();
-  const s=shrinkToFit();
-  if(s===null)return 'capacity'; // preflight failed: caller rolls back; intake maps this to 429
+ // atomic commit: the candidate map becomes the live map ONLY after the rename succeeds.
+ // Any failure (disk, capacity) leaves the previous live map completely untouched.
+ function commit(cand){
+  const sh=shrink(cand);
+  if(!sh)return 'capacity';
   const tmp=file+'.'+process.pid+'.'+Date.now()+'.tmp';
-  try{fs.writeFileSync(tmp,s,{mode:0o600,flag:'wx'});fs.renameSync(tmp,file);return true}
+  try{fs.writeFileSync(tmp,sh.s,{mode:0o600,flag:'wx'});fs.renameSync(tmp,file)}
   catch(e){try{fs.unlinkSync(tmp)}catch{}ok=false;return false}
+  tasks=sh.map;
+  return true;
  }
  function put(id,rec){
   if(!ok)return false; // a down store refuses writes - never wipes evidence while disabled
@@ -107,9 +111,9 @@ function createLedger(file){
   const next={v:SCHEMA_V,status:rec.status,note:truncBytes(rec.note,NOTE_CAP),result:terminal?capResult(rec.result):null,
    at:prev?+prev.at:now,dedupExp,resultExp:now+RESULT_TTL_MS,terminal};
   if(!validRec(next))return false;
-  tasks.set(id,next);
-  const pr=persist();
-  if(pr!==true){if(prev)tasks.set(id,prev);else tasks.delete(id);return pr==='capacity'?'full':false} // atomic rollback; 'full' -> caller 429s
+  const cand=new Map(tasks);cand.set(id,next);
+  const pr=commit(cand);
+  if(pr!==true)return pr==='capacity'?'full':false; // no commit, no in-memory change; 'full' -> caller 429s
   return true;
  }
  function transition(id,status){ // accepted -> running: the durable effect permit
@@ -121,16 +125,16 @@ function createLedger(file){
   if(prev.status===status)return true; // idempotent
   const next={...prev,status};
   if(!validRec(next))return false;
-  tasks.set(id,next);
-  const pr=persist();
-  if(pr!==true){tasks.set(id,prev);return false} // no durable running mark = no permit
+  const cand=new Map(tasks);cand.set(id,next);
+  const pr=commit(cand);
+  if(pr!==true)return false; // no durable running mark = no permit; live map untouched
   return true;
  }
  function get(id){
   if(!strictId(id))return null;
-  prune();
+  const now=Date.now();for(const[k,v]of tasks)if(+v.dedupExp<=now&&+v.resultExp<=now)tasks.delete(k); // read-path prune (dead windows only)
   return tasks.get(id)||null;
  }
  return {put,transition,get,has:id=>get(id)!==null,ok:()=>ok};
 }
-module.exports={createLedger,RESULT_TTL_MS,RESULT_CAP,MAX_LIVE,SCHEMA_V};
+module.exports={createLedger,capResult,RESULT_TTL_MS,RESULT_CAP,MAX_LIVE,SCHEMA_V};
