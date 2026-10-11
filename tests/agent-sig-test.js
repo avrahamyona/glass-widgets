@@ -237,7 +237,8 @@ const launch=async()=>{
  // duplicate; 404 -> unknown; expiry never hits the wire.
  const outDir=fs.mkdtempSync('/tmp/gw-outbox-');
  const{createFileOutbox}=require(REPO+'/server/lib/outbox-file.js');
- const fileBox=()=>createFileOutbox(outDir); // the PRODUCTION durable outbox (atomic, fail-closed) - a sender restart sees the same records
+ let liveBox=null;
+ const fileBox=()=>{if(liveBox)liveBox.close();liveBox=createFileOutbox(outDir);return liveBox}; // the PRODUCTION durable outbox (atomic, fail-closed) - a sender restart closes then re-opens the same store
  const wireSeen=[];
  const rec=http.createServer((q,r)=>{if(q.url==='/cmd'&&q.method==='POST'){let b='';q.on('data',c=>b+=c);q.on('end',()=>{wireSeen.push(b);if(wireSeen.length===1){q.socket.destroy()}else{r.writeHead(409,{'content-type':'application/json'});r.end('{"ok":false,"reason":"duplicate","outcome":{"status":"accepted"}}')}})}else{r.writeHead(404);r.end()}}); // first POST: accepted then the response is LOST (socket dies); retry: 409 cached
  await new Promise(r=>rec.listen(0,'127.0.0.1',r));

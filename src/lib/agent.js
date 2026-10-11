@@ -26,8 +26,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  module.exports.cmdKey=cmdKey;
  const SIGN_PUB_BAKED='__GW_SIGN_PUB__'; // CI replaces the placeholder from the GW_SIGN_PUB secret (base64 DER spki of the worker's Ed25519 PUBLIC key); dormant when not injected. Asymmetric on purpose: nothing secret ships inside the public EXE, the signing private key exists only on the worker.
  const signPubB64=process.env.GLASSWIDGETS_AGENT_SIGN_PUB||cfg.signPub||(SIGN_PUB_BAKED.slice(0,5)==='__GW_'?'':SIGN_PUB_BAKED);
- let signPub=null;
- try{if(signPubB64)signPub=crypto.createPublicKey({key:Buffer.from(String(signPubB64).trim(),'base64'),format:'der',type:'spki'})}catch{}
+ let signPub=null,signPubFp='';
+ try{if(signPubB64){signPub=crypto.createPublicKey({key:Buffer.from(String(signPubB64).trim(),'base64'),format:'der',type:'spki'});signPubFp=crypto.createHash('sha256').update(signPub.export({format:'der',type:'spki'})).digest('hex').slice(0,16)}}catch{}
 
  let folders=[];
  async function resolveFolders(){
