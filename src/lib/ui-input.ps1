@@ -1,13 +1,19 @@
 param([int]$X=0,[int]$Y=0,[string]$Action='click')
 $ErrorActionPreference='Stop'
-$sig='[DllImport("shcore.dll")]public static extern int SetProcessDpiAwareness(int v);[DllImport("shcore.dll")]public static extern int GetProcessDpiAwareness(System.IntPtr h,out int v);[DllImport("user32.dll")]public static extern bool SetCursorPos(int X,int Y);[DllImport("user32.dll")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,UIntPtr e);'
+$sig='[DllImport("shcore.dll")]public static extern int SetProcessDpiAwareness(int v);[DllImport("shcore.dll")]public static extern int GetProcessDpiAwareness(System.IntPtr h,out int v);[DllImport("user32.dll")]public static extern int GetSystemMetrics(int i);[DllImport("user32.dll")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,UIntPtr e);'
 $t=Add-Type -MemberDefinition $sig -Name UI -Namespace GW -PassThru
-$hr=$t::SetProcessDpiAwareness(2) # per-monitor DPI aware: SetCursorPos below takes PHYSICAL pixels
+$hr=$t::SetProcessDpiAwareness(2) # per-monitor DPI aware: our coordinate contract is PHYSICAL pixels
 if($hr -ne 0 -and $hr -ne -2147024891){Write-Error "SetProcessDpiAwareness failed hr=$hr";exit 1} # E_ACCESSDENIED = context already set by the manifest
 $aw=-1;$hr2=$t::GetProcessDpiAwareness([Diagnostics.Process]::GetCurrentProcess().Handle,[ref]$aw)
 if($hr2 -ne 0){Write-Error "GetProcessDpiAwareness failed hr=$hr2";exit 1}
 if($aw -ne 2){Write-Error "DPI awareness is $aw, need per-monitor (2) for the physical contract";exit 1} # fail closed: system-aware(1)/unaware(0) cannot prove mixed-DPI physical mapping
-if(-not $t::SetCursorPos($X,$Y)){Write-Error "SetCursorPos refused ($X,$Y)";exit 1}
+# move via mouse_event ABSOLUTE|VIRTUALDESK: injected through the input pipeline, so WH_MOUSE_LL hooks
+# (which click-through windows rely on for hover) observe it. SetCursorPos never reaches those hooks.
+$vx=$t::GetSystemMetrics(76);$vy=$t::GetSystemMetrics(77);$vw=$t::GetSystemMetrics(78);$vh=$t::GetSystemMetrics(79) # SM_X/Y/CX/CYVIRTUALSCREEN
+if($vw -le 1 -or $vh -le 1){Write-Error "bad virtual screen metrics $vw x $vh";exit 1}
+$nx=[int][Math]::Round(($X-$vx)*65535.0/($vw-1));$ny=[int][Math]::Round(($Y-$vy)*65535.0/($vh-1))
+if($nx -lt 0){$nx=0};if($nx -gt 65535){$nx=65535};if($ny -lt 0){$ny=0};if($ny -gt 65535){$ny=65535}
+$t::mouse_event(0xC001,[uint32]$nx,[uint32]$ny,0,[UIntPtr]::Zero) # MOVE|ABSOLUTE|VIRTUALDESK
 Start-Sleep -Milliseconds 50
 Add-Type -AN System.Windows.Forms
 $pp=[Windows.Forms.Cursor]::Position # observed position, same physical space once DPI-aware

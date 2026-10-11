@@ -525,7 +525,8 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite,
+   islandCtl:action=>{const id=chatIslandInstance();if(!id)return {ok:false,error:'no island'};const ws=[];if(wins[id]&&!wins[id].isDestroyed())ws.push(wins[id]);for(const w of chatCompanions.values())if(!w.isDestroyed())ws.push(w);if(!ws.length)return {ok:false,error:'no island window'};for(const w of ws)w.webContents.send('chat:pill',action);return {ok:true}}})}catch(e){bootLog('agent '+(e&&e.message))}
   try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // check on launch + every 10 min, quiet
   try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}

@@ -11,7 +11,7 @@ const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*10
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
 const TEXT_EXT=new Set(['.txt','.md','.csv','.json','.log','.xml','.html','.htm','.js','.ts','.py','.yaml','.yml','.ini','.rtf']);
 
-function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
+function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd,islandCtl}){
  const cfg={...(rd('agent.json',{})||{})};
  const base=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
  const cmdUrl=process.env.GLASSWIDGETS_AGENT_CMD_URL||cfg.cmdUrl||base.replace(/\/chat$/,'/cmd/stream');
@@ -135,18 +135,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  // duplicate-id guard for BOTH branches: a reused id (signed or not) must never clobber a parked
  // approval entry - its original timer would otherwise execute the replacement without a click.
  function checkDup(id,kind,detail){
+  // Duplicate delivery (worker retry): NEVER ack here - a dup ack races the original execution's
+  // real result and can clobber it server-side. Audit only; the original flow's ack is authoritative.
   const sid=String(id),prev=seen[sid];
-  if(prev){audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:prev.decision});
-   ack(id,'failed','duplicate command id - already '+prev.decision);return true}
+  if(prev){audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:prev.decision});return true}
   for(const p of pendingApprovals.values())if(String(p.cmdId)===sid){
-   audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:'pending'});
-   ack(id,'failed','duplicate command id - already pending');return true}
+   audit({kind,stage:'duplicate',command:detail&&detail.command,url:detail&&detail.url,decision:'pending'});return true}
   return false;
  }
  function execPending(p){
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
+ if(p.kind==='island_control'){execIsland(p.cmdId,p.task.action);return}
   execRun(p.cmdId,p.command);
  }
  function runCommand(id,command,msg){
@@ -542,6 +543,46 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   audit({kind:'ui_automation',stage:'requested',steps:steps.length});
   broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
+ // island_control: open/close the chat island pill directly (no screen clicks needed - the pill
+ // is click-through when closed, so OS-level injection can't reach it). Card/signed gated like ui_automation.
+ const ISLAND_ACTIONS={open:'פתיחת האי',close:'סגירת האי'};
+ function execIsland(id,action){
+  if(!islandCtl){audit({kind:'island_control',stage:'failed',error:'no island bridge in this build'});return ack(id,'failed','island_control unsupported in this build')}
+  const r=islandCtl(action);
+  if(r&&r.ok)audit({kind:'island_control',stage:'executed',action});else audit({kind:'island_control',stage:'failed',action,error:(r&&r.error)||'unknown'});
+  ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done':String((r&&r.error)||'unknown'));
+ }
+ function islandControl(id,m){
+  const action=String(m.action||'').toLowerCase();
+  if(!ISLAND_ACTIONS[action]){audit({kind:'island_control',stage:'failed',error:'bad action'});return ack(id,'failed','unknown island action (open/close)')}
+  // pre-approval payload the worker signs for island_control: the action string
+  const pre=validPreapproval(m,action);
+  if(checkDup(id,'island_control',{}))return;
+  let preOk=false;
+  if(pre){preOk=markSeen(id,'pending',+m.exp);if(!preOk)audit({kind:'island_control',stage:'seen_persist_failed'})}
+  const core='השרת מבקש לבצע על האי: '+ISLAND_ACTIONS[action]+'.';
+  const body=core+(preOk?'\nמתבצע אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.':'\nבלי אישור - תידחה אוטומטית בעוד כ-2 דקות.');
+  if(pendingApprovals.size>=5){if(preOk)markSeen(id,'refused');return ack(id,'failed','too many pending approvals')}
+  if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
+  const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
+  if(preOk){
+   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+    if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
+    markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});execPending(p)},AUTO_RUN_MS);
+   timer.unref&&timer.unref();
+   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:+m.exp});
+   audit({kind:'island_control',stage:'preapprove_card',action});
+   broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   return;
+  }
+  if(m.sig)audit({kind:'island_control',stage:'bad_sig'});
+  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   audit({kind:'island_control',stage:'expired'});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+  timer.unref&&timer.unref();
+  pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer});
+  audit({kind:'island_control',stage:'requested',action});
+  broadcastCard({id:cardId,title:'🏝️ אישור פעולה על האי',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+ }
 
  // screenshot: read-only full-screen capture of the PRIMARY display at its physical pixel size,
  // uploaded to the worker as a PNG (same channel as get_file / web_task). FAILS CLOSED when the
@@ -705,7 +746,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(!m||typeof m!=='object'||!m.id)return;
   // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
   // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
-  if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation')&&checkDup(m.id,m.kind,{}))return;
+  if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return;
   const run=(async()=>{
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
@@ -716,6 +757,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    if(m.kind==='clipboard_read')return clipboardRead(m.id);
    if(m.kind==='web_task')return webTask(m.id,m);
    if(m.kind==='ui_automation')return uiAutomation(m.id,m);
+   if(m.kind==='island_control')return islandControl(m.id,m);
    if(m.kind==='screenshot')return screenshotCmd(m.id);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
@@ -732,7 +774,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web,sig,ui,shot'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task; sig: Ed25519 pre-approved commands (auto-run with cancelable info card); ui: ui_automation (screen clicks, card-gated); shot: read-only screenshot
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web,sig,ui,shot,island'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task; sig: Ed25519 pre-approved commands (auto-run with cancelable info card); ui: ui_automation (screen clicks, card-gated); shot: read-only screenshot
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;
