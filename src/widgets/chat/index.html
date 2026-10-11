@@ -221,7 +221,16 @@ async function cardClick(c,b,el){if(c.acted||c.busy||c.settled)return;c.busy=tru
  render(log);if(island&&pillMode==='open')render(pillBodyLog())}
 let pillSettleT=0;
 function approvalSettled(c){return !!(c.settled||c.acted||(c.expiresAt&&Date.now()>c.expiresAt+5000))}
-function render(into){const pillView=into.id==='pillLog';into.innerHTML='';for(const it of timeline()){if(pillView&&it.c&&String(it.c.id).startsWith('local-approve-')&&approvalSettled(it.c))continue;into.append(it.m?bubble(it.m):cardEl(it.c))}into.scrollTop=into.scrollHeight;updatePillSt();
+function render(into){const pillView=into.id==='pillLog';
+ const keepTop=into.scrollTop,nearBottom=into.scrollHeight-into.clientHeight-keepTop<40;into.innerHTML='';let dirty=false;
+ for(const it of timeline()){
+  if(pillView&&it.c&&String(it.c.id).startsWith('local-approve-')){
+   if(it.c.settled||it.c.acted)continue;
+   if(it.c.expiresAt&&Date.now()>it.c.expiresAt+5000){it.c.settled='expired';dirty=true;continue} // missed settle event: persist, dead buttons, greyed history
+  }
+  into.append(it.m?bubble(it.m):cardEl(it.c))}
+ if(dirty)save();
+ into.scrollTop=nearBottom?into.scrollHeight:Math.min(keepTop,into.scrollHeight);updatePillSt();
  if(pillView){clearTimeout(pillSettleT);const nx=(H.cards||[]).filter(c=>String(c.id).startsWith('local-approve-')&&!approvalSettled(c)&&c.expiresAt).map(c=>c.expiresAt+5100-Date.now()).filter(ms=>ms>0).sort((a,b)=>a-b)[0];if(nx)pillSettleT=setTimeout(()=>{if(pillMode==='open')render(pillBodyLog())},Math.min(nx,600000))}} // pill settles cards on lifecycle events (expiry fallback refresh); chat log keeps full history
 async function save(){try{await api.chatSave(H)}catch{}}
 

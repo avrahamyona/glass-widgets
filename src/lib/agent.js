@@ -171,7 +171,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     timer.unref&&timer.unref();
     pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
     audit({kind:'run_command',stage:'preapprove_card',command:cmd});
-    broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+    broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',expiresAt:+msg.exp,body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
     return;
    }
   }
@@ -181,7 +181,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer});
   audit({kind:'run_command',stage:'requested',command:cmd});
-  broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
  async function handleCardAction(p){
   const cardId=String(p&&p.card_id||''),pend=pendingApprovals.get(cardId);
@@ -219,7 +219,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer});
   audit({kind:'media_control',stage:'requested',action:a});
-  broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
  // clipboard_read: read-only - reports the PC clipboard text back to its owner (capped), no card.
@@ -409,7 +409,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    timer.unref&&timer.unref();
    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
-   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
+   broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+task.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
