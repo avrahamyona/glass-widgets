@@ -63,6 +63,10 @@ function createFileOutbox(dir,opts){
    if(!(e&&e.code==='EEXIST'))throw e;
    const g=(()=>{try{return JSON.parse(fs.readFileSync(guardPidFile,'utf8'))}catch{return null}})();
    if(g&&!deadHere(g))throw new Error('outbox lease reclaim in progress (pid '+g.pid+')'); // live reclaimer (or unverifiable foreign host): refuse
+   if(!g){ // publish gap or crash residue: a LIVE reclaimer exposes its pid within ms, so a fresh pidless guard is LIVE - refuse; only an old one is residue
+    let age=Infinity;try{age=Date.now()-fs.statSync(guardDir).mtimeMs}catch{}
+    if(age<60000)throw new Error('outbox lease reclaim in progress (unpublished guard)');
+   }
    try{fs.unlinkSync(guardPidFile)}catch{}
    try{fs.rmdirSync(guardDir)}catch{throw new Error('outbox lease reclaim in progress')} // lost the rmdir race
    fs.mkdirSync(guardDir); // EEXIST here = lost to a fresher reclaimer
@@ -153,6 +157,17 @@ function createFileOutbox(dir,opts){
     return true;
    }catch{return false}
    finally{if(fd!=null)try{fs.closeSync(fd)}catch{};try{fs.unlinkSync(tmp)}catch{}} // a failed put leaves nothing behind
+  },
+  // confirm(id): durability gate for the wire. The record must be readable (all fail-closed
+  // checks) AND the directory must fsync RIGHT NOW - a reopen cannot know the last sync failed,
+  // so confirmation is affirmed at send time, not remembered. False while sync fails: the id is
+  // kept, the sender pauses, nothing POSTs.
+  async confirm(id){
+   if(closed)throw new Error('outbox closed');
+   id=String(id||'');if(!strictId(id))return false;
+   const prior=readRaw(id);
+   if(!prior)return false;
+   try{dirFsync();unverified.delete(id);return true}catch{return false}
   },
   close(){release()},
  };

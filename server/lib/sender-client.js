@@ -181,15 +181,16 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  // is SECRETLESS: X-GW-Key (public) + the signed envelope - the reply key is not even in scope here.
  async function send(prep){
   if(prep&&prep.error)return {id:prep.id,status:'unknown',reason:prep.error,trusted:false};
-  // NOTE (reviewed): a DIRECT send({id}) after a prepare that failed outbox_commit_failed still
-  // finds the committed-but-unverified record on disk and puts ONE POST on the wire; only the
-  // receipt persist reports unknown. That is the approved durability bypass - the alternative
-  // (blocking the wire on an unreadable commit state) would strand accepted commands forever.
   const id=String(prep&&prep.id||'');
   let rec=null;try{rec=await outbox.get(id)}catch(e){return {id,status:'unknown',reason:'outbox_read_failed',trusted:false};}
   if(!rec||!envelopeSchemaOk(rec.envelope,device))return {id,status:'unknown',reason:'no_valid_durable_envelope',trusted:false};
   const envelope=rec.envelope;
   if(String(envelope.id)!==id)return {id,status:'unknown',reason:'envelope_id_mismatch',trusted:false}; // the stored envelope must be FOR this id
+  // DURABILITY GATE: nothing reaches the wire from a committed-but-unverified record. The store
+  // re-runs its directory fsync RIGHT NOW (covers same-instance unverified AND a reopen that
+  // cannot know the last sync failed); while sync fails the id is kept and the send pauses.
+  if(typeof outbox.confirm==='function'){let okC=false;try{okC=await outbox.confirm(id)===true}catch{okC=false}
+   if(!okC)return {id,status:'unknown',reason:'durability_unconfirmed',trusted:false}}
   if(now()>=envelope.exp)return {id,status:'expired',trusted:false};
   if(preEnroll){
    if(envelope.kind!=='enroll_device')return {id,status:'refused',reason:'preEnroll carries enroll_device ONLY',trusted:false}; // bootstrap: exactly one kind, ever

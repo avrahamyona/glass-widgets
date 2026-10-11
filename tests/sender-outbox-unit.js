@@ -88,6 +88,12 @@ const realOpen=fs.openSync;
   assert((await b4.put('cmd-6',rec(6)))===false,'idempotent re-put still unconfirmed while dir fsync fails');
  });
  assert((await b4.put('cmd-6',rec(6)))===true,'idempotent re-put confirms after dir fsync heals');
+ // confirm(): the durability gate the sender checks before the wire
+ assert((await b4.confirm('cmd-absent'))===false,'confirm on a missing record is false');
+ assert((await b4.confirm('cmd-2'))===true,'confirm on a healthy record is true');
+ await patched(fs,'openSync',(p,f,m)=>{if(p===dir&&f==='r')throw Object.assign(new Error('x'),{code:'EIO'});return realOpen(p,f,m)},async()=>{
+  assert((await b4.confirm('cmd-2'))===false,'confirm false while dir fsync fails');
+ });
  // POSIX READ CHECKS: a record with widened mode fails closed on read
  if(process.platform!=='win32'){
   fs.chmodSync(path.join(dir,'cmd-6.json'),0o644);
@@ -112,6 +118,15 @@ const realOpen=fs.openSync;
  const b5=createFileOutbox(dir);
  assert((await b5.get('cmd-6')).envelope.id==='cmd-6','stale guard cleared, dead lock reclaimed, records intact');
  b5.close();
+ // guard publish gap: a FRESH pidless guard is a LIVE reclaimer (refuse); only OLD residue is clearable
+ b4.close();
+ fs.writeFileSync(path.join(dir,'.outbox.lock'),JSON.stringify({pid:99999999,host:os.hostname(),at:1}));
+ fs.mkdirSync(path.join(dir,'.outbox.reclaim')); // pid never published
+ assert.throws(()=>createFileOutbox(dir),/unpublished guard/,'fresh pidless guard is LIVE - refused');
+ fs.utimesSync(path.join(dir,'.outbox.reclaim'),new Date(Date.now()-120000),new Date(Date.now()-120000));
+ const b6=createFileOutbox(dir);
+ assert((await b6.get('cmd-2')).envelope.id==='cmd-2','old pidless guard is crash residue - cleared, records intact');
+ b6.close();
  // PRIVACY (POSIX): a pre-existing 0755 dir is enforced to 700 on open; a symlink dir is refused
  if(process.platform!=='win32'){
   const lax=fs.mkdtempSync(path.join(os.tmpdir(),'gw-outbox-lax-'));

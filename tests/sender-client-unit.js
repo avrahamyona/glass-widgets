@@ -77,6 +77,34 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  assert(healthHits===h1&&h1===h0+1,'health proof cached within TTL');
  clock+=400000;await cH.ensureDevice();assert(healthHits===h1+1,'health proof re-fetched after TTL');
  cH.resetIdentity();await cH.ensureDevice();assert(healthHits===h1+2,'resetIdentity forces a fresh proof');
+ // DURABILITY GATE (ops): a committed-but-unverified record NEVER reaches the wire - zero POSTs
+ // while the directory sync fails, same instance AND after reopen; exactly one POST once confirmed.
+ const fs2=require('fs'),os2=require('os'),path2=require('path');
+ const{createFileOutbox}=require('../server/lib/outbox-file.js');
+ const dDir=fs2.mkdtempSync(path2.join(os2.tmpdir(),'gw-sender-dur-'));
+ const realOpen2=fs2.openSync;
+ const posts=()=>seenHeaders.filter(h=>h[2]==='POST').length;
+ fs2.openSync=(p,f,m)=>{if(p===dDir&&f==='r')throw Object.assign(new Error('dir sync unavailable'),{code:'EIO'});return realOpen2(p,f,m)};
+ try{
+  const p0=posts();
+  const box1=createFileOutbox(dDir),cD=mk({outbox:box1});
+  const pD=await cD.prepare({kind:'find_files',data:{}});
+  assert(pD.error==='outbox_commit_failed','prepare under dir-fsync failure pauses WITH the id: '+JSON.stringify(pD));
+  const sD=await cD.send({id:pD.id});
+  assert(sD.status==='unknown'&&sD.reason==='durability_unconfirmed','direct send paused while unverified: '+JSON.stringify(sD));
+  assert(posts()===p0,'ZERO POSTs while dir fsync fails (same instance)');
+  box1.close();
+  const box2=createFileOutbox(dDir),cD2=mk({outbox:box2}); // reopen: the new instance cannot know the last sync failed
+  const sD2=await cD2.send({id:pD.id});
+  assert(sD2.reason==='durability_unconfirmed','reopen under persistent failure still pauses');
+  assert(posts()===p0,'ZERO POSTs after reopen under persistent failure');
+  fs2.openSync=realOpen2; // heal
+  const pD2=await cD2.prepare({id:pD.id,kind:'find_files',data:{}});
+  assert(pD2.reused===true,'identical retry prepare reuses the stored envelope');
+  const sD3=await cD2.send({id:pD.id});
+  assert(sD3.status==='accepted'&&posts()===p0+1,'exactly ONE POST after durability confirmed: '+JSON.stringify(sD3));
+  box2.close();
+ }finally{fs2.openSync=realOpen2;fs2.rmSync(dDir,{recursive:true,force:true})}
  // outbox fail-closed
  const cB=mk({outbox:{get:async()=>{throw new Error('disk')},put:async()=>true}});
  const sB=await cB.sendCommand({kind:'find_files',data:{}});
