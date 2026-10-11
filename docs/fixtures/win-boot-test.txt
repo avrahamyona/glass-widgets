@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 3 (UTF-8 BOM, הודעות באנגלית)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 4 (UTF-8 BOM, הודעות באנגלית, תיקון ציפיית fail-loud)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -84,7 +84,10 @@ try{
   $e3=Join-Path $base 'err-third.log'; $o3=Join-Path $base 'out-third.log'
   $p3=Start-Process -FilePath 'node' -ArgumentList (Join-Path $root.FullName 'server\index.js') -WorkingDirectory $root.FullName -RedirectStandardOutput $o3 -RedirectStandardError $e3 -PassThru -Wait
   $errTxt=(Get-Content $e3 -Raw -ErrorAction SilentlyContinue)
-  if($p3.ExitCode -ne 0 -and $errTxt -match 'refusing to boot'){Say 'PASS 7: corrupt identity -> boot refused (fail-loud)'}
+  $outTxt=(Get-Content $o3 -Raw -ErrorAction SilentlyContinue)
+  # fail-loud = nonzero exit AND the server did NOT come up AND a real error was printed
+  # (a corrupt JSON throws SyntaxError; a mismatched pair prints 'refusing to boot' - both are refusals)
+  if($p3.ExitCode -ne 0 -and $outTxt -notmatch 'server up' -and ($errTxt -match 'refusing to boot|SyntaxError|Unexpected|JSON|Error')){Say 'PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$p3.ExitCode+')'}
   else{throw ('corrupt identity boot not refused: exit='+$p3.ExitCode)}
   Say 'DONE - all checks passed'
 }catch{

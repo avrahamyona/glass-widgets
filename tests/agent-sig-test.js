@@ -140,6 +140,39 @@ const launch=async()=>{
  const refusals=ACK.filter(x=>String(x.id).startsWith('slot')&&/too many/.test(x.note||''));
  assert.equal(refusals.length,0,'no phantom slot blocks later cards: '+JSON.stringify(refusals));
 
+ // 10) REAL enroll_device on the REAL agent runtime (vertical slice): challenge-bound identity
+ // mint on this PC, durable device.json, narrow bootstrap read binding, local fingerprint source.
+ const CH='chal-'+Date.now().toString(36)+'-abcdefgh';
+ ts=Date.now();exp=EX();const ePay=JSON.stringify({challenge:CH});
+ pushCmd({id:'enr1',kind:'enroll_device',data:{challenge:CH},ts,exp,sig:sign('enr1','enroll_device',ts,exp,ePay)});
+ const aE=await waitAck('enr1','done');
+ assert(aE.result&&aE.result.deviceId&&aE.result.pubkey&&aE.result.challengeSig,'enroll returns identity+proof: '+JSON.stringify(aE.result));
+ const devIdE=aE.result.deviceId,pubE=aE.result.pubkey;
+ assert(devIdE===crypto.createHash('sha256').update(pubE).digest('hex').slice(0,16),'deviceId derives from the pubkey');
+ assert(crypto.verify(null,Buffer.from([CH,pubE,devIdE].join('\n'),'utf8'),crypto.createPublicKey({key:Buffer.from(pubE,'base64'),format:'der',type:'spki'}),Buffer.from(aE.result.challengeSig,'hex')),'challenge proof verifies against the returned key');
+ const devJ=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8'));
+ assert(devJ.pub===pubE&&devJ.priv&&crypto.createHash('sha256').update(devJ.pub).digest('hex').slice(0,16)===devIdE,'device identity persisted durably (pub+priv, id derives)');
+ const{fingerprint:fpFn}=require(REPO+'/src/lib/fingerprint');
+ const fpE=fpFn(pubE);
+ // narrow bootstrap reads against the REAL local server (port 47732): exactly the pending command's /task under '-'
+ const readHdr=(dev,path,q)=>{const rts=Date.now(),rn='n'+Math.random().toString(36).slice(2,10);const rs=crypto.sign(null,Buffer.from(['GET',path,q,String(rts),rn,dev].join('\n'),'utf8'),PRIV).toString('hex');return{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rn,'X-GW-Read-Sig':rs,'X-GW-Read-Device':dev}};
+ const read=async(dev,path,q)=>{const r=await fetch('http://127.0.0.1:47732'+path+(q?'?'+q:''),{headers:readHdr(dev,path,q)});let b=null;try{b=await r.json()}catch{}return{status:r.status,body:b}};
+ const rT=await read('-','/task','id=enr1');
+ assert(rT.status===200&&rT.body.result&&rT.body.result.deviceId===devIdE,'bootstrap: pending enroll /task fetch under dash -> 200');
+ assert((await read('-','/info','')).status===403,'bootstrap: /info under dash -> 403 (fail closed)');
+ assert((await read('-','/task','id=nope')).status===403,'bootstrap: unrelated /task id under dash -> 403 (fail closed)');
+ const rI=await read(devIdE,'/info','');
+ assert(rI.status===200&&rI.body.fingerprint===fpE,'enrolled /info exposes the LOCAL fingerprint: '+JSON.stringify(rI.body));
+ const auditTail=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(auditTail.includes('"stage":"enrolled"')&&auditTail.includes('"fingerprint":"'+fpE+'"'),'enroll audit carries the fingerprint');
+ // re-enroll (already enrolled): idempotent, fresh pending window for the NEW command id
+ ts=Date.now();exp=EX();pushCmd({id:'enr2',kind:'enroll_device',data:{challenge:'re'+CH},ts,exp,sig:sign('enr2','enroll_device',ts,exp,JSON.stringify({challenge:'re'+CH}))});
+ const aE2=await waitAck('enr2','done');
+ assert(aE2.result.deviceId===devIdE&&aE2.result.pubkey===pubE,'re-enroll idempotent (same identity)');
+ const rT2=await read('-','/task','id=enr2');
+ assert(rT2.status===200,'re-enroll: the NEW command id fetches under dash');
+ assert((await read('-','/task','id=enr1')).status===403,'re-enroll: the OLD command id no longer passes under dash');
+
  // 9) replay guard cannot persist -> signed command gets the BLOCKING card with blocking copy, never auto-runs
  await a.close();
  fs.rmSync(cfg+'/glasswidgets/agent-seen.json',{force:true});fs.mkdirSync(cfg+'/glasswidgets/agent-seen.json'); // a directory where the store file should be

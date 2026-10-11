@@ -932,10 +932,11 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  if(cmdKey&&srvCfg.enabled)resolveFolders().then(async()=>{
   if(stop||!folders.length)return; // stop() during folder resolution must not bring the listener up
   const{startLocalServer}=require('./localserver');
+  if(devId&&devPubB64)audit({kind:'device',stage:'identity',device:devId,fingerprint:fingerprint(devPubB64)}); // boot-time local fingerprint source (pairing comparison), not only at enroll time
   const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
    getDevice:()=>devKey&&devId?{deviceId:devId,deviceSign:(t)=>deviceSign(t)}:null,
    getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
-   getInfo:()=>({envelopeVersions:['v1','v2'],strict:!!STRICT_ENVELOPES,...(devId?{deviceId:devId,pubkey:devPubB64}:{})}),
+   getInfo:()=>({envelopeVersions:['v1','v2'],strict:!!STRICT_ENVELOPES,...(devId?{deviceId:devId,pubkey:devPubB64,fingerprint:fingerprint(devPubB64)}:{})}), // the LOCAL fingerprint the user compares against the sender's approval request
    verifyReadAuth,log:(lvl,o)=>audit({lvl,...o}),
    onCommand:(m)=>{
     // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
