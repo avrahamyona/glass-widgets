@@ -36,7 +36,7 @@ const launch=async()=>{
  env={...process.env,XDG_CONFIG_HOME:cfg,GLASSWIDGETS_NO_PICKER:'1',PYTHONPATH:'/tmp/pystub',GLASSWIDGETS_CLOUD_PYTHON:'/usr/bin/python3',
   GLASSWIDGETS_CHAT_URL:'http://127.0.0.1:'+port+'/chat',GLASSWIDGETS_CHAT_STREAM_URL:'http://127.0.0.1:'+port+'/chat/stream',
   GLASSWIDGETS_CHAT_KEY:'chat-key',GLASSWIDGETS_AGENT_CMD_KEY:'cmd-key',GLASSWIDGETS_AGENT_CMD_URL:'http://127.0.0.1:'+port+'/cmd/stream',GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack',
-  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1'};
+  GLASSWIDGETS_APPROVAL_TTL_MS:'4000',GLASSWIDGETS_AUTO_RUN_MS:'2500',GLASSWIDGETS_AGENT_SIGN_PUB:PUB_B64,GLASSWIDGETS_UI_DRYRUN:'1',GLASSWIDGETS_LOCAL_SERVER_PORT:'47731',GLASSWIDGETS_TUNNEL_ENABLED:'0'};
  global.cmdRes=null;
  let {a,A}=await launch();
  assert(CMDQS[0].includes('ui')&&CMDQS[0].includes('shot')&&CMDQS[0].includes('island'),'caps advertise ui+shot+island: '+CMDQS[0]);
@@ -298,6 +298,33 @@ const launch=async()=>{
  assert(aFlood.result.truncated===true&&aFlood.result.stdout_full===4000,'explicit truncation metadata: '+JSON.stringify({truncated:aFlood.result.truncated,full:aFlood.result.stdout_full}));
  logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert(!logA.includes('"kind":"ack","stage":"http_error","id":"ak4"')&&!logA.includes('"ack_unconfirmed","id":"ak4"'),'truncated result landed confirmed (no ack anomaly for ak4)');
+
+ // 15) tunnel intake: unsigned envelope -> 403 audited, signed envelope -> 202 -> executes+acks, replay -> 409
+ await a.close();global.cmdRes=null;
+ ({a,A}=await launch());
+ const TUN='http://127.0.0.1:47731/cmd';
+ const tunPost=async body=>{const r=await fetch(TUN,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':'cmd-key'},body:JSON.stringify(body)});let j=null;try{j=await r.json()}catch{};return{status:r.status,body:j}};
+ for(let i=0;i<50;i++){try{const h=await fetch('http://127.0.0.1:47731/health',{headers:{'X-GW-Key':'cmd-key'}});if(h.ok)break}catch{};await sleep(200)}
+ const noAuth=await fetch(TUN,{method:'POST',headers:{'content-type':'application/json'},body:'{}'});
+ assert(noAuth.status===403,'tunnel /cmd without the key -> 403');
+ const un=await tunPost({id:'t1',kind:'find_files',data:{query:'__no_such__'}});
+ assert(un.status===403&&un.body.reason==='unsigned','unsigned envelope -> 403 unsigned: '+JSON.stringify(un));
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"server","stage":"unsigned_cmd","id":"t1"/.test(logA),'unsigned tunnel attempt audited');
+ const data1={query:'__no_such_file_xyz__',limit:3};
+ ts=Date.now();exp=EX();
+ const sig1=sign('t2','find_files',ts,exp,JSON.stringify(data1));
+ const ok1=await tunPost({id:'t2',kind:'find_files',ts,exp,sig:sig1,data:data1});
+ assert(ok1.status===202,'signed envelope -> 202: '+JSON.stringify(ok1));
+ const aT=await waitAck('t2','done');
+ assert(aT.result&&Array.isArray(aT.result.matches),'tunnel find_files executed and acked: '+JSON.stringify(aT.result).slice(0,120));
+ const dup=await tunPost({id:'t2',kind:'find_files',ts,exp,sig:sig1,data:data1});
+ assert(dup.status===409,'signed replay -> 409 duplicate');
+ ts=Date.now();exp=EX()-600000; // stale window: exp already in the past
+ const stale=await tunPost({id:'t3',kind:'find_files',ts,exp,sig:sign('t3','find_files',ts,exp,JSON.stringify({query:'x'})),data:{query:'x'}});
+ assert(stale.status===403,'expired envelope -> 403');
+ const badData=await tunPost({id:'t4',kind:'find_files',ts:Date.now(),exp:EX(),sig:sign('t4','find_files',Date.now(),EX(),'{"query":"other"}'),data:{query:'changed'}});
+ assert(badData.status===403,'signature over different payload -> 403 (envelope binds the data)');
 
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');

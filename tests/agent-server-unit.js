@@ -43,6 +43,16 @@ async function main(){
   const res=await J('/cmd',{method:'POST',headers:{'X-GW-Key':TOKEN},body:big});
   assert(res.status===202&&calls[2].command.length===40000,'40KB command passes the own server (worker would have rejected)')}
 
+ // 5b) onCommand status mapping: auth refusals surface as 403, not a generic 409
+ {const res=await J('/cmd',{method:'POST',headers:{'X-GW-Key':TOKEN},body:JSON.stringify({id:'c10',kind:'bad_kind'})});
+  assert(res.status===409&&res.body.reason==='unknown_kind','handler refusal without status -> 409')}
+ // 5c) handler-provided status wins (the 403 unsigned path in agent.js)
+ {const r2=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',
+   onCommand:()=>({accepted:false,status:403,reason:'unsigned'})});
+  const res=await fetch('http://127.0.0.1:'+r2.port+'/cmd',{method:'POST',headers:{'X-GW-Key':TOKEN},body:JSON.stringify({id:'c11',kind:'find_files'})});
+  assert(res.status===403,'handler status 403 surfaced');
+  await r2.stop()}
+
  // 6) body cap still bounded
  {const huge=JSON.stringify({id:'c4',kind:'run_command',command:'x'.repeat(BODY_CAP)});
   const res=await fetch(U+'/cmd',{method:'POST',headers:{'X-GW-Key':TOKEN},body:huge});
