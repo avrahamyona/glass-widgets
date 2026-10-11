@@ -60,7 +60,9 @@ The SSE fallback stays CONNECTED until E2E + ledger are proven; nothing in stage
 ### Execution-time authority gate (round 5)
 Every execution branch (auto-run timer, approval tap, media session grant) passes one shared
 gate in execPending: the effect dies when min(signed exp, transport expiry) has passed, with a
-terminal failed record + ack. Preapproval cards store that same min as their private expiry.
+terminal failed record + ack. Preapproval cards of EVERY kind (run_command, web_task, ui_automation, island_control) store
+that same min as their private expiry, and the media session grant carries the transport expiry
+into the gate as texp.
 On SSE, duplicate resolution runs BEFORE expiry evaluation: a replay - expired or not - of a
 known id returns the cached terminal result (done/failed), stays silent for accepted/running/
 unknown, and never rewrites a live record. Only a NEW expired intake gets the refusal record.

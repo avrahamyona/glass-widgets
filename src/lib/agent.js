@@ -231,7 +231,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  function mediaControl(id,action,intake){
   const a=String(action||'').trim().toLowerCase();
   if(!MEDIA_ACTIONS.includes(a))return ack(id,'failed','bad action');
-  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execPending({cmdId:id,kind:'media_control',action:a})} // session grant is NOT a gate bypass: the same durable running transition decides
+  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execPending({cmdId:id,kind:'media_control',action:a,texp:intake&&+intake.exp||0})} // session grant is NOT a gate bypass: the same durable running transition decides, and the shared expiry gate gets the transport authority
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
@@ -428,7 +428,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
+   const cardExp=[+task.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+task.exp); // min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:cardExp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+task.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
@@ -555,7 +556,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'ui_automation',stage:'preapproved',steps:p.task.steps.length});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:+m.exp});
+   const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:cardExp});
    audit({kind:'ui_automation',stage:'preapprove_card',steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע לחיצות שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
@@ -596,7 +598,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
    timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:+m.exp});
+   const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:cardExp});
    audit({kind:'island_control',stage:'preapprove_card',action});
    broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;

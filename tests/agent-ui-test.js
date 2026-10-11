@@ -541,6 +541,29 @@ const launch=async()=>{
   const tP2=await readJson('/task','id=x-park');assert(tP2.body.status==='accepted','expired replay of a live intake does NOT rewrite the record');
   assert(!ACK.some(x=>x.id==='x-park'),'no wire ack at all for the live intake')}
 
+ // 15n) the min-expiry pre-card rule covers web_task, ui_automation AND island_control: signed
+ // exp valid 60s, transport authority (expires_at) dead in 400ms - all three auto-run timers
+ // refuse before any effect
+ {const expL=Date.now()+60000,dead=Date.now()+400,t0=Date.now();
+  const wUrl='https://example.com/',wSteps=[{do:'goto',url:'https://example.com/'}],uSteps=[{do:'click',x:10,y:10}];
+  pushCmd({id:'x-web-exp',kind:'web_task',url:wUrl,steps:wSteps,ts:t0,exp:expL,sig:sign('x-web-exp','web_task',t0,expL,wUrl+'\n'+JSON.stringify(wSteps)),expires_at:dead});
+  pushCmd({id:'x-ui-exp',kind:'ui_automation',steps:uSteps,ts:t0,exp:expL,sig:sign('x-ui-exp','ui_automation',t0,expL,JSON.stringify(uSteps)),expires_at:dead});
+  pushCmd({id:'x-isl-exp',kind:'island_control',action:'open',ts:t0,exp:expL,sig:sign('x-isl-exp','island_control',t0,expL,'open'),expires_at:dead});
+  for(const xid of ['x-web-exp','x-ui-exp','x-isl-exp']){
+   const aN=await waitAck(xid,'failed');assert(/expired/.test(aN.note||''),xid+' preapproved auto-run refused before effect: '+aN.note);
+   const tN=await readJson('/task','id='+xid);assert(tN.body.status==='failed',xid+' recorded failed');
+   assert(!ACK.some(x=>x.id===xid&&x.status==='done'),xid+' NEVER executed')}}
+
+ // 15o) media_control carries transport expiry into the shared gate: a parked card approved
+ // AFTER expires_at died is refused before the media bridge is touched
+ {pushCmd({id:'x-med-exp',kind:'media_control',action:'play',expires_at:Date.now()+1500}); // parked card; authority dies at 1500ms, card TTL is 4000ms
+  await card('שליטה בניגון');
+  await sleep(2200);
+  await clickBtn('שליטה בניגון','אשר');
+  const aM=await waitAck('x-med-exp','failed');assert(/expired/.test(aM.note||''),'media card approved after transport expiry refused: '+aM.note);
+  assert(!ACK.some(x=>x.id==='x-med-exp'&&x.status==='done'),'media bridge never touched');
+  assert(/"kind":"media_control","stage":"transport_expired"/.test(fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8')),'media gate refusal audited')}
+
  await a.close();srv.close();
  console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
  process.exit(0);
