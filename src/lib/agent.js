@@ -806,6 +806,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
+   if(m.kind==='enroll_device')return enrollDeviceCmd(m);
    return ack(m.id,'failed','unknown kind');
   })();
   let tOut=null;
@@ -832,10 +833,25 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    }catch(e){clearTimeout(idleT);if(stop)break;await new Promise(r=>setTimeout(r,backoff));backoff=Math.min(backoff*2,15000)}
   }
  }
- const KNOWN_KINDS=new Set(['find_files','delete_file','open_path','run_command','update_app','media_control','clipboard_read','web_task','ui_automation','island_control','screenshot','index','sys_info','get_file']);
+ const KNOWN_KINDS=new Set(['find_files','delete_file','open_path','run_command','update_app','media_control','clipboard_read','web_task','ui_automation','island_control','screenshot','index','sys_info','get_file','enroll_device']);
  // own-server leg (stage 1): the same command intake, served locally and reached through the tunnel.
  // the worker SSE loop keeps running as fallback until cutover; checkDup dedups a command that
  // somehow arrives on both channels, and every terminal state still acks over the existing leg.
+ // intake replay store: durable, signed-exp, covers EVERY tunnel kind. Deliberately separate from
+ // the downstream seen/pendingApprovals guards so the first command is never rejected by its own
+ // record and the regular approval flow keeps its own semantics. Corrupt/unwritable = tunnel
+ // intake closed (503), never a pretend guard.
+ const tSeenFile=()=>path.join(app.getPath('userData'),'agent-tunnel-seen.json');
+ const tSeen={};let tSeenOk=true;
+ try{const j=JSON.parse(fs.readFileSync(tSeenFile(),'utf8'));for(const k of Object.keys(j))if(+j[k].exp>Date.now())tSeen[k]=j[k]}
+ catch(e){if(!e||e.code!=='ENOENT')tSeenOk=false}
+ function tMark(id,exp){
+  const sid=String(id),now=Date.now();
+  for(const k of Object.keys(tSeen))if(!(+tSeen[k].exp>now))delete tSeen[k];
+  const prev=tSeen[sid];tSeen[sid]={at:now,exp:+exp||now};
+  try{fs.writeFileSync(tSeenFile(),JSON.stringify(tSeen))}catch{
+   if(prev)tSeen[sid]=prev;else delete tSeen[sid];tSeenOk=false;return false}
+  return true}
  const srvCfg={enabled:true,port:47631,...((cfg.localServer&&typeof cfg.localServer==='object')?cfg.localServer:{})};
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED!==undefined)srvCfg.enabled=process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED==='1';
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
@@ -844,7 +860,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(stop||!folders.length)return; // stop() during folder resolution must not bring the listener up
   const{startLocalServer}=require('./localserver');
   const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
-   deviceId:devId||undefined,deviceSign:devKey?(nonce)=>deviceSign(devId+'\n'+nonce):undefined,
+   getDevice:()=>devKey&&devId?{deviceId:devId,deviceSign:(t)=>deviceSign(t)}:null,
    log:(lvl,o)=>audit({lvl,...o}),
    onCommand:(m)=>{
     // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
@@ -855,14 +871,15 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     // unsigned semantics - approval cards for sensitive kinds exactly as before.
     if(!KNOWN_KINDS.has(m.kind))return {accepted:false,status:400,reason:'unknown_kind'};
     const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
+    // reserved fields: signed data must never smuggle identity/envelope fields past the intake
+    for(const k of ['id','kind','ts','exp','sig','__tunnel'])if(k in data){audit({kind:'server',stage:'reserved_field',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});return {accepted:false,status:400,reason:'reserved_field'}}
     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
      return {accepted:false,status:403,reason:'unsigned'}}
-    if(checkDup(m.id,m.kind,{}))return {accepted:false,status:409,reason:'duplicate'};
-    // durable replay record for kinds with no downstream seen-marking; card-parking kinds own theirs
-    const parked=m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control';
-    if(!parked&&!markSeen(m.id,'tunnel_intake',m.exp))return {accepted:false,status:503,reason:'replay_store'};
-    handle({id:m.id,kind:m.kind,...data});
+    if(!tSeenOk)return {accepted:false,status:503,reason:'replay_store'};
+    if(tSeen[String(m.id)]){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}}
+    if(!tMark(m.id,m.exp))return {accepted:false,status:503,reason:'replay_store'};
+    handle({...data,id:String(m.id),kind:m.kind,__tunnel:true}); // authenticated identity LAST
     return {accepted:true};
    }});
   if(stop){if(r.started)r.stop();return} // stop() raced the listen() call - tear it back down
@@ -875,16 +892,36 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const tunnelCfg={enabled:true,...((cfg.tunnel&&typeof cfg.tunnel==='object')?cfg.tunnel:{})};
  if(process.env.GLASSWIDGETS_TUNNEL_ENABLED!==undefined)tunnelCfg.enabled=process.env.GLASSWIDGETS_TUNNEL_ENABLED==='1';
  const discoveryUrl=base.replace(/\/chat$/,'/agent/tunnel');
- // per-device credential, provisioned OUTSIDE the public EXE (delivered by a worker-signed command
- // into userData/agent.json localServer.deviceId/devicePriv). The publish and the health proof are
- // signed with it; the baked cmd key is public and never proves device identity.
- const devId=String((srvCfg.deviceId)||process.env.GLASSWIDGETS_DEVICE_ID||'').slice(0,64);
- const devPrivB64=String((srvCfg.devicePriv)||process.env.GLASSWIDGETS_DEVICE_PRIV||'');
- let devKey=null;try{if(devPrivB64)devKey=crypto.createPrivateKey({key:Buffer.from(devPrivB64.trim(),'base64'),format:'der',type:'pkcs8'})}catch{}
- const deviceSign=devKey?text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex'):null;
+ // per-device credential: the keypair is GENERATED ON THIS PC (enroll_device kind, worker-signed
+ // only); the private key never leaves the machine - only the public key is acked back for
+ // enrollment. The baked cmd key is public and never proves device identity.
+ const devFile=()=>path.join(app.getPath('userData'),'device.json');
+ let devKey=null,devId='';
+ function loadDevice(){
+  try{const j=JSON.parse(fs.readFileSync(devFile(),'utf8'));
+   devKey=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});
+   devId=crypto.createHash('sha256').update(String(j.pub)).digest('hex').slice(0,16);
+  }catch{devKey=null;devId=''}
+ }
+ loadDevice();
+ const deviceSign=text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex');
+ async function enrollDeviceCmd(m){
+  // worker-signed ONLY (tunnel intake marker or flat SSE sig over an empty payload) - this
+  // operation founds the device identity, so it never parks a user card and never runs unsigned.
+  if(m.__tunnel!==true&&!validPreapproval(m,'')){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
+  const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
+  const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
+  const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
+  try{fs.writeFileSync(devFile(),JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600})}catch(e){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
+  loadDevice();
+  audit({kind:'enroll_device',stage:'enrolled',device:devId});
+  if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
+  ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64}); // PUBLIC key only travels
+ }
  let tunnelStop=null,heartbeat=null;
+ let currentTunnelUrl='';
  async function publishTunnel(url){
-  if(!deviceSign||!devId){audit({kind:'tunnel',stage:'no_device_key'});return} // never publish under the public baked key
+  if(!devKey||!devId){audit({kind:'tunnel',stage:'no_device_key'});return} // never publish under the public baked key
   const ts=Date.now();
   try{const r=await fetch(discoveryUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({deviceId:devId,url,v:app.getVersion(),ts,sig:deviceSign(devId+'\n'+url+'\n'+ts)}),signal:AbortSignal.timeout(15000)});
    if(!r.ok)audit({kind:'tunnel',stage:'publish_fail',status:r.status});
@@ -897,8 +934,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(stop)return; // stop() raced the download - never bring the tunnel up afterwards
   if(!exe){audit({kind:'tunnel',stage:'no_binary'});return}
   const t=startTunnel({exePath:exe,port,isStopped:()=>stop,log:(stage,obj)=>audit({kind:'tunnel',stage,...obj}),
-   onDown:()=>{clearInterval(heartbeat);heartbeat=null;audit({kind:'tunnel',stage:'down'});publishTunnel('')}, // pointer goes stale NOW, not after 90s of false-fresh
+   onDown:()=>{currentTunnelUrl='';clearInterval(heartbeat);heartbeat=null;audit({kind:'tunnel',stage:'down'});publishTunnel('')}, // pointer goes stale NOW, not after 90s of false-fresh
    onUrl:(url)=>{
+    currentTunnelUrl=url;
     audit({kind:'tunnel',stage:'published',url});
     publishTunnel(url);
     clearInterval(heartbeat);

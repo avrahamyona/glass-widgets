@@ -7,7 +7,7 @@ const http=require('http');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log,deviceId,deviceSign}){
+function startLocalServer({port,token,version,caps,onCommand,log,getDevice}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
@@ -17,8 +17,9 @@ function startLocalServer({port,token,version,caps,onCommand,log,deviceId,device
    // sender-side identity proof: with ?nonce= the server signs deviceId+nonce with the per-device
    // key, so the sender verifies the endpoint holds the enrolled device key BEFORE any payload.
    const body={ok:true,v:version||'',caps:caps||''};
-   if(deviceId&&deviceSign){const nonce=(req.url.split('nonce=')[1]||'').split('&')[0];
-    if(/^[A-Za-z0-9_-]{8,64}$/.test(nonce)){try{body.deviceId=deviceId;body.sig=deviceSign(nonce)}catch{}}}
+   const d=getDevice&&getDevice(); // resolved per request: enrollment must not need a server restart
+   if(d&&d.deviceId&&d.deviceSign){const nonce=(req.url.split('nonce=')[1]||'').split('&')[0];
+    if(/^[A-Za-z0-9_-]{8,64}$/.test(nonce)){try{body.deviceId=d.deviceId;body.sig=d.deviceSign(d.deviceId+'\n'+nonce)}catch{}}}
    return reply(200,body)}
   if(req.method==='POST'&&req.url==='/cmd'){
    let n=0,chunks=[];

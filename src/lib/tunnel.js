@@ -23,8 +23,10 @@ function sha256File(p){return new Promise((res,rej)=>{const h=crypto.createHash(
 
 // Ensures binDir/cloudflared(.exe) exists with the pinned hash; downloads+verifies when missing.
 // Returns the binary path, or null (tunnel stays off, SSE fallback keeps running).
-async function ensureCloudflared(binDir,{sha256,url,fetchImpl,log}={}){
+async function ensureCloudflared(binDir,{sha256,url,fetchImpl,log,platform}={}){
  const say=(stage,obj)=>{try{if(log)log(stage,obj)}catch{}};
+ const plat=platform||process.platform;
+ if(plat!=='win32'){say('unsupported_platform',{platform:plat});return null} // the pinned asset is the Windows exe; never download a binary this host cannot run
  const want=(sha256||CLOUDFLARED.sha256).toLowerCase();
  const exe=path.join(binDir,process.platform==='win32'?'cloudflared.exe':'cloudflared');
  try{if((await sha256File(exe))===want){say('present',{exe});return exe}}catch{}
@@ -58,7 +60,8 @@ function startTunnel({exePath,port,onUrl,onDown,log,spawnImpl,initialRetryMs,max
   if(isDead())return;
   let reported=false,buf='',dead=false; // dead: schedule recovery exactly once, whether 'error', 'exit', or both fire
   try{child=spawn(exePath,['tunnel','--url','http://127.0.0.1:'+port,'--no-autoupdate'],{windowsHide:true})}catch(e){say('spawn_fail',{err:String(e&&e.message||e).slice(0,120)});down();return schedule()}
-  const onData=d=>{buf+=d.toString();let i;while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);
+  const onData=d=>{if(dead||isDead())return;buf+=d.toString(); // late output after error/stop must never fire onUrl
+   let i;while((i=buf.indexOf('\n'))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);
    if(!reported){const m=line.match(URL_RE);const ok=m&&validateTunnelUrl(m[0]);if(ok){reported=true;retry=initialRetryMs||2000;say('url',{url:ok});try{onUrl(ok)}catch{}}}}};
   if(child.stderr)child.stderr.on('data',onData);
   if(child.stdout)child.stdout.on('data',onData);

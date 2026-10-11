@@ -21,22 +21,27 @@ async function main(){
  const good=Buffer.from('fake-binary');
  const goodHash=crypto.createHash('sha256').update(good).digest('hex');
  fs.writeFileSync(exe,good);
- {let dl=0;const p=await ensureCloudflared(dir,{sha256:goodHash,fetchImpl:async()=>{dl++;throw new Error('must not download')}});
+ {let dl=0;const p=await ensureCloudflared(dir,{platform:'win32',sha256:goodHash,fetchImpl:async()=>{dl++;throw new Error('must not download')}});
   assert(p===exe&&dl===0,'matching binary reused, no download')}
 
  // 3) wrong hash -> downloads, verifies, installs
  fs.writeFileSync(exe,Buffer.from('stale'));
- {const p=await ensureCloudflared(dir,{sha256:goodHash,url:'https://example.test/cf',fetchImpl:async(u)=>{assert(u==='https://example.test/cf','pinned url used');return{ok:true,arrayBuffer:async()=>good.buffer.slice(good.byteOffset,good.byteOffset+good.length)}}});
+ {const p=await ensureCloudflared(dir,{platform:'win32',sha256:goodHash,url:'https://example.test/cf',fetchImpl:async(u)=>{assert(u==='https://example.test/cf','pinned url used');return{ok:true,arrayBuffer:async()=>good.buffer.slice(good.byteOffset,good.byteOffset+good.length)}}});
   assert(p===exe&&(await crypto.subtle.digest('SHA-256',fs.readFileSync(exe)).then(b=>Buffer.from(b).toString('hex')))===goodHash,'downloaded binary installed after hash check')}
 
  // 4) hash mismatch on download -> rejected, nothing installed
  fs.rmSync(exe);
- {const p=await ensureCloudflared(dir,{sha256:'0'.repeat(64),fetchImpl:async()=>({ok:true,arrayBuffer:async()=>good.buffer.slice(good.byteOffset,good.byteOffset+good.length)})});
+ {const p=await ensureCloudflared(dir,{platform:'win32',sha256:'0'.repeat(64),fetchImpl:async()=>({ok:true,arrayBuffer:async()=>good.buffer.slice(good.byteOffset,good.byteOffset+good.length)})});
   assert(p===null&&!fs.existsSync(exe),'mismatched download never lands')}
 
  // 5) http failure -> null, no throw
- {const p=await ensureCloudflared(dir,{sha256:goodHash,fetchImpl:async()=>({ok:false,status:503})});
+ {const p=await ensureCloudflared(dir,{platform:'win32',sha256:goodHash,fetchImpl:async()=>({ok:false,status:503})});
   assert(p===null,'503 -> null')}
+
+ // 5e) platform guard: the pinned asset is Windows-only - non-Windows never downloads
+ {let dl=0;const p=await ensureCloudflared(dir,{sha256:goodHash,fetchImpl:async()=>{dl++;return{ok:false}}});
+  if(process.platform!=='win32'){assert(p===null&&dl===0,'non-Windows: null, no download attempt')}
+  else assert(p===exe,'win32 keeps the verified binary')}
 
  // 6) startTunnel: URL reported once per process, respawn after exit, stop kills
  {const spawns=[];let urls=[];const logs=[];
@@ -63,6 +68,14 @@ async function main(){
   await new Promise(r=>setTimeout(r,30));
   assert(spawns.length===n,'no respawn after stop');
   assert(logs.some(l=>l.s==='url')&&logs.some(l=>l.s==='exit'),'lifecycle logged')}
+
+ // 6b) late output after stop never fires onUrl (dead-gate)
+ {const spawns4=[];const mk4=(...a)=>{const c=new EventEmitter();c.stderr=new EventEmitter();c.stdout=new EventEmitter();c.kill=()=>{};c.args=a;spawns4.push(c);return c};
+  let urls4=0;
+  const t=startTunnel({exePath:'/x',port:1,spawnImpl:mk4,onUrl:()=>urls4++,log:()=>{},initialRetryMs:5,maxRetryMs:10});
+  t.stop();
+  spawns4[0].stderr.emit('data',Buffer.from('https://late-url.trycloudflare.com\n'));
+  assert(urls4===0,'late output after stop ignored')}
 
  // 7) error-without-exit recovers; error+exit schedules exactly once
  {const spawns2=[];const mk2=()=>{const c=new EventEmitter();c.stderr=new EventEmitter();c.stdout=new EventEmitter();c.kill=()=>{};spawns2.push(c);return c};

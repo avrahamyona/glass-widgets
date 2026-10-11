@@ -55,10 +55,10 @@ async function main(){
 
  // 5d) health nonce: device-bound identity proof for the sender
  {const r3=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
-   deviceId:'dev-1',deviceSign:n=>'sig('+n+')'});
+   getDevice:()=>({deviceId:'dev-1',deviceSign:t=>'sig('+t+')'})});
   const U3='http://127.0.0.1:'+r3.port;
   const h=await (await fetch(U3+'/health?nonce=abcdef123456',{headers:{'X-GW-Key':TOKEN}})).json();
-  assert(h.deviceId==='dev-1'&&h.sig==='sig(abcdef123456)','nonce signed with the device key: '+JSON.stringify(h));
+  assert(h.deviceId==='dev-1'&&h.sig==='sig(dev-1\nabcdef123456)','nonce signed with the device key: '+JSON.stringify(h));
   const h2=await (await fetch(U3+'/health?nonce=../bad',{headers:{'X-GW-Key':TOKEN}})).json();
   assert(h2.ok&&!h2.sig,'bad nonce format -> plain health, no signature');
   const h3=await (await fetch(U3+'/health',{headers:{'X-GW-Key':TOKEN}})).json();
