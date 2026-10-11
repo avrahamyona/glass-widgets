@@ -48,13 +48,13 @@ function verifyDeviceSig(devPub,expectDevice,{headers,method,path,query,reqTs,re
  }catch{return false} // malformed proof fails CLOSED
 }
 // schema-check a stored envelope before it ever reaches the wire (stored bytes are trusted only after shape validation)
-function envelopeSchemaOk(e,expectDevice){
+function envelopeSchemaOk(e,expectDevice){ // expectDevice null/undefined = preEnroll bootstrap: the envelope must carry NO device (v1)
  try{
   if(!e||typeof e!=='object'||Array.isArray(e))return false;
   if(!strictId(e.id)||!e.kind||!Number.isFinite(e.ts)||!Number.isFinite(e.exp))return false;
   assertKind(e.kind);
   if(!/^[0-9a-f]{128}$/.test(String(e.sig||'')))return false; // shape only - authenticity is the PC's to verify
-  if(String(e.device||'')!==String(expectDevice))return false; // v2 device binding REQUIRED - a missing/other device never flies
+  if(expectDevice==null){if(e.device!=null)return false}else if(String(e.device||'')!==String(expectDevice))return false; // v2 device binding REQUIRED post-enrollment; NO device pre-enrollment
   if(!Number.isInteger(e.ts)||!Number.isInteger(e.exp))return false; // integer timestamps, like the builder emits
   if(!(e.exp>e.ts))return false;
   try{assertTtl(e.exp-e.ts)}catch{return false} // the SHARED TTL contract (1000..300000 ms) - never a narrower private cap
@@ -67,13 +67,17 @@ function envelopeSchemaOk(e,expectDevice){
 // NOTE: deviceUrl/controlUrl are IMMUTABLE for the life of the client. A tunnel pointer / URL
 // change REQUIRES constructing a new client (resetIdentity only clears the cached health proof -
 // it never re-origins an existing client).
-function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,device,devicePub,fetchImpl,outbox,cmdPath,allowTextTransport=false,requestTimeoutMs=15000,pollIntervalMs=2000,pollTimeoutMs=120000,healthTtlMs=HEALTH_TTL_MS,nowFn}){
+function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,device,devicePub,fetchImpl,outbox,cmdPath,allowTextTransport=false,preEnroll=false,requestTimeoutMs=15000,pollIntervalMs=2000,pollTimeoutMs=120000,healthTtlMs=HEALTH_TTL_MS,nowFn}){
  if(!deviceUrl||!cmdKey||!signPrivate)throw new Error('sender client needs deviceUrl, cmdKey and signPrivate');
  if(typeof fetchImpl!=='function')throw new Error('fetchImpl required (injected - no implicit network)');
- if(!devicePub)throw new Error('devicePub required (registry-verified device pubkey) - an unproven status is never terminal');
+ // preEnroll is the ENROLLMENT BOOTSTRAP ONLY: no device key exists yet, so no health proof or
+ // device-pinned status is possible. In this mode the client carries enroll_device ONLY and never
+ // marks anything trusted - the challenge proof (orchestrator) is the binding.
+ if(preEnroll&&devicePub)throw new Error('preEnroll mode must not pin a devicePub - none exists yet');
+ if(!devicePub&&!preEnroll)throw new Error('devicePub required (registry-verified device pubkey) - an unproven status is never terminal');
  if(replyKey&&!controlUrl)throw new Error('replyKey without a controlUrl refused - a private sender credential must have NO path to the device origin'); // secret routing, fail closed
  if(controlUrl&&!replyKey)throw new Error('controlUrl requires replyKey');
- const devPub=crypto.createPublicKey({key:Buffer.from(String(devicePub),'base64'),format:'der',type:'spki'});
+ const devPub=devicePub?crypto.createPublicKey({key:Buffer.from(String(devicePub),'base64'),format:'der',type:'spki'}):null; // null in preEnroll bootstrap ONLY
  const base=strictBase(deviceUrl,'deviceUrl'),cbase=controlUrl?strictBase(controlUrl,'controlUrl'):null;
  if(cbase&&cbase===base)throw new Error('controlUrl must be a DISTINCT origin from deviceUrl - the reply key must have no path to the device origin'); // round-8 repro: identical origins passed silently
  const cpath=String(cmdPath||CMD_PATH);
@@ -139,6 +143,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  // health nonce proof with TTL + explicit reset on pointer change (no stale identity reuse)
  let healthAt=0;
  async function ensureDevice(budgetMs){
+  if(!devPub)return false; // preEnroll bootstrap: no device key exists to prove yet
   if(healthAt&&now()-healthAt<healthTtlMs)return true;
   const nonce=crypto.randomBytes(12).toString('hex');
   let r;try{r=await req(base+'/health?nonce='+encodeURIComponent(nonce),{method:'GET',headers:{'X-GW-Key':cmdKey}},budgetMs)}catch(e){return false} // PUBLIC key only - never the reply key
@@ -161,7 +166,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
    if(h!==h2)throw new Error('id reuse with different content refused - a retry resends the EXACT stored envelope');
    return {id:cmdId,reused:true};
   }
-  const envelope=await buildCommandEnvelope(env,{id:cmdId,kind,device:String(device),data,ttlMs}); // single-device: no override
+  const envelope=await buildCommandEnvelope(env,{id:cmdId,kind,device:device==null?undefined:String(device),data,ttlMs}); // single-device: no override (preEnroll = v1, no device field yet)
   let ok=false;try{ok=await outbox.put(cmdId,{envelope,receipt:null,at:now()})===true}catch{ok=false}
   if(!ok)return {error:'outbox_commit_failed',id:cmdId};
   let back=null;try{back=await outbox.get(String(cmdId))}catch{back=null}
@@ -179,7 +184,9 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   const envelope=rec.envelope;
   if(String(envelope.id)!==id)return {id,status:'unknown',reason:'envelope_id_mismatch',trusted:false}; // the stored envelope must be FOR this id
   if(now()>=envelope.exp)return {id,status:'expired',trusted:false};
-  if(!await ensureDevice(requestTimeoutMs))return {id,status:'unknown',reason:'device_unproven',trusted:false};
+  if(preEnroll){
+   if(envelope.kind!=='enroll_device')return {id,status:'refused',reason:'preEnroll carries enroll_device ONLY',trusted:false}; // bootstrap: exactly one kind, ever
+  }else if(!await ensureDevice(requestTimeoutMs))return {id,status:'unknown',reason:'device_unproven',trusted:false}; // health nonce proof BEFORE payload (skipped in preEnroll: no key exists yet)
   if(now()>=envelope.exp)return {id,status:'expired',trusted:false}; // re-checked AFTER the health proof, immediately before the wire (round-8 repro)
   let r;
   try{r=await req(base+cpath,{method:'POST',headers:{'content-type':'application/json','X-GW-Key':cmdKey},body:JSON.stringify(envelope)})} // NO X-GW-Reply-Key on the direct path - ever
@@ -195,13 +202,13 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
 
  async function pollTask(id,{budgetMs}={}){
   const query='id='+encodeURIComponent(String(id));
-  const rd=await signReadRequest(env,{device:String(device),method:'GET',path:TASK_PATH,query});
+  const rd=await signReadRequest(env,{device:device==null?'-':String(device),method:'GET',path:TASK_PATH,query}); // '-' addresses a not-yet-enrolled device (preEnroll reads)
   let r;
   try{r=await req(base+TASK_PATH+'?'+query,{method:'GET',headers:{'X-GW-Key':cmdKey,'X-GW-Read-Ts':String(rd.ts),'X-GW-Read-Nonce':rd.nonce,'X-GW-Read-Sig':rd.sig,'X-GW-Read-Device':rd.device}},budgetMs)} // public key + signed-read headers only
   catch(e){return {id:String(id),status:'unknown',reason:'network',trusted:false};}
   if(r.status===404)return {id:String(id),status:'unknown',reason:'not_found',trusted:false};
   if(r.status!==200)return {id:String(id),status:'unknown',reason:'refused_'+r.status,trusted:false};
-  const proven=verifyDeviceSig(devPub,device,{headers:r.headers,method:'GET',path:TASK_PATH,query,reqTs:rd.ts,reqNonce:rd.nonce,status:r.status,rawBody:r.rawBody});
+  const proven=devPub?verifyDeviceSig(devPub,device,{headers:r.headers,method:'GET',path:TASK_PATH,query,reqTs:rd.ts,reqNonce:rd.nonce,status:r.status,rawBody:r.rawBody}):false; // preEnroll: nothing is ever client-trusted
   const b=parseJson(r);
   if(!b||typeof b!=='object')return {id:String(id),status:'unknown',reason:'bad_body',trusted:false};
   return {...b,id:String(id),trusted:proven}; // status without a valid device sig is INFORMATIONAL ONLY
@@ -212,18 +219,32 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   for(;;){
    const remain=to===0?requestTimeoutMs:Math.max(1,to-(now()-t0));
    const t=await pollTask(id,{budgetMs:remain});
-   if(t.trusted&&TERMINAL.has(t.status))return t;
+   // preEnroll bootstrap: nothing is client-trusted yet - the challenge proof downstream is the
+   // binding. But a TRANSIENT unknown (404 before intake lands, 503 while the device key is being
+   // minted) is NOT terminal: only done/failed, or a ledger-record unknown (terminal flag), ends it.
+   const isTerminal=t.trusted?TERMINAL.has(t.status):(preEnroll&&(t.status==='done'||t.status==='failed'||(t.status==='unknown'&&t.terminal===true)));
+   if(isTerminal)return t;
    if(to===0||now()-t0>=to)return {id:String(id),status:'timeout',last:t,trusted:false};
    await new Promise(res=>setTimeout(res,Math.min(iv,Math.max(1,to-(now()-t0)))));
   }
  }
  // control origin (worker registry/discovery) - the ONLY place the reply key is ever attached
- const CONTROL_PATHS=new Set(['/glasswidgets/agent/tunnel','/glasswidgets/agent/enroll']); // the ONLY endpoints the reply key may ever be sent to
+ const CONTROL_GET_PATHS=new Set(['/glasswidgets/agent/tunnel']); // read endpoints on the control origin
+ const CONTROL_POST_PATHS=new Set(['/glasswidgets/agent/enroll']); // write endpoints on the control origin
+ // the reply key goes to these allowlisted registry endpoints on the CONTROL origin ONLY - never the device
  async function controlGet(path,budgetMs){
   if(!cbase)throw new Error('no controlUrl configured');
-  if(!CONTROL_PATHS.has(String(path)))throw new Error('control path not allowlisted - the reply key goes to known registry endpoints ONLY');
+  if(!CONTROL_GET_PATHS.has(String(path)))throw new Error('control path not allowlisted - the reply key goes to known registry endpoints ONLY');
   return req(cbase+path,{method:'GET',headers:{'X-GW-Reply-Key':replyKey}},budgetMs);
  }
- return {prepare,send,sendCommand,pollTask,waitTerminal,ensureDevice,resetIdentity,controlGet,strictBase,verifyDeviceSig,CMD_PATH,CMD_TTL_MS,TERMINAL};
+ async function controlPost(path,body,budgetMs){
+  if(!cbase)throw new Error('no controlUrl configured');
+  if(!CONTROL_POST_PATHS.has(String(path)))throw new Error('control path not allowlisted - the reply key goes to known registry endpoints ONLY');
+  if(!body||typeof body!=='object'||Array.isArray(body))throw new Error('control body must be a plain object');
+  const raw=JSON.stringify(body);
+  if(Buffer.byteLength(raw,'utf8')>DATA_BYTES_CAP)throw new Error('control body over cap');
+  return req(cbase+path,{method:'POST',headers:{'content-type':'application/json','X-GW-Reply-Key':replyKey},body:raw},budgetMs);
+ }
+ return {prepare,send,sendCommand,pollTask,waitTerminal,ensureDevice,resetIdentity,controlGet,controlPost,strictBase,verifyDeviceSig,hasPinnedDeviceKey:()=>!!devPub,CMD_PATH,CMD_TTL_MS,TERMINAL};
 }
 module.exports={createSenderClient,TERMINAL,verifyDeviceSig};

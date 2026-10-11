@@ -31,7 +31,7 @@ async function signReadRequest(env, { device, method, path, query }) {
   const key = await signerKey(env);
   method = String(method || 'GET').toUpperCase(); path = String(path || ''); query = String(query || '');
   device = String(device || '');
-  if (!/^[0-9a-f]{16}$/.test(device)) throw new Error('bad device id');
+  if (!/^[0-9a-f]{16}$/.test(device) && device !== '-') throw new Error('bad device id'); // '-' is the documented not-yet-enrolled address (preEnroll reads) - the PC verifier accepts exactly that literal
   if (method !== 'GET') throw new Error('read signer signs GET only');
   if (!READ_PATHS.has(path)) throw new Error('read path not allowed');
   if (new TextEncoder().encode(query).length > READ_QUERY_CAP) throw new Error('query too long'); // TextEncoder, not Buffer: the live Worker is ESM with NO node-compat flag

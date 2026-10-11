@@ -1004,6 +1004,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const devFile=()=>path.join(devDir(),'device.json');
  const{aclDump,currentSid,aclOwnerOnly,aclHarden}=require('./acl-win'); // the shared harden+verify module (Electron-free) - same code for agent and standalone server
  const{RESERVED}=require('./command-contract'); // shared reserved-field list (superset of the old inline guard)
+ const{CHALLENGE_RE:ENROLL_CHALLENGE_RE,signChallenge:signEnrollChallenge}=require('./enroll-challenge'); // A1 challenge binding
 
  let devKey=null,devId='',devPubB64='';
  function loadDevice(){
@@ -1040,8 +1041,14 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   // 'rotate') are IGNORED - so no replay or payload tampering can ever change the keys. Explicit
   // rotation/revocation is a stage-2 design (stable identity + dedicated signed flow).
   const tun=!!(intake&&intake.tunnel===true);
-  if(!tun&&!validPreapproval(m,'')){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
-  if(devKey&&devId){audit({kind:'enroll_device',stage:'already_enrolled',device:devId});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64})}
+  const eData=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
+  if('challenge' in eData&&!ENROLL_CHALLENGE_RE.test(String(eData.challenge||''))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // a malformed challenge is refused, never silently ignored
+  const ePayload=Object.keys(eData).length?JSON.stringify(eData):'';
+  if(!tun&&!(validPreapproval(m,ePayload)||(m.device!=null&&validPreapproval(m,ePayload,m.device)))){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
+  const chProof=()=>{ // A1 challenge binding: prove key possession for THIS enrollment episode
+   const ch='challenge' in eData?String(eData.challenge):null;
+   return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
+  if(devKey&&devId){audit({kind:'enroll_device',stage:'already_enrolled',device:devId});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProof()})}
   const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
   const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
   const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
@@ -1050,7 +1057,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
   audit({kind:'enroll_device',stage:'enrolled',device:devId});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
-  ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64}); // PUBLIC key only travels
+  ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProof()}); // PUBLIC key only travels
  }
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
