@@ -913,32 +913,18 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // task-result polling from the same durable record, so no crash window can strand a command
  // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
  const{createLedger,RESULT_TTL_MS,RESULT_CAP,capResult}=require('./ledger');
+ const{fingerprint}=require('./fingerprint'); // pairing fingerprint: the PC-side local source the user compares against the sender's approval request
  const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
  // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
  // must never gate private results. Reads carry X-GW-Read-Ts/Nonce/Sig - Ed25519 with the worker
  // key over method\npath\nquery\nts\nnonce (request-bound), ts within 60s, nonce replay-cached
  // in memory until ts+120s (read-only, so an in-memory horizon is sufficient; documented).
  const STRICT_ENVELOPES=process.env.GLASSWIDGETS_STRICT_ENVELOPES==='1'; // v2 device-bound envelopes mandatory (set before tunnel-first multi-device)
- const READ_SKEW_MS=60000,readNonces=new Map();
- function verifyReadAuth(method,pathName,query,headers){
-  if(!signPub)return false;
-  const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
-  const device=String(headers['x-gw-read-device']||'');
-  // the signed request is bound to the TARGET DEVICE: a read captured on one device never
-  // authorizes another (multi-device safe); '-' addresses a not-yet-enrolled device - and, for a
-  // short post-enroll grace window, the bootstrap reader that cannot know the fresh id yet.
-  if(devId){if(device!==devId&&!(device==='-'&&Date.now()<enrollGraceUntil))return false}
-  else if(device!=='-')return false;
-  if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
-  if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
-  const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
-  const key=String(ts)+'|'+nonce;
-  if(readNonces.has(key))return false; // replay
-  let okV=false;
-  try{okV=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce,device].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{okV=false}
-  if(okV)readNonces.set(key,ts+120000);
-  return okV;
- }
+ // the PRODUCTION read verifier lives in the shared Electron-free module (tests run the same
+ // code): target-device binding + the narrow bootstrap exception (one pending enroll command's
+ // /task read only, TTL-bound, replay-guarded there).
+ const{createReadAuth}=require('./read-auth');
+ const verifyReadAuth=signPub?createReadAuth({senderPubKey:signPub,getDeviceId:()=>devId,getPendingEnroll:()=>pendingEnrollRead}):(()=>false);
  const srvCfg={enabled:true,port:47631,...((cfg.localServer&&typeof cfg.localServer==='object')?cfg.localServer:{})};
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED!==undefined)srvCfg.enabled=process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED==='1';
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
@@ -1050,19 +1036,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const chProof=()=>{ // A1 challenge binding: prove key possession for THIS enrollment episode
    const ch='challenge' in eData?String(eData.challenge):null;
    return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
-  if(devKey&&devId){audit({kind:'enroll_device',stage:'already_enrolled',device:devId});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProof()})}
+  if(devKey&&devId){pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000};audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProof()})}
   const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
   const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
   const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
   if(!persistDevice(pubB64,privB64))return ack(m.id,'failed','device key persist failed');
   loadDevice();
   if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return ack(m.id,'failed','device key persist failed')}
-  enrollGraceUntil=Date.now()+60000; // bootstrap: the sender still reads with '-' until it learns the id
-  audit({kind:'enroll_device',stage:'enrolled',device:devId});
+  pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000}; // the preEnroll sender fetches THIS command's terminal under '-' until it learns the id
+  audit({kind:'enroll_device',stage:'enrolled',device:devId,fingerprint:fingerprint(pubB64)});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
   ack(m.id,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProof()}); // PUBLIC key only travels
  }
- let enrollGraceUntil=0; // set at identity mint: 60s where '-' reads still pass (bootstrap terminal fetch)
+ let pendingEnrollRead=null; // {id,device,until}: the ONE bootstrap /task fetch allowed under '-' (set on EVERY accepted enroll_device - fresh mint AND already-enrolled, so a post-restart re-enroll still lets the preEnroll sender fetch its result)
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
  async function publishTunnel(url){

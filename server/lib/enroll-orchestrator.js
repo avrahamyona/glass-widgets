@@ -10,13 +10,10 @@
 // registered. Re-enroll of the same device resolves idempotently (already:true).
 const crypto=require('crypto');
 const{CHALLENGE_RE,verifyChallenge}=require('../../src/lib/enroll-challenge');
+const{fingerprint}=require('../../src/lib/fingerprint'); // ONE canonical - the PC shows the SAME string locally, so the user can compare
 const TERMINAL_OK=new Set(['done','failed']); // 'unknown' = reconcile manually, never register
 // pairing fingerprint: short, human-comparable, derived from the enrolled pubkey. The user (or an
 // ALREADY authenticated channel) confirms THIS string out-of-band before any registry mutation.
-const fingerprint=pubkey=>{
- const h=crypto.createHash('sha256').update(String(pubkey),'utf8').digest('hex');
- return h.slice(0,4)+'-'+h.slice(4,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16); // e.g. 3f9a-01bc-77d2-e540
-};
 // approvePairing({deviceId, pubkey, fingerprint}) -> truthy: REQUIRED user/authenticated-channel
 // approval of the pairing fingerprint BEFORE any registry write. The challenge proof alone shows
 // key possession + freshness - it can NEVER show this endpoint is the user's intended PC (a
@@ -43,7 +40,7 @@ function createEnrollOrchestrator({sender,approvePairing}){
   if(!verifyChallenge({challenge,pubkey:r.pubkey,deviceId:r.deviceId,sig:r.challengeSig}))return {ok:false,stage:'proof',reason:'challenge proof invalid',id:sent.id}; // possession + freshness of the RETURNED key
   const fp=fingerprint(r.pubkey);
   if(typeof approvePairing!=='function')return {ok:false,stage:'pairing',reason:'no pairing approval channel',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp}; // fail closed - never register unapproved
-  let approved=false;try{approved=!!(await approvePairing({deviceId:String(r.deviceId),pubkey:String(r.pubkey),fingerprint:fp}))}catch{approved=false}
+  let approved=false;try{approved=(await approvePairing({deviceId:String(r.deviceId),pubkey:String(r.pubkey),fingerprint:fp,episode:String(sent.id),challenge}))===true}catch{approved=false} // STRICT true - a truthy string/object is NOT an approval; the callback receives the episode id + challenge so its decision binds to THIS enrollment
   if(!approved)return {ok:false,stage:'pairing',reason:'pairing not approved',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
   let reg;try{reg=await sender.controlPost('/glasswidgets/agent/enroll',{device_id:String(r.deviceId),pubkey:String(r.pubkey)})}catch(e){return {ok:false,stage:'registry',reason:String(e&&e.message||e),id:sent.id,deviceId:r.deviceId}}
   if(reg.status===200){

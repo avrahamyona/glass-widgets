@@ -10,6 +10,8 @@ const fs=require('fs'),path=require('path'),crypto=require('crypto'),os=require(
 const{startLocalServer}=require('../src/lib/localserver');
 const{createLedger,RESULT_TTL_MS}=require('../src/lib/ledger');
 const{OPS}=require('./lib/ops');
+const{deriveCaps}=require('./lib/capabilities'); // A4: caps derive from the registry, never a hand-edited banner
+const{fingerprint}=require('../src/lib/fingerprint'); // the PC-side fingerprint source the user compares against the approval request
 const{RESERVED}=require('../src/lib/command-contract'); // shared reserved-field list
 
 const CONFIG=process.env.GW_SERVER_CONFIG||path.join(process.env.GW_SERVER_DATA||path.join(os.homedir(),'.glasswidgets-server'),'config.json');
@@ -68,10 +70,10 @@ const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().
 const{createVerifier}=require('./lib/verify');
 const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
 async function main(){
- const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),token:cfg.token,version:'server-0.1.0',caps:'files',
+ const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),token:cfg.token,version:'server-0.1.0',caps:deriveCaps(OPS),
   getDevice:()=>({deviceId:device.id,deviceSign}),
   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
-  getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub}),
+  getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub,fingerprint:fingerprint(device.pub)}),
   verifyReadAuth,log,
   onCommand:(m)=>{
    if(!Object.prototype.hasOwnProperty.call(OPS,String(m.kind)))return {accepted:false,status:400,reason:'unknown_kind'};
@@ -95,6 +97,6 @@ async function main(){
    return {accepted:true};
   }});
  if(!r.started){console.error('not started:',r.reason);process.exit(1)}
- console.log('server up on 127.0.0.1:'+r.port,'device',device.id,'roots',roots.length);
+ console.log('server up on 127.0.0.1:'+r.port,'device',device.id,'fingerprint',fingerprint(device.pub),'roots',roots.length); // the fingerprint is the LOCAL source of truth for pairing comparison
 }
 main().catch(e=>{console.error(e);process.exit(1)});

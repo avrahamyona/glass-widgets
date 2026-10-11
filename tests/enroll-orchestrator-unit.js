@@ -8,6 +8,7 @@ const assert=require('assert'),crypto=require('crypto'),http=require('http');
 const{createSenderClient}=require('../server/lib/sender-client.js');
 const{createEnrollOrchestrator}=require('../server/lib/enroll-orchestrator.js');
 const{createVerifier}=require('../server/lib/verify.js');
+const{createReadAuth}=require('../src/lib/read-auth.js');
 const{startLocalServer}=require('../src/lib/localserver.js');
 const{signChallenge}=require('../src/lib/enroll-challenge.js');
 const{handleTunnel}=require('../worker/tunnel-route.js');
@@ -39,19 +40,11 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
 async function makePC({badProof=false}={}){ // a fresh PC with no device key
  let dev=null;const tasks=new Map();
  const deviceSign=t=>dev?crypto.sign(null,Buffer.from(String(t),'utf8'),dev.privK).toString('hex'):null;
- // Mimic PRODUCTION src/lib/agent.js semantics: the verifier reads the CURRENT devId (never a
- // frozen one), and for 60s after the identity mint a bootstrap '-' read still passes (the
- // sender cannot know the fresh id yet). After the grace, '-' fails closed.
- let graceUntil=0;
- const verifyReadAuth=(method,pathName,query,headers)=>{
-  const hdr=String(headers['x-gw-read-device']||'');
-  const cur=dev?dev.deviceId:'-';
-  let effective=null;
-  if(hdr===cur)effective=cur;
-  else if(hdr==='-'&&cur!=='-'&&Date.now()<graceUntil)effective='-';
-  if(effective==null)return false;
-  return createVerifier({deviceId:effective,senderPubB64}).verifyReadAuth(method,pathName,query,headers);
- };
+ // The REAL production read verifier (src/lib/read-auth.js - the same module agent.js runs):
+ // target-device binding + the narrow bootstrap exception (exactly ONE pending enroll command's
+ // /task?id=<id> fetch under '-', TTL-bound). No mimics, no frozen device ids.
+ let pendingEnrollRead=null;
+ const verifyReadAuth=createReadAuth({senderPubKey:crypto.createPublicKey({key:Buffer.from(senderPubB64,'base64'),format:'der',type:'spki'}),getDeviceId:()=>dev?dev.deviceId:'',getPendingEnroll:()=>pendingEnrollRead});
  const{validEnvelope}=createVerifier({deviceId:'-',senderPubB64});
  const pc=await startLocalServer({port:0,token:'cmdk-test',version:'t',caps:'enroll_device',
   verifyReadAuth,getDevice:()=>dev?{deviceId:dev.deviceId,deviceSign}:null,
@@ -66,8 +59,9 @@ async function makePC({badProof=false}={}){ // a fresh PC with no device key
    setTimeout(()=>{
     if(!dev){const{publicKey:dp,privateKey:dk}=crypto.generateKeyPairSync('ed25519');
      const pubB64=dp.export({format:'der',type:'spki'}).toString('base64');
-     dev={pubB64,privK:dk,deviceId:crypto.createHash('sha256').update(pubB64).digest('hex').slice(0,16)};
-     graceUntil=Date.now()+60000} // post-mint bootstrap grace (matches agent.js enroll_device)
+     dev={pubB64,privK:dk,deviceId:crypto.createHash('sha256').update(pubB64).digest('hex').slice(0,16)}}
+    // pending on EVERY accepted enroll - fresh mint AND already-enrolled (post-restart re-enroll fetches too)
+    pendingEnrollRead={id:String(m.id),device:dev.deviceId,until:Date.now()+120000};
     const proofChallenge=badProof?'FORGED-'+String(data.challenge):String(data.challenge); // a forged proof signs the WRONG challenge
     const out={deviceId:dev.deviceId,pubkey:dev.pubB64,challengeSig:signChallenge(deviceSign,proofChallenge,dev.pubB64,dev.deviceId)};
     tasks.set(m.id,{status:'done',result:out,at:Date.now(),terminal:true})},10);
@@ -112,6 +106,25 @@ async function makeCtl(){ // the REAL worker route behind http
   const rNo=await orchNo.run();
   assert(rNo.ok===false&&rNo.stage==='pairing'&&FP_RE.test(String(rNo.fingerprint)),'missing approval channel refuses with fingerprint');
   assert(fdb.devices.size===1,'no registry write without an approval channel')}
+ // STRICT true: a truthy non-boolean approval (string/object) is NOT an approval
+ {const orchTruthy=createEnrollOrchestrator({sender:mkSender(),approvePairing:async()=>({ok:'yes'})});
+  const rT=await orchTruthy.run();
+  assert(rT.ok===false&&rT.stage==='pairing','truthy non-true approval refused');
+  assert(fdb.devices.size===1,'truthy approval writes nothing')}
+ // episode/fingerprint-bound approval: the callback approves ONLY the fingerprint it was shown
+ // for the ORIGINAL device - a valid but DIFFERENT key (replacement attempt) is refused
+ {// the original device is already enrolled above; bind approval to ITS fingerprint
+  const{fingerprint:fpFn}=require('../src/lib/fingerprint');
+  const expectedFp=fpFn(fdb.devices.get(r1.deviceId).pubkey);
+  const wrong=crypto.generateKeyPairSync('ed25519');
+  const wrongPub=wrong.publicKey.export({format:'der',type:'spki'}).toString('base64');
+  const orchBound=createEnrollOrchestrator({sender:mkSender(),approvePairing:async({fingerprint,episode,challenge})=>fingerprint===expectedFp&&!!episode&&!!challenge});
+  const rB=await orchBound.run();
+  assert(rB.ok===true&&rB.deviceId===r1.deviceId,'bound approval accepts the original fingerprint');
+  const orchWrong=createEnrollOrchestrator({sender:mkSender(),approvePairing:async({fingerprint})=>fingerprint===fpFn(wrongPub)}); // approves a DIFFERENT key than the PC's
+  const rW=await orchWrong.run();
+  assert(rW.ok===false&&rW.stage==='pairing','approval bound to a different key refuses this PC');
+  assert(fdb.devices.size===1,'wrong-key approval writes nothing')}
  // pairing approval DECLINED (a valid, proven key the user refuses) -> no registry write
  {const orchDec=createEnrollOrchestrator({sender:mkSender(),approvePairing:async()=>false});
   const rDec=await orchDec.run();
