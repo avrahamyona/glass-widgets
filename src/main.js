@@ -525,7 +525,32 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite})}catch(e){bootLog('agent '+(e&&e.message))}
+  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite,
+   islandCtl:async action=>{
+    if(!['open','close'].includes(String(action)))return {ok:false,error:'bad action'};
+    const id=chatIslandInstance();if(!id)return {ok:false,error:'no island'};
+    const main=wins[id];
+    if(!main||main.isDestroyed())return {ok:false,error:'island primary window unavailable'}; // companions alone never count: no primary, no verified state
+    const ws=[main];for(const w of chatCompanions.values())if(!w.isDestroyed())ws.push(w);
+    try{
+     for(const w of ws)w.webContents.send('chat:pill',action);
+     // 'done' must mean the island renderer actually reached the state - poll it, bounded twice:
+     // outer 3s deadline AND an 800ms race per probe so a hung renderer cannot stall the await
+     const want=action==='open'?'open':'closed';
+     const deadline=Date.now()+3000;
+     while(Date.now()<deadline){
+      const cur=await Promise.race([
+       // explicit pill-present state string: 'absent' can never masquerade as 'closed'
+       main.webContents.executeJavaScript("(()=>{const p=document.getElementById('pill');if(!p)return 'absent';return p.classList.contains('open')?'open':'closed'})()").catch(()=>null),
+       new Promise(r=>setTimeout(()=>r('probe-timeout'),800))
+      ]);
+      if(cur===want)return {ok:true,state:action};
+      if(main.isDestroyed())return {ok:false,error:'island window destroyed mid-command'};
+      await new Promise(r=>setTimeout(r,120));
+     }
+     return {ok:false,error:'renderer did not reach '+action};
+    }catch(e){return {ok:false,error:String(e&&e.message||e)}}
+   }})}catch(e){bootLog('agent '+(e&&e.message))}
   try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // check on launch + every 10 min, quiet
   try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
