@@ -94,7 +94,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   const discardLate=r=>{ // a response that resolves AFTER the deadline gets NO reader of its own: cancel + release immediately
    try{
     if(r.body&&typeof r.body.getReader==='function'){const rd=r.body.getReader();Promise.resolve(rd.cancel()).catch(()=>{});try{rd.releaseLock()}catch{}}
-    else if(r.body&&Symbol.asyncIterator in Object(r.body)){const it=r.body[Symbol.asyncIterator]();Promise.resolve(it.next()).then(()=>it.return&&it.return()).catch(()=>{})}
+    else if(r.body&&Symbol.asyncIterator in Object(r.body)){const it=r.body[Symbol.asyncIterator]();Promise.resolve().then(()=>it.return?it.return():undefined).catch(()=>{})} // return() DIRECTLY - never next() first (a hung next would never see the return, and pulling a chunk after the deadline is unwanted)
    }catch{}};
   const work=(async()=>{
    let r;
@@ -103,18 +103,25 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
     if(settled){discardLate(r);throw new Error('request timeout');} // late resolution: no untracked body reader
     if(r.status>=300&&r.status<400)throw new Error('redirect refused - credentials never follow a redirect');
     let raw;
+    const fire=fn=>{Promise.resolve().then(()=>fn()).catch(()=>{})}; // fire-and-forget cancel - never awaited inside an error path
     const readIt=async(next,cancel)=>{
      const chunks=[];let n=0;
-     for(;;){const{done,value}=await next();if(settled){try{await cancel()}catch{};throw new Error('request timeout')}if(done)break;n+=value.length;
-      if(n>BODY_CAP){try{await cancel()}catch{};throw new Error('response body over cap')}
+     for(;;){const{done,value}=await next();
+      if(settled){fire(cancel);throw new Error('request timeout')}
+      if(done)break;n+=value.length;
+      if(n>BODY_CAP){try{ac.abort()}catch{};fire(cancel);throw new Error('response body over cap')} // synchronous abort FIRST - a cancel that never resolves must not delay it
       chunks.push(value)}
      return Buffer.concat(chunks.map(c=>Buffer.isBuffer(c)?c:Buffer.from(c))).toString('utf8')};
     if(r.body&&typeof r.body.getReader==='function'){
      const rd=r.body.getReader();cancelBody=async()=>{try{await rd.cancel()}catch{}try{rd.releaseLock()}catch{}};
-     try{raw=await readIt(()=>rd.read(),()=>rd.cancel())}finally{cancelBody=null;try{rd.releaseLock()}catch{}}
+     let failed=true;
+     try{raw=await readIt(()=>rd.read(),()=>rd.cancel());failed=false}
+     finally{const cb=cancelBody;cancelBody=null;if(failed&&cb)fire(cb);try{rd.releaseLock()}catch{}} // the captured reader is cancelled on EVERY exceptional exit, BEFORE the slot is cleared
     }else if(r.body&&Symbol.asyncIterator in Object(r.body)){
      const it=r.body[Symbol.asyncIterator]();cancelBody=async()=>{try{await it.return()}catch{}};
-     try{raw=await readIt(()=>it.next(),()=>it.return())}finally{cancelBody=null}
+     let failed=true;
+     try{raw=await readIt(()=>it.next(),()=>it.return());failed=false}
+     finally{const cb=cancelBody;cancelBody=null;if(failed&&cb)fire(cb)}
     }else if(typeof r.text==='function'){
      if(!allowTextTransport)throw new Error('unbounded transport (text-only body): a stream body is required outside tests');
      raw=await r.text();

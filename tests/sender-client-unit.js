@@ -138,6 +138,25 @@ const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:asy
  await new Promise(r=>setTimeout(r,200));
  assert(lateSignal&&lateSignal.aborted===true,'request signal aborted on timeout');
  assert(lateCancelled===true,'late response body cancelled/released, never left locked (round-8 repro)');
+ // cleanup proofs (round 9/10): cap aborts SYNCHRONOUSLY even when cancel never resolves
+ let hangCancel=false;
+ const capFetch=(u,o)=>{hangCancel=o.signal;return Promise.resolve({status:200,headers:{},body:new ReadableStream({start(c){c.enqueue(new Uint8Array(BODY_CAP_TEST+1))},cancel(){return new Promise(()=>{})}})})}; // cancel pending FOREVER
+ const BODY_CAP_TEST=262144;
+ const t0=Date.now();const pCap=await mk({fetchImpl:capFetch,requestTimeoutMs:5000}).pollTask('cmd-cap00001');const el=Date.now()-t0;
+ assert(pCap.status==='unknown'&&el<1000,'over-cap refuses fast - the pending-forever cancel does NOT delay the abort');
+ assert(hangCancel.aborted===true,'signal aborted synchronously on cap');
+ // reader.read rejection: the captured reader is cancelled on the exceptional exit
+ let rejCancelled=false;
+ const rejFetch=()=>Promise.resolve({status:200,headers:{},body:{getReader(){return{read:()=>Promise.reject(new Error('boom')),cancel(){rejCancelled=true;return Promise.resolve()},releaseLock(){}}}}}); // mock reader: read rejects while cancel is still callable
+ assert((await mk({fetchImpl:rejFetch}).pollTask('cmd-rej00001')).reason==='network','errored read surfaces as network');
+ await new Promise(r=>setTimeout(r,50));
+ assert(rejCancelled===true,'reader.cancel fires on a read rejection (no silent cleanup skip)');
+ // discardLate on an async-iterator body: return() called DIRECTLY, next() never pulled
+ let itNext=0,itRet=0;
+ const lateItFetch=(u,o)=>new Promise(res=>setTimeout(()=>res({status:200,headers:{},body:{[Symbol.asyncIterator](){return{next(){itNext++;return new Promise(()=>{})},return(){itRet++;return Promise.resolve({done:true})}}}}}),80));
+ assert((await mk({fetchImpl:lateItFetch,requestTimeoutMs:30}).pollTask('cmd-lateit01')).reason==='network','late iterator loses to the deadline');
+ await new Promise(r=>setTimeout(r,150));
+ assert(itRet>=1&&itNext===0,'late iterator: return() called directly, next() never pulled');
  // strict URLs + single-shot
  assert.throws(()=>mk({deviceUrl:'http://evil.example'}),'http origin refused');
  assert.throws(()=>mk({deviceUrl:'ftp://127.0.0.1:'+port}),'non-http(s) refused even on localhost');
