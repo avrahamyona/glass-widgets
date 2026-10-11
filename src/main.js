@@ -320,7 +320,7 @@ ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array
  const prevCards=prev&&Array.isArray(prev.cards)?prev.cards:[];
  const byCard=new Map();for(const c of prevCards)if(c&&c.id)byCard.set(c.id,c);for(const c of cards)byCard.set(c.id,c);
  wr('chat-'+id+'.json',{messages,cards:[...byCard.values()].slice(-50),seenHint:!!h.seenHint||(prev&&!!prev.seenHint),lastReceived:Math.max(+h.lastReceived||0,prev?(+prev.lastReceived||0):0),readUpTo:Math.max(+h.readUpTo||0,prev?(+prev.readUpTo||0):0)});return {ok:true}});
-function cleanCard(c){return {id:String(c.id||'').slice(0,80),title:String(c.title||'').slice(0,200),body:String(c.body||'').slice(0,2000),
+function cleanCard(c){return {id:String(c.id||'').slice(0,80),kind:['reminder','timer','message','build','pc-status'].includes(c.kind)?c.kind:undefined,ends_at:+c.ends_at>0?+c.ends_at:undefined,title:String(c.title||'').slice(0,200),body:String(c.body||'').slice(0,2000),
  buttons:(Array.isArray(c.buttons)?c.buttons:[]).slice(0,4).map(b=>({id:String(b&&b.id||'').slice(0,40),label:String(b&&b.label||'').slice(0,40),style:['primary','danger','plain'].includes(b&&b.style)?b.style:'plain'})),
  graph:c.graph&&['bar','line'].includes(c.graph.type)?{type:c.graph.type,series:(Array.isArray(c.graph.series)?c.graph.series:[]).slice(0,24).map(p=>({label:String(p&&p.label||'').slice(0,40),value:+p&&+p.value||0}))}:undefined,
  file:c.file&&typeof c.file==='object'?{name:String(c.file.name||'').slice(0,200),size:+c.file.size||0,mime:String(c.file.mime||'').slice(0,80),url:String(c.file.url||'').slice(0,600),path:String(c.file.path||'').slice(0,600)}:undefined,

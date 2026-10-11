@@ -475,7 +475,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
 
  const MIME={'.pdf':'application/pdf','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.txt':'text/plain','.md':'text/markdown','.csv':'text/csv','.json':'application/json','.zip':'application/zip','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.mp3':'audio/mpeg','.mp4':'video/mp4'};
  function fmtGB(n){return (n/1073741824).toFixed(1)+'GB'}
- async function sysInfo(id,topic){
+ async function collectSys(topic){
   topic=String(topic||'all').toLowerCase();
   const out={};const lines=[];
   if(topic==='screens'||topic==='all'){
@@ -503,8 +503,25 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
     lines.push('תהליכים גדולים: '+top.map(p=>p.name+' '+p.mem_mb+'MB').join(', '));
    }catch{lines.push('לא הצלחתי לקרוא את רשימת התהליכים')}
   }
+  return {out,lines};
+ }
+ async function sysInfo(id,topic){
+  const {out,lines}=await collectSys(topic);
   if(!lines.length)return ack(id,'failed','unknown topic');
   await ack(id,'done',lines.join('\n'),out);
+ }
+
+ // status_card: non-mutating snapshot of the PC as an island card (kind pc-status, fixed id so the
+ // renderer replaces it in place instead of stacking). No approval card - it only reads and displays.
+ async function statusCard(id){
+  try{
+   const {lines}=await collectSys('all');
+   const body=lines.slice(0,8).join('\n').slice(0,1200)||'אין נתונים';
+   if(!broadcastCard)return ack(id,'failed','no UI for cards');
+   broadcastCard({id:'pc-status',kind:'pc-status',title:'סטטוס המחשב',body,at:Date.now()});
+   audit({kind:'status_card',stage:'shown'});
+   return ack(id,'done','status card shown');
+  }catch(e){return ack(id,'failed','status card error')}
  }
 
  async function getFile(id,p){
@@ -561,6 +578,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    if(m.kind==='web_task')return webTask(m.id,m);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
+   if(m.kind==='status_card')return statusCard(m.id);
    if(m.kind==='get_file')return getFile(m.id,m.path);
    return ack(m.id,'failed','unknown kind');
   })();
@@ -574,7 +592,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web,sig'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task; sig: HMAC pre-approved commands accepted (auto-run with cancelable info card)
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web,sig,cards'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task; sig: Ed25519 pre-approved commands (auto-run with cancelable info card); cards: typed island cards incl. status_card
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;
