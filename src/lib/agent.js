@@ -111,6 +111,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(p.button_id==='approve'){
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
    if(pend.kind==='media_control'){mediaApproved=true;execMedia(pend.cmdId,pend.action);return {ok:true}}
+   if(pend.kind==='web_task'){execWebTask(pend.cmdId,pend.task);return {ok:true}}
    execRun(pend.cmdId,pend.command);return {ok:true}}
   audit({kind:pend.kind||'run_command',stage:'denied',command:pend.command,action:pend.action});
   ack(pend.cmdId,'failed','denied - המשתמש דחה מהאי');return {ok:true}}
@@ -150,6 +151,65 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   if(!t)return ack(id,'done','הלוח ריק',{text:'',chars:0});
   const CAP=2000,truncated=t.length>CAP;
   return ack(id,'done',t.length+' תווים בלוח',{text:truncated?t.slice(0,CAP):t,chars:t.length,truncated});
+ }
+
+ // web_task (stage 7 pilot): drive a HIDDEN Chromium window (the app's own Electron) on the PC -
+ // no visible window, no physical mouse/keyboard, isolated persistent profile (persist:agent-web).
+ // Bounded: https/http only, <=20 steps, <=60s total, downloads+popups denied. ALWAYS behind an
+ // island approval card (per task, no session grant); every task is audited.
+ async function execWebTask(id,task){
+  const url=String(task.url||'').trim();
+  if(!/^https?:\/\/\S+$/i.test(url)||url.length>500)return ack(id,'failed','bad url');
+  const steps=(Array.isArray(task.steps)?task.steps:[]).slice(0,20);
+  const {BrowserWindow}=require('electron');
+  let win=null;
+  const out={url:url.slice(0,300),steps:[]};
+  try{
+   win=new BrowserWindow({show:false,width:1100,height:800,webPreferences:{sandbox:true,partition:'persist:agent-web'}});
+   win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+   win.webContents.session.on('will-download',e=>e.preventDefault());
+   const js=(code)=>win.webContents.executeJavaScript(code);
+   const sel=x=>JSON.stringify(String(x||'').slice(0,200));
+   await Promise.race([win.webContents.loadURL(url),new Promise((_,rej)=>setTimeout(()=>rej(new Error('load timeout')),20000))]);
+   const deadline=Date.now()+60000;
+   for(const st of steps){
+    if(Date.now()>deadline){out.steps.push({do:'*',ok:false,error:'task time budget exhausted'});break}
+    const d=String(st.do||'').toLowerCase();
+    try{
+     if(d==='goto'){const u=String(st.url||'').slice(0,500);if(!/^https?:\/\/\S+$/i.test(u))throw new Error('bad goto url');
+      await Promise.race([win.webContents.loadURL(u),new Promise((_,rej)=>setTimeout(()=>rej(new Error('goto timeout')),20000))]);out.steps.push({do:d,ok:true,url:u.slice(0,200)});}
+     else if(d==='click'){const r=await js('(()=>{const el=document.querySelector('+sel(st.selector)+');if(!el)return false;el.click();return true})()');out.steps.push({do:d,ok:!!r});}
+     else if(d==='type'){const r=await js('(()=>{const el=document.querySelector('+sel(st.selector)+');if(!el)return false;el.focus();el.value='+JSON.stringify(String(st.text||'').slice(0,500))+';el.dispatchEvent(new Event(\'input\',{bubbles:true}));el.dispatchEvent(new Event(\'change\',{bubbles:true}));return true})()');out.steps.push({do:d,ok:!!r});}
+     else if(d==='wait'){await new Promise(r=>setTimeout(r,Math.min(Math.max(+st.ms||1000,100),10000)));out.steps.push({do:d,ok:true});}
+     else if(d==='extract'){const t=await js('(()=>{const el=document.querySelector('+sel(st.selector||'body')+');return el?String(el.innerText||\'\').slice(0,1000):null})()');out.steps.push({do:d,ok:t!==null,text:t===null?undefined:t});}
+     else if(d==='screenshot'){
+      const img=await win.webContents.capturePage();const buf=img.toPNG();
+      const u=new URL(uploadUrl);u.searchParams.set('name','webtask-'+String(id).replace(/[^\w-]/g,'').slice(0,40)+'.png');
+      const r=await fetch(u,{method:'POST',headers:{'content-type':'image/png','X-GW-Key':cmdKey},body:buf,signal:AbortSignal.timeout(60000)});
+      if(!r.ok)throw new Error('upload '+r.status);
+      const j=await r.json().catch(()=>({}));if(!j.file_id)throw new Error('upload bad response');
+      out.steps.push({do:d,ok:true,file_id:String(j.file_id),bytes:buf.length});}
+     else out.steps.push({do:d||'?',ok:false,error:'unknown step'});
+    }catch(se){out.steps.push({do:d,ok:false,error:String(se&&se.message||se).slice(0,150)});}
+   }
+   audit({kind:'web_task',stage:'executed',url:url.slice(0,200),steps:out.steps.length,ok:out.steps.filter(x=>x.ok).length});
+   return ack(id,'done','web task: '+out.steps.filter(x=>x.ok).length+'/'+out.steps.length+' steps ok',out);
+  }catch(e){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:String(e&&e.message||e).slice(0,200)});return ack(id,'failed',String(e&&e.message||'web task error').slice(0,200))}
+  finally{if(win&&!win.isDestroyed())win.destroy()}
+ }
+ function webTask(id,task){
+  const url=String(task&&task.url||'').trim();
+  if(!/^https?:\/\/\S+$/i.test(url))return ack(id,'failed','bad url');
+  if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
+  if(!broadcastCard)return ack(id,'failed','no UI for approvals');
+  const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
+  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+  timer.unref&&timer.unref();
+  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps:task.steps},timer});
+  audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:Array.isArray(task.steps)?task.steps.length:0});
+  const label=String(task.label||'').slice(0,200);
+  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body:'השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url.slice(0,200)+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
  // update_app: the ONLY pre-authorized mutating command (the user's standing grant: app updates install
@@ -292,6 +352,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
    if(m.kind==='update_app')return updateAppCmd(m.id);
    if(m.kind==='media_control')return mediaControl(m.id,m.action);
    if(m.kind==='clipboard_read')return clipboardRead(m.id);
+   if(m.kind==='web_task')return webTask(m.id,m);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
@@ -307,7 +368,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   while(!stop){
    let idleT=null;const ctl=new AbortController();
    try{
-    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip'); // approve: run_command/media_control flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read
+    const u=new URL(cmdUrl);u.searchParams.set('key',cmdKey);u.searchParams.set('v',app.getVersion());u.searchParams.set('caps','approve,update,media,clip,web'); // approve: run_command/media_control/web_task flow only to card-capable clients; update: update_app accepted (pre-authorized standing grant); media: media bridge present; clip: clipboard_read; web: background web_task
     const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
     if(!r.ok||!r.body)throw new Error('cmd stream '+r.status);
     backoff=1000;
