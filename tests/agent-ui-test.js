@@ -11,12 +11,13 @@ const srv=http.createServer((q,r)=>{const u=new URL(q.url,'http://x');
  if(u.pathname==='/chat'&&q.method==='POST'){let b='';q.on('data',d=>b+=d);q.on('end',()=>{r.writeHead(200,{'content-type':'application/json'});r.end('{"ok":true,"id":"x1"}')});return}
  if(u.pathname==='/chat/action'&&q.method==='POST'){r.writeHead(200,{'content-type':'application/json'});r.end('{"ok":true}');return}
  if(u.pathname==='/cmd/stream'){CMDQS.push(u.search);r.writeHead(200,{'content-type':'text/event-stream'});r.write(': ready\n\n');global.cmdRes=r;return}
- if(u.pathname==='/cmd/ack'){let b='';q.on('data',d=>b+=d);q.on('end',()=>{ACK.push(JSON.parse(b||'{}'));r.end('{}')});return}
+ if(u.pathname==='/cmd/ack'){let b='';q.on('data',d=>b+=d);q.on('end',()=>{ACK.push(JSON.parse(b||'{}'));r.end('{"updated":1}')});return}
+ if(u.pathname==='/cmd/ack-blind'){let b='';q.on('data',d=>b+=d);q.on('end',()=>{r.writeHead(200,{'content-type':'application/json'});r.end('{}')});return} // 2xx without updated:1 - landing unconfirmed
  if(u.pathname==='/file/upload'){let n=0;q.on('data',d=>n+=d.length);q.on('end',()=>{UPLOADS.push({name:u.searchParams.get('name'),bytes:n,key:q.headers['x-gw-key']});r.writeHead(200,{'content-type':'application/json'});r.end('{"file_id":"f-'+UPLOADS.length+'"}')});return}
  r.statusCode=404;r.end()});
 const pushCmd=m=>{if(global.cmdRes)global.cmdRes.write('data: '+JSON.stringify(m)+'\n\n')};
 const EX=()=>Date.now()+300000;
-const waitAck=async(id,status)=>{for(let i=0;i<50;i++){const a=ACK.find(x=>x.id===id&&x.status===status);if(a)return a;await sleep(200)}throw new Error('no ack '+id+' '+status+' in '+JSON.stringify(ACK.slice(-6)))};
+const waitAck=async(id,status)=>{for(let i=0;i<50;i++){const a=ACK.find(x=>x.id===id&&x.status===status);if(a)return a;await sleep(200)}const dump=fs.existsSync(cfg+'/glasswidgets/agent-audit.log')?fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').split('\n').filter(l=>l.includes(id)).join('\n'):'no-log';throw new Error('no ack '+id+' '+status+' in '+JSON.stringify(ACK.slice(-6))+' AUDIT: '+dump)};
 let env,cfg,port;
 const launch=async()=>{
  const old=global.cmdRes;
@@ -255,7 +256,50 @@ const launch=async()=>{
  assert(/deadline/.test(a11.note||''),'deadline stop: '+a11.note);
  assert(a11.result&&a11.result.deadline===true&&a11.result.steps.filter(x=>x.ok).length<=2,'stopped before the expired step: '+JSON.stringify(a11.result));
 
+ // 10) ack observability: a rejected ack and a dead ack endpoint are both audited, never silent
+ await a.close();global.cmdRes=null;
+ env={...env,GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/nope'}; // server 404s unknown paths
+ ({a,A}=await launch());
+ let steps10=[{do:'wait',ms:10}];
+ ts=Date.now();exp=EX();
+ pushCmd({id:'ak1',kind:'ui_automation',steps:steps10,ts,exp,sig:sign('ak1','ui_automation',ts,exp,JSON.stringify(steps10))});
+ await sleep(4500); // auto-run 2.5s + dry-run exec + rejected ack
+ let logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"ack","stage":"http_error","id":"ak1","status":"\w+","http":404/.test(logA),'rejected ack audited with http status: '+logA.split('\n').filter(l=>l.includes('"ack"')).join('|'));
+ await a.close();global.cmdRes=null;
+ env={...env,GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:9/none'}; // dead endpoint
+ ({a,A}=await launch());
+ steps10=[{do:'wait',ms:10}];
+ ts=Date.now();exp=EX();
+ pushCmd({id:'ak2',kind:'ui_automation',steps:steps10,ts,exp,sig:sign('ak2','ui_automation',ts,exp,JSON.stringify(steps10))});
+ await sleep(4500);
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"ack","stage":"send_failed","id":"ak2"/.test(logA),'dead ack endpoint audited with reason: '+logA.split('\n').filter(l=>l.includes('"ack"')).join('|'));
+ await a.close();global.cmdRes=null;
+ env={...env,GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack-blind'}; // 2xx, no updated field
+ ({a,A}=await launch());
+ steps10=[{do:'wait',ms:10}];
+ ts=Date.now();exp=EX();
+ pushCmd({id:'ak3',kind:'ui_automation',steps:steps10,ts,exp,sig:sign('ak3','ui_automation',ts,exp,JSON.stringify(steps10))});
+ await sleep(4500);
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(/"kind":"ack","stage":"ack_unconfirmed","id":"ak3"/.test(logA),'2xx without updated:1 audited as unconfirmed, not as landed');
+
+ // 11) pathological escaping: 4000 double-quotes on stdout must still land within the serialized bounds
+ await a.close();global.cmdRes=null;
+ env={...env,GLASSWIDGETS_AGENT_ACK_URL:'http://127.0.0.1:'+port+'/cmd/ack'};
+ ({a,A}=await launch());
+ const flood=`printf '%.0s"' $(seq 1 4000)`;
+ ts=Date.now();exp=EX();
+ pushCmd({id:'ak4',kind:'run_command',command:flood,ts,exp,sig:sign('ak4','run_command',ts,exp,flood)});
+ const aFlood=await waitAck('ak4','done');
+ const wire=JSON.stringify(aFlood.result||{});
+ assert(wire.length<=3500,'serialized result within worker cap, got '+wire.length);
+ assert(aFlood.result.truncated===true&&aFlood.result.stdout_full===4000,'explicit truncation metadata: '+JSON.stringify({truncated:aFlood.result.truncated,full:aFlood.result.stdout_full}));
+ logA=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert(!logA.includes('"kind":"ack","stage":"http_error","id":"ak4"')&&!logA.includes('"ack_unconfirmed","id":"ak4"'),'truncated result landed confirmed (no ack anomaly for ak4)');
+
  await a.close();srv.close();
- console.log('AGENT-UI-TEST: ALL 9 SCENARIOS PASS');
+ console.log('AGENT-UI-TEST: ALL 10 SCENARIOS PASS');
  process.exit(0);
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});

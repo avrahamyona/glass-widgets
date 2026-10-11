@@ -86,9 +86,20 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  const RUN_DENY=[/\bformat\s+[a-z]:/i,/\bshutdown\b/i,/\brestart-computer\b/i,/\brm\s+-[a-z]*r[a-z]*f\s+\//i,/\bdel\s+\/[a-z]*s/i,/\brd\s+\/[a-z]*s/i,/\brmdir\s+\/[a-z]*s/i,/\bdiskpart\b/i,/<\s*\w+\.(ps1|bat|cmd|exe)/i];
  function execRun(id,cmd){return new Promise(res=>{
   exec(cmd,{timeout:60000,maxBuffer:1024*1024,windowsHide:true},async(e,so,se)=>{
-   const stdout=String(so||'').slice(0,3000),stderr=String(se||(e&&e.message||'')).slice(0,1000);
-   audit({kind:'run_command',stage:'executed',command:cmd,ok:!e,exit:e?(e.code??null):0,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300)});
-   await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',{stdout,stderr,exit:e?(e.code??null):0});res();
+   // COMBINED envelope bound on the SERIALIZED result: the worker rejects result JSON >3500 / raw
+   // body >4000. Fixed slices cannot guarantee that (escaping worst-case 6x), so we budget by actual
+   // JSON.stringify length and record explicit truncation metadata.
+   const so0=String(so||''),se0=String(se||(e&&e.message||'')),exitC=e?(e.code??null):0;
+   const RES_CAP=3400; // leaves headroom under the worker's 3500 result cap
+   const ser=(a,b)=>JSON.stringify({stdout:a,stderr:b,exit:exitC}).length;
+   let stderr=se0.slice(0,800);
+   if(ser('',stderr)>RES_CAP)stderr=stderr.slice(0,200); // pathological escaping in stderr alone
+   let stdout=so0;
+   while(stdout.length&&ser(stdout,stderr)>RES_CAP)stdout=stdout.slice(0,Math.floor(stdout.length*0.8));
+   const result={stdout,stderr,exit:exitC};
+   if(stdout.length<so0.length||stderr.length<se0.length){result.truncated=true;result.stdout_full=so0.length;result.stderr_full=se0.length}
+   audit({kind:'run_command',stage:'executed',command:cmd,ok:!e,exit:exitC,stdout:stdout.slice(0,500),stderr:stderr.slice(0,300),truncated:!!result.truncated});
+   await ack(id,e?'failed':'done',e?('exit '+(e.code??'?')):'ok',result);res();
   });
  })}
 
@@ -630,10 +641,37 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }catch(e){audit({kind:'update_app',stage:'failed',error:String(e&&e.message||e)});return ack(id,'failed','updater error')}
  }
 
+ // Transmit-time envelope invariant - enforced, never assumed: result JSON <=3500 AND the full raw
+ // body (key/id/note included) <=3900. Shrink result.stdout when available (metadata preserved);
+ // otherwise bound the note contribution and stub the result; a still-oversize body is audited, not sent blind.
+ function fitAckBody(body){
+  const RES_MAX=3500,BODY_MAX=3900;
+  const ok=()=>{const w=JSON.stringify(body);return w.length<=BODY_MAX&&(!body.result||JSON.stringify(body.result).length<=RES_MAX)};
+  if(ok())return JSON.stringify(body);
+  const r=body.result;
+  if(r&&typeof r.stdout==='string'){
+   if(!r.stdout_full)r.stdout_full=String(r.stdout).length;
+   while(r.stdout.length&&!ok())r.stdout=r.stdout.slice(0,Math.floor(r.stdout.length*0.8));
+   r.truncated=true;
+  }
+  if(!ok()){
+   body.note=String(body.note||'').slice(0,200); // the note/id/key share of the envelope is bounded explicitly
+   body.result={truncated:true,guard:true};
+   if(!ok()){audit({kind:'ack',stage:'envelope_fail',id:String(body.id||''),status:body.status,bytes:JSON.stringify(body).length});return null} // unfittable: audited and NEVER transmitted blind
+  }
+  return JSON.stringify(body);
+ }
  async function ack(id,status,note,result){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
-  if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m}}body.result=result}
-  try{await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(15000)})}catch{}
+  if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
+  const wire=fitAckBody(body);
+  if(wire==null)return; // fitAckBody already audited envelope_fail - the fetch must not happen
+  try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
+   const respText=await r.text().catch(()=> '');
+   if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return} // a rejected ack is EVIDENCE, never a silent drop
+   let landed=null;try{landed=JSON.parse(respText).updated}catch{}
+   if(landed!==1)audit({kind:'ack',stage:'ack_unconfirmed',id:String(id||''),status,http:r.status,updated:landed}); // 2xx without a row transition is not proof of landing
+  }catch(e){audit({kind:'ack',stage:'send_failed',id:String(id||''),status,error:String(e&&e.message||e).slice(0,200)})}
  }
 
  async function walk(dir,depth,terms,hits,state){
