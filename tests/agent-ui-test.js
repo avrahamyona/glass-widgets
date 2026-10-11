@@ -381,16 +381,40 @@ const launch=async()=>{
  const aE5=await waitAck('e5','done');
  assert(aE5.result.deviceId===aE1.result.deviceId&&aE5.result.pubkey===aE1.result.pubkey,'enroll after restart returns the persisted identity');
 
- // 15g) /task + /info on the own server: durable idempotent result polling (the direct-mode ack
- // semantics) - records survive the 15e restart because the store is on disk
- const inf=await (await fetch('http://127.0.0.1:47731/info',{headers:{'X-GW-Key':'cmd-key'}})).json();
- assert(inf.ok&&inf.deviceId===aE1.result.deviceId&&inf.pubkey===aE1.result.pubkey,'/info self-describes the enrolled device: '+JSON.stringify(inf));
- const tT2=await (await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key'}})).json();
- assert(tT2.status==='done'&&tT2.terminal===true&&tT2.result&&Array.isArray(tT2.result.matches),'t2 terminal record via /task (survived restart): '+JSON.stringify(tT2).slice(0,120));
- const tT6=await (await fetch('http://127.0.0.1:47731/task?id=t6',{headers:{'X-GW-Key':'cmd-key'}})).json();
- assert(tT6.ok&&(tT6.status==='accepted'||tT6.status==='failed'),'parked t6 has a task record: '+tT6.status);
- assert((await fetch('http://127.0.0.1:47731/task?id=never',{headers:{'X-GW-Key':'cmd-key'}})).status===404,'unknown task -> 404');
- assert((await fetch('http://127.0.0.1:47731/task?id=t2')).status===403,'/task requires the key');
+ // 15g) /task + /info on the own server: PRIVATE reads (worker-signed, request-bound, replay-safe)
+ // over durable ledger records - the direct-mode ack semantics. Records survive the 15e restart.
+ const signRead=(p,q)=>{const rts=Date.now(),rnonce=crypto.randomBytes(12).toString('base64url');
+  const rsig=crypto.sign(null,Buffer.from(['GET',p,q,String(rts),rnonce].join('\n'),'utf8'),PRIV).toString('hex');
+  return {'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig}};
+ const devPub=()=>crypto.createPublicKey({key:Buffer.from(aE1.result.pubkey,'base64'),format:'der',type:'spki'});
+ const readJson=async(p,q)=>{const r=await fetch('http://127.0.0.1:47731'+p+(q?'?'+q:''),{headers:signRead(p,q)});const t=await r.text();
+  return {status:r.status,body:(()=>{try{return JSON.parse(t)}catch{return null}})(),raw:t,dev:r.headers.get('x-gw-device'),dsig:r.headers.get('x-gw-device-sig')}};
+ // the public baked key alone is NOT enough for private reads
+ assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key'}})).status===403,'/task with only the public key -> 403');
+ assert((await fetch('http://127.0.0.1:47731/info',{headers:{'X-GW-Key':'cmd-key'}})).status===403,'/info with only the public key -> 403');
+ assert((await fetch('http://127.0.0.1:47731/task?id=t2')).status===403,'no key at all -> 403');
+ const inf=await readJson('/info','');
+ assert(inf.status===200&&inf.body.deviceId===aE1.result.deviceId&&inf.body.pubkey===aE1.result.pubkey,'/info self-describes the enrolled device');
+ assert(inf.dev===aE1.result.deviceId&&crypto.verify(null,Buffer.from(inf.raw,'utf8'),devPub(),Buffer.from(inf.dsig,'hex')),'/info response is DEVICE-SIGNED over the exact body');
+ const tT2=await readJson('/task','id=t2');
+ assert(tT2.body.status==='done'&&tT2.body.terminal===true&&tT2.body.result&&Array.isArray(tT2.body.result.matches),'t2 terminal record via /task (survived restart)');
+ assert(crypto.verify(null,Buffer.from(tT2.raw,'utf8'),devPub(),Buffer.from(tT2.dsig,'hex')),'/task response is DEVICE-SIGNED over the exact body');
+ const tT6=await readJson('/task','id=t6');
+ assert(tT6.body.ok&&(tT6.body.status==='accepted'||tT6.body.status==='failed'),'parked t6 has a ledger record: '+tT6.body.status);
+ assert((await readJson('/task','id=never')).status===404,'unknown task -> 404');
+ // read replay: the SAME signed read twice -> 403 (nonce replay-cached)
+ {const h=signRead('/task','id=t2');
+  const r1=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:h});
+  const r2=await fetch('http://127.0.0.1:47731/task?id=t2',{headers:h});
+  assert(r1.status===200&&r2.status===403,'read replay with the same nonce -> 403')}
+ // stale read ts -> 403
+ {const rts=Date.now()-120000,rnonce=crypto.randomBytes(12).toString('base64url');
+  const rsig=crypto.sign(null,Buffer.from(['GET','/task','id=t2',String(rts),rnonce].join('\n'),'utf8'),PRIV).toString('hex');
+  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig}})).status===403,'stale read ts -> 403')}
+ // request binding: a signature for /info does not authorize /task
+ {const rts=Date.now(),rnonce=crypto.randomBytes(12).toString('base64url');
+  const rsig=crypto.sign(null,Buffer.from(['GET','/info','',String(rts),rnonce].join('\n'),'utf8'),PRIV).toString('hex');
+  assert((await fetch('http://127.0.0.1:47731/task?id=t2',{headers:{'X-GW-Key':'cmd-key','X-GW-Read-Ts':String(rts),'X-GW-Read-Nonce':rnonce,'X-GW-Read-Sig':rsig}})).status===403,'signature bound to a different path -> 403')}
 
  // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
  // envelope expired is refused - the command never runs

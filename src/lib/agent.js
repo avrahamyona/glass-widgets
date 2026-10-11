@@ -664,7 +664,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return JSON.stringify(body);
  }
  async function ack(id,status,note,result){
-  try{taskStore.put(id,{status,note,result})}catch{} // local truth for /task polling - recorded even when the network ack fails
+  try{if(ledger.has(id))ledger.put(id,{status,note,result})}catch{} // tunnel-originated commands only; local truth for /task polling even when the network ack fails
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
   if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
   const wire=fitAckBody(body);
@@ -839,25 +839,29 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // own-server leg (stage 1): the same command intake, served locally and reached through the tunnel.
  // the worker SSE loop keeps running as fallback until cutover; checkDup dedups a command that
  // somehow arrives on both channels, and every terminal state still acks over the existing leg.
- // intake replay store: durable, signed-exp, covers EVERY tunnel kind. Deliberately separate from
- // the downstream seen/pendingApprovals guards so the first command is never rejected by its own
- // record and the regular approval flow keeps its own semantics. Corrupt/unwritable = tunnel
- // intake closed (503), never a pretend guard.
- const tSeenFile=()=>path.join(app.getPath('userData'),'agent-tunnel-seen.json');
- // durable task records for /task polling (the own-server ack semantics): accepted at intake,
- // terminal at ack, idempotent reads, fail-closed store.
- const{createTaskStore}=require('./taskstore');
- const taskStore=createTaskStore(path.join(app.getPath('userData'),'agent-tasks.json'));
- const tSeen={};let tSeenOk=true;
- try{const j=JSON.parse(fs.readFileSync(tSeenFile(),'utf8'));for(const k of Object.keys(j))if(+j[k].exp>Date.now())tSeen[k]=j[k]}
- catch(e){if(!e||e.code!=='ENOENT')tSeenOk=false}
- function tMark(id,exp){
-  const sid=String(id),now=Date.now();
-  for(const k of Object.keys(tSeen))if(!(+tSeen[k].exp>now))delete tSeen[k];
-  const prev=tSeen[sid];tSeen[sid]={at:now,exp:+exp||now};
-  try{fs.writeFileSync(tSeenFile(),JSON.stringify(tSeen))}catch{
-   if(prev)tSeen[sid]=prev;else delete tSeen[sid];tSeenOk=false;return false}
-  return true}
+ // ONE transactional ledger per tunnel command (intake -> accepted -> terminal): replay guard AND
+ // task-result polling from the same durable record, so no crash window can strand a command
+ // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
+ const{createLedger}=require('./ledger');
+ const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
+ // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
+ // must never gate private results. Reads carry X-GW-Read-Ts/Nonce/Sig - Ed25519 with the worker
+ // key over method\npath\nquery\nts\nnonce (request-bound), ts within 60s, nonce replay-cached
+ // in memory until ts+120s (read-only, so an in-memory horizon is sufficient; documented).
+ const READ_SKEW_MS=60000,readNonces=new Map();
+ function verifyReadAuth(method,pathName,query,headers){
+  if(!signPub)return false;
+  const ts=+headers['x-gw-read-ts'],nonce=String(headers['x-gw-read-nonce']||''),sig=String(headers['x-gw-read-sig']||'');
+  if(!Number.isFinite(ts)||Math.abs(Date.now()-ts)>READ_SKEW_MS)return false;
+  if(!/^[A-Za-z0-9_-]{8,64}$/.test(nonce)||!/^[0-9a-f]{128}$/.test(sig))return false;
+  const now=Date.now();for(const[n,x]of readNonces)if(x<=now)readNonces.delete(n);
+  const key=String(ts)+'|'+nonce;
+  if(readNonces.has(key))return false; // replay
+  let okV=false;
+  try{okV=crypto.verify(null,Buffer.from([method,pathName,query,String(ts),nonce].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'))}catch{okV=false}
+  if(okV)readNonces.set(key,ts+120000);
+  return okV;
+ }
  const srvCfg={enabled:true,port:47631,...((cfg.localServer&&typeof cfg.localServer==='object')?cfg.localServer:{})};
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED!==undefined)srvCfg.enabled=process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED==='1';
  if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
@@ -867,9 +871,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const{startLocalServer}=require('./localserver');
   const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
    getDevice:()=>devKey&&devId?{deviceId:devId,deviceSign:(t)=>deviceSign(t)}:null,
-   getTask:id=>taskStore.get(id),tasksOk:()=>taskStore.ok(),
+   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
    getInfo:()=>({...(devId?{deviceId:devId,pubkey:devPubB64}:{})}),
-   log:(lvl,o)=>audit({lvl,...o}),
+   verifyReadAuth,log:(lvl,o)=>audit({lvl,...o}),
    onCommand:(m)=>{
     // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
     // and proves nothing about the sender. Every tunnel command must arrive as a signed envelope
@@ -884,10 +888,11 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
      return {accepted:false,status:403,reason:'unsigned'}}
-    if(!tSeenOk)return {accepted:false,status:503,reason:'replay_store'};
-    if(tSeen[String(m.id)]){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}}
-    if(!tMark(m.id,m.exp))return {accepted:false,status:503,reason:'replay_store'};
-    if(!taskStore.put(m.id,{status:'accepted'}))audit({kind:'server',stage:'task_store_fail',id:String(m.id).slice(0,40)});
+    if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
+    if(ledger.has(m.id)){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}} // a replayed envelope gets a stable 409 AND its terminal record stays pollable
+    // durable commit BEFORE any effect: the accepted record IS the dispatch permit. If it cannot
+    // be committed, nothing runs and the sender may retry the same envelope (it was not consumed).
+    if(!ledger.put(m.id,{status:'accepted',exp:+m.exp})){audit({kind:'server',stage:'ledger_fail',id:String(m.id).slice(0,40)});return {accepted:false,status:503,reason:'ledger'}}
     handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
     return {accepted:true};
    }});

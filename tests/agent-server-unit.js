@@ -83,47 +83,63 @@ async function main(){
   assert(h.status===200,'serves after restart');
   await r2.stop()}
 
- // 9) /info: self-description for the authenticated sender, incl. enrolled device identity
+ // 9) /info + /task are PRIVATE READS: no verifyReadAuth -> 403 even with the right key
  {const r4=await startLocalServer({port:0,token:TOKEN,version:'0.4.62',caps:'approve,update',onCommand:()=>({accepted:true}),
-   getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'})});
+   log:(l,o)=>logs.push({l,...o}),getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'}),getTask:()=>null,tasksOk:()=>true});
   const U4='http://127.0.0.1:'+r4.port;
-  const i=await (await fetch(U4+'/info',{headers:{'X-GW-Key':TOKEN}})).json();
-  assert(i.ok&&i.v==='0.4.62'&&i.caps==='approve,update'&&i.deviceId==='dev-9'&&i.pubkey==='cHVi','info carries version/caps/device: '+JSON.stringify(i));
-  assert((await fetch(U4+'/info')).status===403,'info requires the key');
+  assert((await fetch(U4+'/info',{headers:{'X-GW-Key':TOKEN}})).status===403,'/info without signed-read auth -> 403 (public key is NOT enough)');
+  assert((await fetch(U4+'/task?id=x',{headers:{'X-GW-Key':TOKEN}})).status===403,'/task without signed-read auth -> 403');
+  assert(logs.some(l=>l.stage==='read_auth_fail'),'read auth failure audited');
   await r4.stop()}
- {const r5=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true})}); // no getInfo: plain base shape
-  const i=await (await fetch('http://127.0.0.1:'+r5.port+'/info',{headers:{'X-GW-Key':TOKEN}})).json();
-  assert(i.ok&&!i.deviceId,'info without getInfo -> base shape only');
-  await r5.stop()}
 
- // 10) /task: idempotent result polling over the durable store
- {const{createTaskStore}=require('../src/lib/taskstore');
-  const fs2=require('fs'),os2=require('os'),path2=require('path');
-  const tf=path2.join(fs2.mkdtempSync('/tmp/gw-tasks-'),'tasks.json');
-  const store=createTaskStore(tf);
-  const r6=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
-   getTask:id=>store.get(id),tasksOk:()=>store.ok()});
-  const U6='http://127.0.0.1:'+r6.port;
+ // 10) /info: signed-read auth passes; device-signed response when enrolled, deviceless marker else
+ {const r5=await startLocalServer({port:0,token:TOKEN,version:'0.4.62',caps:'approve,update',onCommand:()=>({accepted:true}),
+   verifyReadAuth:()=>true,getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'}),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>'sig('+t+')'})});
+  const U5='http://127.0.0.1:'+r5.port,H={headers:{'X-GW-Key':TOKEN}};
+  const res=await fetch(U5+'/info',H);const txt=await res.text();const i=JSON.parse(txt);
+  assert(i.ok&&i.v==='0.4.62'&&i.deviceId==='dev-9'&&i.pubkey==='cHVi','info body: '+txt);
+  assert(res.headers.get('x-gw-device')==='dev-9'&&res.headers.get('x-gw-device-sig')==='sig('+txt+')','info response is device-signed over the exact body');
+  await r5.stop()}
+ {const r5b=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),verifyReadAuth:()=>true}); // not enrolled
+  const res=await fetch('http://127.0.0.1:'+r5b.port+'/info',{headers:{'X-GW-Key':TOKEN}});const i=await res.json();
+  assert(i.ok&&i.deviceless===true&&!res.headers.get('x-gw-device-sig'),'unenrolled /info -> base shape with deviceless marker, unsigned');
+  await r5b.stop()}
+
+ // 11) /task: ledger-backed idempotent polling, device key REQUIRED (results are private)
+ {const{createLedger}=require('../src/lib/ledger');
+  const fs2=require('fs'),path2=require('path');
+  const tf=path2.join(fs2.mkdtempSync('/tmp/gw-ledger-'),'ledger.json');
+  const store=createLedger(tf);
   const H={headers:{'X-GW-Key':TOKEN}};
-  assert((await fetch(U6+'/task?id=nope',H)).status===404,'unknown task -> 404');
-  store.put('t1',{status:'accepted'});
-  let j=await (await fetch(U6+'/task?id=t1',H)).json();
-  assert(j.status==='accepted'&&j.terminal===false,'accepted record visible: '+JSON.stringify(j));
-  store.put('t1',{status:'done',note:'2 matches',result:{matches:2}});
-  j=await (await fetch(U6+'/task?id=t1',H)).json();
-  assert(j.status==='done'&&j.terminal===true&&j.result.matches===2,'terminal record served');
-  store.put('t1',{status:'failed',note:'late'}); // a terminal record never changes
-  j=await (await fetch(U6+'/task?id=t1',H)).json();
-  assert(j.status==='done','terminal record idempotent (a late write cannot clobber)');
-  const store2=createTaskStore(tf); // restart: the record survives
-  assert(store2.get('t1').status==='done','record durable across reload');
-  fs2.writeFileSync(tf,'{corrupt'); // a broken store fails closed
-  const store3=createTaskStore(tf);
-  assert(store3.ok()===false,'corrupt store -> ok() false');
+  {const r6=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+    verifyReadAuth:()=>true,getTask:id=>store.get(id),tasksOk:()=>store.ok(),getDevice:()=>null});
+   assert((await fetch('http://127.0.0.1:'+r6.port+'/task?id=t1',H)).status===503,'no enrolled device -> /task closed (503 no_device_key)');
+   await r6.stop()}
   const r7=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
-   getTask:id=>store3.get(id),tasksOk:()=>store3.ok()});
-  assert((await fetch('http://127.0.0.1:'+r7.port+'/task?id=t1',H)).status===503,'broken store -> 503, never a pretend answer');
-  await r6.stop();await r7.stop()}
+   verifyReadAuth:()=>true,getTask:id=>store.get(id),tasksOk:()=>store.ok(),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>'sig('+t+')'})});
+  const U7='http://127.0.0.1:'+r7.port;
+  assert((await fetch(U7+'/task?id=nope',H)).status===404,'unknown task -> 404');
+  store.put('t1',{status:'accepted',exp:Date.now()+300000});
+  let res=await fetch(U7+'/task?id=t1',H);let j=await res.json();
+  assert(j.status==='accepted'&&j.terminal===false,'accepted record visible');
+  store.put('t1',{status:'done',note:'2 matches',result:{matches:2}});
+  res=await fetch(U7+'/task?id=t1',H);const txt=await res.text();j=JSON.parse(txt);
+  assert(j.status==='done'&&j.terminal===true&&j.result.matches===2,'terminal record served');
+  assert(res.headers.get('x-gw-device-sig')==='sig('+txt+')','task response device-signed over the exact body');
+  store.put('t1',{status:'failed',note:'late'});
+  j=await (await fetch(U7+'/task?id=t1',H)).json();
+  assert(j.status==='done','terminal record idempotent (a late write cannot clobber)');
+  const store2=createLedger(tf);
+  assert(store2.get('t1').status==='done','record durable across reload');
+  await r7.stop();
+  fs2.writeFileSync(tf,'{corrupt');
+  const store3=createLedger(tf);
+  assert(store3.ok()===false,'corrupt ledger -> ok() false');
+  assert(store3.put('t9',{status:'accepted',exp:Date.now()+1000})===false,'put on a down ledger REFUSES (never wipes evidence)');
+  const r8=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+   verifyReadAuth:()=>true,getTask:id=>store3.get(id),tasksOk:()=>store3.ok(),getDevice:()=>({deviceId:'d',deviceSign:t=>'s'})});
+  assert((await fetch('http://127.0.0.1:'+r8.port+'/task?id=t1',H)).status===503,'broken ledger -> 503');
+  await r8.stop()}
 
  console.log('AGENT-SERVER-UNIT: PASS');
 }

@@ -7,11 +7,26 @@ const http=require('http');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo}){
+function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
-  const reply=(code,obj)=>{const s=JSON.stringify(obj);res.writeHead(code,{'content-type':'application/json','content-length':Buffer.byteLength(s)});res.end(s)};
+  // device-signed responses: when the enrolled device key exists, the exact response body is
+  // signed (headers X-GW-Device / X-GW-Device-Sig) so the sender verifies the endpoint holds the
+  // key BEFORE trusting a byte of the payload.
+  const reply=(code,obj,sign)=>{
+   const s=JSON.stringify(obj);const h={'content-type':'application/json','content-length':Buffer.byteLength(s)};
+   if(sign){const d=getDevice&&getDevice();
+    if(d&&d.deviceId&&d.deviceSign){try{h['x-gw-device']=d.deviceId;h['x-gw-device-sig']=d.deviceSign(s)}catch{}}}
+   res.writeHead(code,h);res.end(s)};
+  // private-read gate for /task and /info: the baked key is public; reads need the worker-signed
+  // request-bound proof (verifyReadAuth) ON TOP of it.
+  const readOk=()=>{
+   if(!verifyReadAuth){say('warn',{kind:'server',stage:'read_auth_fail',method:req.method,url:String(req.url).slice(0,60),reason:'no_verifier'});return false}
+   const q=(req.url.split('?')[1]||'');
+   const ok=verifyReadAuth(req.method,req.url.split('?')[0],q,req.headers);
+   if(!ok)say('warn',{kind:'server',stage:'read_auth_fail',method:req.method,url:String(req.url).slice(0,60)});
+   return ok};
   if(req.headers['x-gw-key']!==token){say('warn',{kind:'server',stage:'auth_fail',method:req.method,url:String(req.url).slice(0,60)});return reply(403,{ok:false,error:'auth'})}
   if(req.method==='GET'&&req.url.startsWith('/health')){
    // sender-side identity proof: with ?nonce= the server signs deviceId+nonce with the per-device
@@ -21,20 +36,27 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
    if(d&&d.deviceId&&d.deviceSign){const nonce=(req.url.split('nonce=')[1]||'').split('&')[0];
     if(/^[A-Za-z0-9_-]{8,64}$/.test(nonce)){try{body.deviceId=d.deviceId;body.sig=d.deviceSign(d.deviceId+'\n'+nonce)}catch{}}}
    return reply(200,body)}
-  if(req.method==='GET'&&req.url==='/info'){
-   // self-description for the sender (authenticated): version, capabilities, device identity.
-   // The pubkey is public by nature; it lets the sender verify enrollment without the worker.
+  if(req.method==='GET'&&req.url.split('?')[0]==='/info'){
+   // self-description for the sender: version, capabilities, device identity (pubkey is public
+   // by nature). PRIVATE READ: signed-read auth required; device-signed response when enrolled.
+   if(!readOk())return reply(403,{ok:false,error:'read_auth'});
    const base={ok:true,v:version||'',caps:caps||''};
    const info=getInfo?getInfo():null;
-   return reply(200,info&&typeof info==='object'?{...base,...info}:base)}
-  if(req.method==='GET'&&req.url.startsWith('/task')){
-   // idempotent task-result polling: accepted at intake, terminal at ack. Unknown id -> 404;
-   // a broken store -> 503 (fail-closed, never a pretend answer).
-   if(tasksOk&&!tasksOk())return reply(503,{ok:false,error:'task_store'});
+   const body=info&&typeof info==='object'?{...base,...info}:{...base,deviceless:true};
+   return reply(200,body,true)}
+  if(req.method==='GET'&&req.url.split('?')[0]==='/task'){
+   // idempotent task-result polling: accepted at intake, terminal at ack. Results are PRIVATE
+   // (paths, clipboard, command output): signed-read auth AND an enrolled device key (the
+   // response is device-signed; without a key the endpoint is closed). Unknown id -> 404;
+   // a broken ledger -> 503 (fail-closed, never a pretend answer).
+   if(!readOk())return reply(403,{ok:false,error:'read_auth'});
+   const d=getDevice&&getDevice();
+   if(!d||!d.deviceId||!d.deviceSign)return reply(503,{ok:false,error:'no_device_key'});
+   if(tasksOk&&!tasksOk())return reply(503,{ok:false,error:'ledger'});
    const id=(req.url.split('id=')[1]||'').split('&')[0];
    const t=id&&getTask?getTask(id):null;
    if(!t)return reply(404,{ok:false,error:'unknown_task'});
-   return reply(200,{ok:true,id,status:t.status,note:t.note,result:t.result,at:t.at,terminal:!!t.terminal})}
+   return reply(200,{ok:true,id,status:t.status,note:t.note,result:t.result,at:t.at,terminal:!!t.terminal},true)}
   if(req.method==='POST'&&req.url==='/cmd'){
    let n=0,chunks=[];
    req.on('data',c=>{n+=c.length;if(n>BODY_CAP){say('warn',{kind:'server',stage:'body_cap',bytes:n});reply(413,{ok:false,error:'too_large'});req.destroy()}else chunks.push(c)});
