@@ -70,10 +70,10 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
     let m=null;
     try{m=JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{return reply(400,{ok:false,error:'bad_json'})}
     if(!m||typeof m!=='object'||typeof m.kind!=='string'||typeof m.id!=='string')return reply(400,{ok:false,error:'bad_command'});
-    let accepted=true,reason='',status=0;
-    try{const r=onCommand(m);if(r&&r.accepted===false){accepted=false;reason=String(r.reason||'refused').slice(0,120);status=+r.status||0}}catch(e){accepted=false;reason='handler_error';status=500}
+    let accepted=true,reason='',status=0,outcome=null;
+    try{const r=onCommand(m);if(r&&r.accepted===false){accepted=false;reason=String(r.reason||'refused').slice(0,120);status=+r.status||0;if(r.outcome&&typeof r.outcome==='object')outcome={status:String(r.outcome.status||''),note:String(r.outcome.note||'').slice(0,200)}}}catch(e){accepted=false;reason='handler_error';status=500}
     say('info',{kind:'server',stage:'cmd',id:m.id.slice(0,40),kind:m.kind.slice(0,40),accepted,reason});
-    reply(accepted?202:(status>=400&&status<600?status:409),{ok:accepted,...(reason?{reason}:{})});
+    reply(accepted?202:(status>=400&&status<600?status:409),{ok:accepted,...(reason?{reason}:{}),...(outcome?{outcome}:{})});
    });
    req.on('error',()=>{});
    return;

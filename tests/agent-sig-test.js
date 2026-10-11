@@ -154,7 +154,7 @@ const launch=async()=>{
  assert(cardFp,'pairing card shows the LOCAL candidate fingerprint: '+cP.body);
  assert(cP.body.includes('אשר רק אם יזמת צימוד'),'pairing card carries explicit compare-and-deny copy');
  assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'NO key persisted while the pairing card is parked');
- assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending.json'),'durable pairing-pending record exists while parked');
+ assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending/enr1.json'),'durable per-id pairing-pending record exists while parked');
  await A.screenshot({path:'/downloads/pairing-card.png'}); // REAL UI pixels of the pairing card
  await clickBtn('אישור צימוד טלפון','אשר צימוד');
  const aE=await waitAck('enr1','done');
@@ -310,17 +310,26 @@ const launch=async()=>{
  const aDeny=await waitAck('enr3','failed');
  assert(/denied/.test(aDeny.note),'denied pairing is a durable failed terminal: '+aDeny.note);
  assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'deny persists NO key');
- assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending.json'),'deny clears the pending record');
+ for(let i=0;i<40&&fs.existsSync(cfg+'/glasswidgets/pairing-pending/enr3.json');i++)await sleep(100);
+ assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enr3.json'),'deny clears THIS pending record after the durable terminal verified');
+ const ledJ=()=>JSON.parse(fs.readFileSync(cfg+'/glasswidgets/agent-tunnel-ledger.json','utf8'));
+ assert(ledJ()['enr3']&&ledJ()['enr3'].status==='failed'&&ledJ()['enr3'].terminal===true,'deny: the DURABLE LEDGER shows the failed terminal, not just the ack');
  // restart while parked: the boot recovery writes the durable terminal
  const CH4='rst-'+Date.now().toString(36)+'-abcdefgh';
  ts=Date.now();exp=EX();pushCmd({id:'enr4',kind:'enroll_device',data:{challenge:CH4},ts,exp,sig:sign('enr4','enroll_device',ts,exp,JSON.stringify({challenge:CH4}))});
  await card('אישור צימוד טלפון');
- assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending.json'),'pending record on disk before the restart');
+ assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending/enr4.json'),'per-id pending record on disk before the restart');
  await a.close();
  ({a,A}=await launch());
  const aRst=await waitAck('enr4','failed');
  assert(/הופעלה מחדש/.test(aRst.note),'restart-during-parking is a durable failed terminal: '+aRst.note);
  assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'restart persists NO key');
+ // the reload had converted the parked accepted record to FINAL unknown; the boot recovery must
+ // RECONCILE it to a durable failed terminal - verified in the ledger itself, not only in the ack
+ let led4=null;for(let i=0;i<40;i++){try{const r=ledJ()['enr4'];if(r&&r.status==='failed'){led4=r;break}}catch{}await sleep(200)}
+ assert(led4&&led4.terminal===true,'post-restart ledger reconciled unknown->failed (durable): '+JSON.stringify(led4));
+ for(let i=0;i<40&&fs.existsSync(cfg+'/glasswidgets/pairing-pending/enr4.json');i++)await sleep(100);
+ assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enr4.json'),'recovery record cleared only AFTER the durable terminal verified');
  // the pending-read record SURVIVES the restart (set by the boot recovery), but /task stays
  // closed without a device key (reviewed endpoint boundary) - the sender reconciles a failed
  // pairing by retrying, which surfaces a NEW pairing card to the human
@@ -333,7 +342,49 @@ const launch=async()=>{
  const aExp=await waitAck('enr5','failed');
  assert(/expired/.test(aExp.note),'untouched pairing expires into a durable failed terminal: '+aExp.note);
  assert(!fs.existsSync(cfg+'/glasswidgets/device/device.json'),'expiry persists NO key');
+ assert(ledJ()['enr5']&&ledJ()['enr5'].status==='failed'&&ledJ()['enr5'].terminal===true,'expiry: the DURABLE LEDGER shows the failed terminal');
+
+ // cid-addressed card helpers (settled cards LINGER in the DOM - title search would hit stale ones)
+ const cardCid=async cid=>{for(let i=0;i<40;i++){const c=await A.evaluate(x=>{const el=document.querySelector('#pillBody .card[data-cid="'+x+'"]');return el?el.querySelector('.cb').textContent:null},cid);if(c)return c;await sleep(200)}throw new Error('no card '+cid)};
+ const clickCid=(cid,label)=>A.evaluate(([x,l])=>{const el=document.querySelector('#pillBody .card[data-cid="'+x+'"]');const b=[...el.querySelectorAll('button')].find(b=>b.textContent===l);if(b)b.click()},[cid,label]);
+ // 12b) same-ID resend reconciles the DURABLE denied outcome over the EXISTING authenticated 409
+ // channel: the sender retries its stored envelope, gets the cached failed outcome, NO new card.
+ const sC=createSenderClient({deviceUrl:'http://127.0.0.1:47732',controlUrl:'http://127.0.0.1:9',replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50});
+ const pC=await sC.prepare({kind:'enroll_device',data:{challenge:'rsd-'+Date.now().toString(36)+'-abcdefgh'}});
+ const uC=await sC.send(pC);
+ assert(uC.status==='accepted'&&uC.id,'fresh sender enroll accepted: '+JSON.stringify(uC));
+ const uCid='local-approve-'+uC.id.replace(/[^\w-]/g,'').slice(0,60);
+ await cardCid(uCid);
+ await clickCid(uCid,'דחה');
+ const aRsd=await waitAck(uC.id,'failed');
+ assert(/denied/.test(aRsd.note),'sender-driven deny is a durable failed terminal: '+aRsd.note);
+ assert(ledJ()[uC.id]&&ledJ()[uC.id].status==='failed','denied outcome durable in the ledger');
+ const uC2=await sC.send({id:uC.id}); // the SAME stored envelope resent (sender restart shape)
+ assert(uC2.status==='duplicate'&&uC2.outcome&&uC2.outcome.outcome&&uC2.outcome.outcome.status==='failed','same-ID resend reconciles the cached DENIED outcome via 409: '+JSON.stringify(uC2));
+ const audRs=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
+ assert((audRs.match(new RegExp('"stage":"pairing_requested","id":"'+uC.id.slice(0,40).replace(/[^\w-]/g,'')+'"','g'))||[]).length===1,'the resend published NO second card (one pairing_requested for the id)');
+
+ // 12c) A/B interleave: two parked pairings; approving A enrolls A; approving the STALE B must
+ // NEVER claim success on a different key - superseded is a durable failed terminal.
+ const CHa='ia-'+Date.now().toString(36)+'-abcdefgh',CHb='ib-'+Date.now().toString(36)+'-abcdefgh';
+ ts=Date.now();exp=EX();pushCmd({id:'enrA',kind:'enroll_device',data:{challenge:CHa},ts,exp,sig:sign('enrA','enroll_device',ts,exp,JSON.stringify({challenge:CHa}))});
+ ts=Date.now();exp=EX();pushCmd({id:'enrB',kind:'enroll_device',data:{challenge:CHb},ts,exp,sig:sign('enrB','enroll_device',ts,exp,JSON.stringify({challenge:CHb}))});
+ const bodyA=await cardCid('local-approve-enrA'),bodyB=await cardCid('local-approve-enrB');
+ const fpA=(bodyA.match(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/)||[])[0],fpB=(bodyB.match(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/)||[])[0];
+ assert(fpA&&fpB&&fpA!==fpB,'two parked pairings show DIFFERENT candidate fingerprints: '+fpA+' vs '+fpB);
+ await clickCid('local-approve-enrA','אשר צימוד');
+ const aA=await waitAck('enrA','done');
+ assert(aA.result&&aA.result.pairing&&aA.result.pairing.fingerprint===fpA&&aA.result.pairing.cardId==='local-approve-enrA','A enrolled with ITS shown fingerprint + card: '+JSON.stringify(aA.result.pairing));
+ await clickCid('local-approve-enrB','אשר צימוד');
+ const aB=await waitAck('enrB','failed');
+ assert(/superseded/.test(aB.note),'stale B NEVER succeeds on a different key: '+aB.note);
+ const{fingerprint:fpOf}=require(REPO+'/src/lib/fingerprint');
+ const devJ3=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8'));
+ assert(fpOf(devJ3.pub)===fpA,'the enrolled identity is A (the approved fingerprint), never B');
+ assert(ledJ()['enrB']&&ledJ()['enrB'].status==='failed'&&ledJ()['enrB'].terminal===true,'B superseded is a DURABLE failed terminal');
+ for(let i=0;i<40&&(fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrA.json')||fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrB.json'));i++)await sleep(100);
+ assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrA.json')&&!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrB.json'),'both recovery records cleared after their terminals verified');
  const aud2=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
- assert(aud2.includes('"stage":"pairing_requested"')&&aud2.includes('"stage":"pairing_expired"')&&aud2.includes('"stage":"pairing_restart_cancel"')&&aud2.includes('"stage":"denied"'),'pairing audit trail complete: requested/approved-or-denied/expired/restart-cancel');
+ assert(aud2.includes('"stage":"pairing_requested"')&&aud2.includes('"stage":"pairing_expired"')&&aud2.includes('"stage":"pairing_restart_cancel"')&&aud2.includes('"stage":"denied"')&&aud2.includes('"stage":"pairing_superseded"'),'pairing audit trail complete: requested/approved-or-denied/expired/restart-cancel/superseded');
  console.log('AGENT-SIG TESTS PASSED');await a.close();srv.close();process.exit(0);
 })().catch(e=>{console.error('FAIL',e);try{console.error('AUDIT-TAIL:\n'+fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').split('\n').slice(-12).join('\n'))}catch{}try{console.error('ACKS:',JSON.stringify(ACK.slice(-8)))}catch{}process.exit(1)});

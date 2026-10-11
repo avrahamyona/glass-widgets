@@ -91,4 +91,24 @@ assert(createLedger(F).ok()===false,'null JSON -> down');
 // no tmp litter
 fs.writeFileSync(F,JSON.stringify({}));l=createLedger(F);l.put('a',{status:'accepted',exp:now+1000});
 assert(fs.readdirSync(dir).filter(f=>f.startsWith('ledger.json')&&f.includes('.tmp')).length===0,'no tmp litter');
+// reconcileUnknown: the INTENTIONAL recovery-only rewrite - a FINAL 'unknown' with NO effect
+// evidence (result==null, e.g. a parked enroll that never executed) may resolve to a real terminal;
+// done records, unknown-with-result, and missing ids are NEVER touched
+{const d3=fs.mkdtempSync('/tmp/gw-ledger-recon-'),f3=path.join(d3,'l.json');
+ let l7=createLedger(f3);
+ l7.put('pk-1',{status:'accepted',note:'parked enroll',exp:now+300000});
+ l7.put('fx-1',{status:'accepted',exp:now+300000});l7.put('fx-1',{status:'done',note:'real',result:{n:7}});
+ l7=createLedger(f3); // a REAL reload: the parked accepted becomes FINAL unknown (crash evidence)
+ assert(l7.get('pk-1').status==='unknown'&&l7.get('pk-1').terminal===true,'reload converts parked accepted to FINAL unknown');
+ assert(l7.put('pk-1',{status:'failed',note:'x'})===true&&l7.get('pk-1').status==='unknown','a generic put NEVER rewrites FINAL');
+ assert(l7.reconcileUnknown('pk-1',{status:'failed',note:'cancelled at restart'})===true,'no-effect unknown reconciles to a real terminal');
+ assert(l7.get('pk-1').status==='failed'&&l7.get('pk-1').terminal===true,'reconciled record is a durable terminal');
+ assert(createLedger(f3).get('pk-1').status==='failed','the reconcile survives a REAL reload');
+ assert(l7.reconcileUnknown('fx-1',{status:'failed',note:'x'})===false&&l7.get('fx-1').status==='done','a real done record is never reconciled');
+ assert(l7.reconcileUnknown('pk-1',{status:'done',note:'x'})===false,'already reconciled - no longer unknown');
+ assert(l7.reconcileUnknown('nope',{status:'failed',note:'x'})===false,'missing id refuses');
+ fs.writeFileSync(f3,JSON.stringify({'ev-1':{v:SCHEMA_V,status:'unknown',note:'crash',at:1,dedupExp:now+100000,resultExp:now+100000,terminal:true,result:{partial:1}}}));
+ const l8=createLedger(f3);
+ assert(l8.ok()===true&&l8.get('ev-1').status==='unknown','unknown-with-result loads as a valid record');
+ assert(l8.reconcileUnknown('ev-1',{status:'failed',note:'x'})===false&&l8.get('ev-1').result.partial===1,'unknown carrying effect evidence is NEVER rewritten')}
 console.log('AGENT-LEDGER-UNIT: PASS');

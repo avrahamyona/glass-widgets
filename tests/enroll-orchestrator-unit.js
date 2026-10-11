@@ -12,6 +12,7 @@ const{createReadAuth}=require('../src/lib/read-auth.js');
 const{startLocalServer}=require('../src/lib/localserver.js');
 const{signChallenge}=require('../src/lib/enroll-challenge.js');
 const{handleTunnel}=require('../worker/tunnel-route.js');
+const{fingerprint:fpFn}=require('../src/lib/fingerprint');
 const{publicKey:PUB,privateKey:PRIV}=crypto.generateKeyPairSync('ed25519'); // sender signing key
 const SIGN_PRIV=PRIV.export({format:'der',type:'pkcs8'}).toString('base64');
 const senderPubB64=PUB.export({format:'der',type:'spki'}).toString('base64');
@@ -37,7 +38,7 @@ const nodeFetch=(u,o={})=>new Promise((res,rej)=>{const url=new URL(u);
  rq.on('error',rej);if(o.signal)o.signal.addEventListener('abort',()=>{rq.destroy(new Error('aborted'))});if(o.body)rq.write(o.body);rq.end()});
 const spyFetch=(tag,next)=>(u,o={})=>{if(tag==='pc')pcHeaders.push({...(o.headers||{})});return next(u,o)};
 const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:async(id,r)=>{m.set(id,r);return true},_map:m}};
-async function makePC({badProof=false}={}){ // a fresh PC with no device key
+async function makePC({badProof=false,tamperPairing=false,noPairing=false}={}){ // a fresh PC with no device key
  let dev=null;const tasks=new Map();
  const deviceSign=t=>dev?crypto.sign(null,Buffer.from(String(t),'utf8'),dev.privK).toString('hex'):null;
  // The REAL production read verifier (src/lib/read-auth.js - the same module agent.js runs):
@@ -57,6 +58,7 @@ async function makePC({badProof=false}={}){ // a fresh PC with no device key
    if(tasks.has(m.id))return{accepted:false,status:409,reason:'duplicate'};
    tasks.set(m.id,{status:'running',result:null,at:Date.now(),terminal:false});
    setTimeout(()=>{
+    const fresh=!dev; // the FIRST enroll mints; later ones are re-enrolls of the same identity
     if(!dev){const{publicKey:dp,privateKey:dk}=crypto.generateKeyPairSync('ed25519');
      const pubB64=dp.export({format:'der',type:'spki'}).toString('base64');
      dev={pubB64,privK:dk,deviceId:crypto.createHash('sha256').update(pubB64).digest('hex').slice(0,16)}}
@@ -64,7 +66,8 @@ async function makePC({badProof=false}={}){ // a fresh PC with no device key
     pendingEnrollRead={id:String(m.id),device:dev.deviceId,until:Date.now()+120000};
     const proofChallenge=badProof?'FORGED-'+String(data.challenge):String(data.challenge); // a forged proof signs the WRONG challenge
     const out={deviceId:dev.deviceId,pubkey:dev.pubB64,challengeSig:signChallenge(deviceSign,proofChallenge,dev.pubB64,dev.deviceId)};
-    tasks.set(m.id,{status:'done',result:out,at:Date.now(),terminal:true})},10);
+    if(fresh&&!noPairing)out.pairing={fingerprint:tamperPairing?'0000-0000-0000-0000':fpFn(dev.pubB64),cardId:'local-approve-'+String(m.id).replace(/[^\w-]/g,'').slice(0,60),approvedAt:Date.now()-5}; // the on-PC approval record of THIS fresh mint (re-enrolls carry none)
+    tasks.set(m.id,{status:'done',note:fresh?'enrolled':'already enrolled',result:out,at:Date.now(),terminal:true})},10);
    return{accepted:true}}});
  assert(pc.started,'pc up');return pc}
 async function makeCtl(){ // the REAL worker route behind http
@@ -130,6 +133,23 @@ async function makeCtl(){ // the REAL worker route behind http
   const rDec=await orchDec.run();
   assert(rDec.ok===false&&rDec.stage==='pairing','declined pairing refuses');
   assert(fdb.devices.size===1,'declined pairing writes nothing')}
+ // pairing EVIDENCE gate: the orchestrator consumes the on-PC pairing record, cross-checked against the returned key
+ {const cap=[];const pcF=await makePC();
+  const orchF=createEnrollOrchestrator({approvePairing:async a=>{cap.push(a);return true},sender:createSenderClient({deviceUrl:'http://127.0.0.1:'+pcF.port,controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmdk-test',signPrivate:SIGN_PRIV,preEnroll:true,fetchImpl:nodeFetch,outbox:memBox(),pollIntervalMs:5})});
+  const rF=await orchF.run();
+  assert(rF.ok===true&&cap.length===1,'fresh mint with pairing evidence completes');
+  assert(cap[0].pairing&&cap[0].pairing.fingerprint===fpFn(rF.pubkey)&&typeof cap[0].pairing.cardId==='string'&&cap[0].pairing.cardId.indexOf('local-approve-')===0&&cap[0].pairing.approvedAt>0,'approvePairing receives the cross-checked on-PC pairing record (fingerprint/cardId/approvedAt)');
+  await pcF.stop()}
+ {const pcT2=await makePC({tamperPairing:true}); // pairing fingerprint bound to a DIFFERENT key than the returned one
+  const orchT2=createEnrollOrchestrator({approvePairing:approveAny,sender:createSenderClient({deviceUrl:'http://127.0.0.1:'+pcT2.port,controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmdk-test',signPrivate:SIGN_PRIV,preEnroll:true,fetchImpl:nodeFetch,outbox:memBox(),pollIntervalMs:5})});
+  const rT2=await orchT2.run();
+  assert(rT2.ok===false&&rT2.stage==='pairing'&&/mismatch/.test(String(rT2.reason)),'tampered pairing evidence refuses before the registry');
+  await pcT2.stop()}
+ {const pcN=await makePC({noPairing:true}); // a fresh mint that DROPPED its approval evidence
+  const orchN=createEnrollOrchestrator({approvePairing:approveAny,sender:createSenderClient({deviceUrl:'http://127.0.0.1:'+pcN.port,controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmdk-test',signPrivate:SIGN_PRIV,preEnroll:true,fetchImpl:nodeFetch,outbox:memBox(),pollIntervalMs:5})});
+  const rN=await orchN.run();
+  assert(rN.ok===false&&rN.stage==='pairing'&&/without on-PC pairing evidence/.test(String(rN.reason)),'fresh mint without pairing evidence refuses');
+  await pcN.stop()}
  // malformed registry 200 JSON -> registry failure, never a throw
  {const badJson=http.createServer((rq,rs)=>{rs.writeHead(200,{'content-type':'text/plain'});rs.end('<html>not json')});
   await new Promise(r=>badJson.listen(0,'127.0.0.1',r));

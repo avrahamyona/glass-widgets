@@ -216,14 +216,16 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!pend)return {ok:false,reason:'expired'};
   pendingApprovals.delete(cardId);clearTimeout(pend.timer);
   if(p.button_id==='approve'){
-   if(pend.texp&&Date.now()>=pend.texp){if(pend.kind==='enroll_device')clearPairingPending(pend.cmdId);audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});settleCard(cardId,'expired');ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
+   if(pend.texp&&Date.now()>=pend.texp){audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});settleCard(cardId,'expired');if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');else ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
+   pend.approvedAt=Date.now();pend.cardId=cardId; // the human-tap instant + card identity ride the terminal as pairing evidence
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
    settleCard(cardId,'approved');execPending(pend);return {ok:true}}
   if(pend.pre)markSeen(pend.cmdId,'cancelled');
-  if(pend.kind==='enroll_device')clearPairingPending(pend.cmdId);
   audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
   settleCard(cardId,pend.pre?'cancelled':'denied');
-  ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':(pend.kind==='enroll_device'?'denied - המשתמש דחה את הצימוד מהאי':'denied - המשתמש דחה מהאי'));return {ok:true}}
+  const dNote=pend.pre?'cancelled - המשתמש ביטל מהאי':(pend.kind==='enroll_device'?'denied - המשתמש דחה את הצימוד מהאי':'denied - המשתמש דחה מהאי');
+  if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed',dNote);else ack(pend.cmdId,'failed',dNote);
+  return {ok:true}}
  module.exports.handleCardAction=handleCardAction;
 
  // media_control: play/pause/toggle/next/prev via the Windows media bridge (SMTC). An island approval
@@ -976,7 +978,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
       audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
       return {accepted:false,status:403,reason:'unsigned'}}}
     if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
-    if(ledger.has(m.id)){audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40)});return {accepted:false,status:409,reason:'duplicate'}} // a replayed envelope gets a stable 409 AND its terminal record stays pollable
+    if(ledger.has(m.id)){const prev=ledger.get(m.id);audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40),outcome:prev&&prev.status});return {accepted:false,status:409,reason:'duplicate',outcome:prev?{status:prev.status,note:prev.note}:null}} // a replayed envelope gets a stable 409 carrying the CACHED durable outcome (denied/expired/restart-cancel reconcile over THIS authenticated channel - no new episode, no popup)
     // durable commit BEFORE any effect: the accepted record IS the dispatch permit. If it cannot
     // be committed, nothing runs and the sender may retry the same envelope (it was not consumed).
     const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
@@ -1060,9 +1062,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const fp=fingerprint(pubB64); // LOCAL, computed from the in-memory candidate - the trusted display the owner compares
   const cardId='local-approve-'+String(m.id).replace(/[^\w-]/g,'').slice(0,60);
   const texp=intake&&+intake.exp||0;
-  writePairingPending({cmdId:String(m.id),fingerprint:fp,exp:texp||Date.now()+APPROVAL_TTL}); // durable pending record: a restart turns it into a durable terminal, never a silent drop
+  if(!writePairingPending({cmdId:String(m.id),fingerprint:fp,exp:texp||Date.now()+APPROVAL_TTL}))return ack(m.id,'failed','pairing storage unavailable'); // fail closed BEFORE the card exists
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
-   clearPairingPending(p.cmdId);audit({kind:'enroll_device',stage:'pairing_expired',id:String(p.cmdId).slice(0,40),fingerprint:p.fp});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - הצימוד לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+   audit({kind:'enroll_device',stage:'pairing_expired',id:String(p.cmdId).slice(0,40),fingerprint:p.fp});settleCard(cardId,'expired');pairingTerminal(p.cmdId,'failed','expired - הצימוד לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
   pendingApprovals.set(cardId,{cmdId:String(m.id),kind:'enroll_device',timer,texp,fp,enroll:{pubB64,privB64,eData}});
   audit({kind:'enroll_device',stage:'pairing_requested',id:String(m.id).slice(0,40),fingerprint:fp});
@@ -1073,34 +1075,79 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
  // pairing-pending durability: one record in userData (NO key material) so a restart between park
  // and decision becomes a durable terminal the sender can reconcile, not a silently lost enroll.
- const pairingPendingFile=()=>path.join(app.getPath('userData'),'pairing-pending.json');
- const writePairingPending=r=>{try{fs.writeFileSync(pairingPendingFile(),JSON.stringify(r),{mode:0o600})}catch{}};
- const clearPairingPending=cmdId=>{try{const cur=JSON.parse(fs.readFileSync(pairingPendingFile(),'utf8'));if(!cmdId||String(cur.cmdId)===String(cmdId))fs.unlinkSync(pairingPendingFile())}catch{}};
- function execEnroll(p){
+ const pairingPendingDir=()=>path.join(app.getPath('userData'),'pairing-pending');
+ const pairingPendingFile=cmdId=>path.join(pairingPendingDir(),String(cmdId).replace(/[^\w-]/g,'').slice(0,60)+'.json');
+ // one record PER parked enroll (parallel cards never overwrite each other), written BEFORE the card
+ // is published, atomic: tmp wx + full write + file fsync + rename + dir fsync. FAIL CLOSED: no
+ // durable recovery record -> no card, terminal failure instead (a parked approval must never exist
+ // without the record that turns a mid-gap restart into a durable terminal).
+ const writePairingPending=r=>{
+  try{
+   fs.mkdirSync(pairingPendingDir(),{recursive:true,mode:0o700});
+   const file=pairingPendingFile(r.cmdId);
+   const tmp=file+'.'+process.pid+'.'+Date.now()+'.tmp';
+   const b=Buffer.from(JSON.stringify(r),'utf8');
+   const fd=fs.openSync(tmp,'wx',0o600);
+   try{let off=0;while(off<b.length)off+=fs.writeSync(fd,b,off,b.length-off,null);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}
+   fs.renameSync(tmp,file);
+   try{const dfd=fs.openSync(pairingPendingDir(),'r');try{fs.fsyncSync(dfd)}finally{fs.closeSync(dfd)}}catch{} // dir fsync: hard on POSIX, best-effort where unsupported
+   return true;
+  }catch(e){audit({kind:'enroll_device',stage:'pairing_persist_failed',id:String(r&&r.cmdId||'').slice(0,40)});return false}
+ };
+ const clearPairingPending=cmdId=>{try{fs.unlinkSync(pairingPendingFile(cmdId))}catch{}};
+ const readPairingPendings=()=>{try{return fs.readdirSync(pairingPendingDir()).filter(f=>f.endsWith('.json')).map(f=>{try{return JSON.parse(fs.readFileSync(path.join(pairingPendingDir(),f),'utf8'))}catch{return null}}).filter(r=>r&&r.cmdId)}catch{return[]}};
+ // terminal-FIRST ordering (blocker: clear-before-terminal loses recovery in the crash gap): the
+ // durable ledger terminal is committed and VERIFIED before the pairing recovery record is cleared.
+ // If the terminal cannot be verified the pending record SURVIVES and the next boot re-terminals it.
+ async function pairingTerminal(cmdId,status,note,result){
+  await ack(cmdId,status,note,result);
+  const back=ledger.get(String(cmdId));
+  if(back&&back.status===status){clearPairingPending(cmdId);return true}
+  audit({kind:'enroll_device',stage:'pairing_terminal_unverified',id:String(cmdId||'').slice(0,40),want:status,got:back&&back.status||'missing'});
+  return false;
+ }
+ async function execEnroll(p){
   const{pubB64,privB64,eData}=p.enroll||{};
-  if(!pubB64||!privB64){audit({kind:'enroll_device',stage:'pairing_payload_missing',id:String(p.cmdId||'').slice(0,40)});return ack(p.cmdId,'failed','pairing payload missing')}
-  if(devKey&&devId){ // enrolled while the card was parked: the EXISTING identity wins - no rotation, nothing rewritten
-   clearPairingPending(p.cmdId);pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000};
+  if(!pubB64||!privB64){audit({kind:'enroll_device',stage:'pairing_payload_missing',id:String(p.cmdId||'').slice(0,40)});return pairingTerminal(p.cmdId,'failed','pairing payload missing')}
+  if(devKey&&devId){ // enrolled while the card was parked
+   if(devPubB64!==pubB64){ // a DIFFERENT key won the race: the fingerprint the owner approved on screen is NOT the live identity. NEVER claim success on another key - terminal failure + audit, explicit fresh approval required for the actual live fingerprint.
+    audit({kind:'enroll_device',stage:'pairing_superseded',id:String(p.cmdId||'').slice(0,40),shown:p.fp||null,actual:fingerprint(devPubB64)});
+    return pairingTerminal(p.cmdId,'failed','superseded - מפתח אחר צומד בזמן שהאישור המתין; יש להתחיל צימוד חדש ולאשר את הטביעת הנוכחית');
+   }
+   pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000};
    audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});
-   return ack(p.cmdId,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)});
+   return pairingTerminal(p.cmdId,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)});
   }
-  if(!persistDevice(pubB64,privB64)){clearPairingPending(p.cmdId);return ack(p.cmdId,'failed','device key persist failed')}
+  if(!persistDevice(pubB64,privB64))return pairingTerminal(p.cmdId,'failed','device key persist failed');
   loadDevice();
-  if(!devKey||devPubB64!==pubB64){clearPairingPending(p.cmdId);audit({kind:'enroll_device',stage:'persist_fail'});return ack(p.cmdId,'failed','device key persist failed')}
-  clearPairingPending(p.cmdId);
+  if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return pairingTerminal(p.cmdId,'failed','device key persist failed')}
   pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000}; // the preEnroll sender fetches THIS command's terminal under '-' until it learns the id
   audit({kind:'enroll_device',stage:'enrolled',device:devId,fingerprint:fingerprint(pubB64)});
   if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
   // the SAME approval reaches the owner registry adapter through this terminal: the episode-bound
-  // challenge proof + pairing evidence is exactly what the adapter consumes for registration
-  ack(p.cmdId,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProofFor(eData),pairing:{fingerprint:p.fp,approvedAt:Date.now(),cardId:'local-approve-'+String(p.cmdId).replace(/[^\w-]/g,'').slice(0,60)}}); // PUBLIC key only travels
+  // challenge proof + pairing evidence (approvedAt captured at the human tap, not at execution) is
+  // exactly what the adapter consumes for registration
+  return pairingTerminal(p.cmdId,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProofFor(eData),pairing:{fingerprint:p.fp,approvedAt:+p.approvedAt||Date.now(),cardId:String(p.cardId||'')||null}}); // PUBLIC key only travels
  }
  let pendingEnrollRead=null; // {id,device,until}: the ONE bootstrap /task fetch allowed under '-' (set on EVERY accepted enroll_device - fresh mint AND already-enrolled, so a post-restart re-enroll still lets the preEnroll sender fetch its result)
- try{const pp=JSON.parse(fs.readFileSync(path.join(app.getPath('userData'),'pairing-pending.json'),'utf8'));
-  if(pp&&pp.cmdId){fs.unlinkSync(path.join(app.getPath('userData'),'pairing-pending.json'));
-   pendingEnrollRead={id:String(pp.cmdId),device:devId,until:Date.now()+120000}; // the sender can still fetch THIS terminal under '-'
-   audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:String(pp.cmdId).slice(0,40),fingerprint:pp.fingerprint||undefined});
-   ack(pp.cmdId,'failed','cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר')}}catch{} // restart between park and decision: durable terminal, NO key was ever persisted
+ // restart between park and decision: EVERY parked pairing becomes a durable terminal, NO key was
+ // ever persisted. Ordering is terminal-first: a restart turned the parked 'accepted' ledger record
+ // into FINAL 'unknown' with NO effect evidence (result==null - the pairing journal proves nothing
+ // executed), so the narrow reconcileUnknown resolves it to a REAL terminal; a record carrying effect
+ // evidence (result!=null) is NEVER rewritten. The recovery record is cleared ONLY after the durable
+ // terminal verifies - on any persist failure it survives for the next boot.
+ for(const pp of readPairingPendings()){
+  const rid=String(pp.cmdId),rnote='cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר';
+  audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:rid.slice(0,40),fingerprint:pp.fingerprint||undefined});
+  (async()=>{
+   const rec=ledger.get(rid);
+   if(rec&&rec.status==='unknown'&&rec.result==null)ledger.reconcileUnknown(rid,{status:'failed',note:rnote});
+   await ack(rid,'failed',rnote); // the SSE ack ALWAYS fires - the sender reconciles through it; ledger.put is a no-op on the reconciled FINAL record
+   const back=ledger.get(rid);
+   if(back&&back.status==='failed'){clearPairingPending(rid);pendingEnrollRead={id:rid,device:devId,until:Date.now()+120000}} // the sender can still fetch THIS terminal under '-'
+   else audit({kind:'enroll_device',stage:'pairing_recovery_unverified',id:rid.slice(0,40)}); // recovery record PRESERVED for the next boot
+  })().catch(e=>audit({kind:'enroll_device',stage:'pairing_recovery_error',id:rid.slice(0,40),err:String(e&&e.message||e).slice(0,120)}));
+ }
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
  async function publishTunnel(url){

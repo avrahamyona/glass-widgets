@@ -116,6 +116,22 @@ function createLedger(file){
   if(pr!==true)return pr==='capacity'?'full':false; // no commit, no in-memory change; 'full' -> caller 429s
   return true;
  }
+ function reconcileUnknown(id,rec){ // INTENTIONAL recovery-only path: a FINAL 'unknown' with NO effect
+  // evidence (result==null) may be resolved to a real terminal by its guarded journal (e.g. the pairing
+  // journal proves nothing executed). A generic put never rewrites FINAL; this rewrites ONLY unknown+
+  // result==null - a record that may carry real effect evidence (result!=null) is NEVER touched.
+  if(!ok)return false;
+  if(!strictId(id))return false;
+  const prev=tasks.get(id);
+  if(!prev||prev.status!=='unknown'||prev.result!=null)return false;
+  if(rec.status!=='done'&&rec.status!=='failed')return false;
+  const next={...prev,status:rec.status,note:truncBytes(rec.note,NOTE_CAP),result:capResult(rec.result),resultExp:Date.now()+RESULT_TTL_MS,terminal:true};
+  if(!validRec(next))return false;
+  const cand=new Map(tasks);cand.set(id,next);
+  const pr=commit(cand);
+  if(pr!==true)return false;
+  return true;
+ }
  function transition(id,status){ // accepted -> running: the durable effect permit
   if(!ok)return false;
   if(!strictId(id))return false;
@@ -135,6 +151,6 @@ function createLedger(file){
   const now=Date.now();for(const[k,v]of tasks)if(+v.dedupExp<=now&&+v.resultExp<=now)tasks.delete(k); // read-path prune (dead windows only)
   return tasks.get(id)||null;
  }
- return {put,transition,get,has:id=>get(id)!==null,ok:()=>ok};
+ return {put,transition,reconcileUnknown,get,has:id=>get(id)!==null,ok:()=>ok};
 }
 module.exports={createLedger,capResult,RESULT_TTL_MS,RESULT_CAP,MAX_LIVE,SCHEMA_V};

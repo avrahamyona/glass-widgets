@@ -39,8 +39,22 @@ function createEnrollOrchestrator({sender,approvePairing}){
   if(!r.pubkey||!r.deviceId||!r.challengeSig)return {ok:false,stage:'proof',reason:'missing challenge proof fields',id:sent.id};
   if(!verifyChallenge({challenge,pubkey:r.pubkey,deviceId:r.deviceId,sig:r.challengeSig}))return {ok:false,stage:'proof',reason:'challenge proof invalid',id:sent.id}; // possession + freshness of the RETURNED key
   const fp=fingerprint(r.pubkey);
+  // on-PC pairing evidence: copied fields alone are NOT evidence, so they are CROSS-CHECKED. A FRESH
+  // mint terminal must carry the pairing record of the exact card the human approved, bound to THIS
+  // returned key: the recorded fingerprint must equal fp(returned pubkey), with the approving card id
+  // and the human-tap instant captured on the PC at approval time. An 'already enrolled' re-enroll
+  // carries no pairing (its original mint had its own card); any other terminal without pairing
+  // evidence REFUSES - a fresh key mint can never slip through as an approval-less registration.
+  const isReEnroll=String(term.note||'')==='already enrolled';
+  let pairing=null;
+  if(r.pairing&&typeof r.pairing==='object'){
+   const pr=r.pairing;
+   if(typeof pr.fingerprint!=='string'||pr.fingerprint!==fp||typeof pr.cardId!=='string'||pr.cardId.indexOf('local-approve-')!==0||!(+pr.approvedAt>0))
+    return {ok:false,stage:'pairing',reason:'pairing evidence mismatch',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
+   pairing={fingerprint:pr.fingerprint,cardId:pr.cardId,approvedAt:+pr.approvedAt};
+  }else if(!isReEnroll)return {ok:false,stage:'pairing',reason:'fresh mint without on-PC pairing evidence',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
   if(typeof approvePairing!=='function')return {ok:false,stage:'pairing',reason:'no pairing approval channel',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp}; // fail closed - never register unapproved
-  let approved=false;try{approved=(await approvePairing({deviceId:String(r.deviceId),pubkey:String(r.pubkey),fingerprint:fp,episode:String(sent.id),challenge}))===true}catch{approved=false} // STRICT true - a truthy string/object is NOT an approval; the callback receives the episode id + challenge so its decision binds to THIS enrollment
+  let approved=false;try{approved=(await approvePairing({deviceId:String(r.deviceId),pubkey:String(r.pubkey),fingerprint:fp,episode:String(sent.id),challenge,pairing}))===true}catch{approved=false} // STRICT true - a truthy string/object is NOT an approval; the callback receives the episode id + challenge + the cross-checked on-PC pairing record (null on a re-enroll claim) so its decision binds to THIS enrollment and THIS key
   if(!approved)return {ok:false,stage:'pairing',reason:'pairing not approved',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
   let reg;try{reg=await sender.controlPost('/glasswidgets/agent/enroll',{device_id:String(r.deviceId),pubkey:String(r.pubkey)})}catch(e){return {ok:false,stage:'registry',reason:String(e&&e.message||e),id:sent.id,deviceId:r.deviceId}}
   if(reg.status===200){
