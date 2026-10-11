@@ -155,61 +155,101 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
 
  // web_task (stage 7 pilot): drive a HIDDEN Chromium window (the app's own Electron) on the PC -
  // no visible window, no physical mouse/keyboard, isolated persistent profile (persist:agent-web).
- // Bounded: https/http only, <=20 steps, <=60s total, downloads+popups denied. ALWAYS behind an
- // island approval card (per task, no session grant); every task is audited.
+ // Hard bounds: https-only end to end (initial URL, gotos and redirects), private/local destinations
+ // blocked, <=20 steps, per-step timeout and a hard 60s task timeout that tears the window down.
+ // ALWAYS behind an island approval card (per task, no session grant) listing the real step plan;
+ // every step and the final outcome are audited.
+ const WEB_ALLOW_LOCAL=process.env.GLASSWIDGETS_WEB_TASK_ALLOW_LOCAL==='1'; // test hook only - production stays https-only + no local targets
+ function webUrlOk(u){
+  if(typeof u!=='string'||u.length>500)return false;
+  if(!/^https:\/\/\S+$/i.test(u)&&!(WEB_ALLOW_LOCAL&&/^http:\/\/\S+$/i.test(u)))return false;
+  if(WEB_ALLOW_LOCAL)return true;
+  let h;try{h=new URL(u).hostname.toLowerCase()}catch{return false}
+  if(h==='localhost'||h.endsWith('.localhost')||h.endsWith('.local')||h.endsWith('.internal')||h.endsWith('.lan')||h.endsWith('.home'))return false;
+  const m=h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if(m){const a=+m[1],b=+m[2];
+   if(a===0||a===10||a===127||(a===172&&b>=16&&b<=31)||(a===192&&b===168)||(a===169&&b===254)||a>=224)return false}
+  const v6=h.replace(/[\[\]]/g,'');
+  if(v6==='::1'||v6==='::'||/^(fe8|fe9|fea|feb|fc|fd)/i.test(v6))return false;
+  return true;
+ }
+ function webTaskResultCap(out){
+  // the worker rejects acks over ~3,500 chars of result JSON - shrink extracts until it fits
+  let s=JSON.stringify(out);
+  if(s.length<=2800)return out;
+  const texts=out.steps.filter(x=>typeof x.text==='string');
+  for(const cap of [400,150,40]){
+   for(const t of texts)if(t.text.length>cap)t.text=t.text.slice(0,cap)+'…';
+   s=JSON.stringify(out);if(s.length<=2800){out.truncated=true;return out}
+  }
+  for(const t of texts)delete t.text;
+  out.truncated=true;
+  return out;
+ }
  async function execWebTask(id,task){
   const url=String(task.url||'').trim();
-  if(!/^https?:\/\/\S+$/i.test(url)||url.length>500)return ack(id,'failed','bad url');
+  if(!webUrlOk(url)){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'url refused (https-only, no local targets)'});return ack(id,'failed','url refused - https only, no private/local targets')}
   const steps=(Array.isArray(task.steps)?task.steps:[]).slice(0,20);
   const {BrowserWindow}=require('electron');
-  let win=null;
+  let win=null,timedOut=false;
   const out={url:url.slice(0,300),steps:[]};
-  try{
+  const stepAudit=(i,d,ok,err)=>audit({kind:'web_task',stage:'step',task:String(id).slice(0,60),step:i,do:d,ok:!!ok,error:err?String(err).slice(0,150):undefined});
+  const body=async()=>{
    win=new BrowserWindow({show:false,width:1100,height:800,webPreferences:{sandbox:true,partition:'persist:agent-web'}});
    win.webContents.setWindowOpenHandler(()=>({action:'deny'}));
    win.webContents.session.on('will-download',e=>e.preventDefault());
-   const js=(code)=>win.webContents.executeJavaScript(code);
+   const guard=(e,u)=>{if(!webUrlOk(u)){e.preventDefault();audit({kind:'web_task',stage:'navigation_blocked',task:String(id).slice(0,60),url:String(u).slice(0,200)})}};
+   win.webContents.on('will-navigate',guard);
+   win.webContents.on('will-redirect',guard);
+   const js=(code)=>Promise.race([win.webContents.executeJavaScript(code),new Promise((_,rej)=>setTimeout(()=>rej(new Error('step timeout')),15000))]);
    const sel=x=>JSON.stringify(String(x||'').slice(0,200));
    await Promise.race([win.webContents.loadURL(url),new Promise((_,rej)=>setTimeout(()=>rej(new Error('load timeout')),20000))]);
-   const deadline=Date.now()+60000;
-   for(const st of steps){
-    if(Date.now()>deadline){out.steps.push({do:'*',ok:false,error:'task time budget exhausted'});break}
-    const d=String(st.do||'').toLowerCase();
+   for(let i=0;i<steps.length;i++){
+    if(timedOut)return;
+    const st=steps[i],d=String(st.do||'').toLowerCase();
     try{
-     if(d==='goto'){const u=String(st.url||'').slice(0,500);if(!/^https?:\/\/\S+$/i.test(u))throw new Error('bad goto url');
+     if(d==='goto'){const u=String(st.url||'').slice(0,500);if(!webUrlOk(u))throw new Error('goto url refused');
       await Promise.race([win.webContents.loadURL(u),new Promise((_,rej)=>setTimeout(()=>rej(new Error('goto timeout')),20000))]);out.steps.push({do:d,ok:true,url:u.slice(0,200)});}
      else if(d==='click'){const r=await js('(()=>{const el=document.querySelector('+sel(st.selector)+');if(!el)return false;el.click();return true})()');out.steps.push({do:d,ok:!!r});}
      else if(d==='type'){const r=await js('(()=>{const el=document.querySelector('+sel(st.selector)+');if(!el)return false;el.focus();el.value='+JSON.stringify(String(st.text||'').slice(0,500))+';el.dispatchEvent(new Event(\'input\',{bubbles:true}));el.dispatchEvent(new Event(\'change\',{bubbles:true}));return true})()');out.steps.push({do:d,ok:!!r});}
      else if(d==='wait'){await new Promise(r=>setTimeout(r,Math.min(Math.max(+st.ms||1000,100),10000)));out.steps.push({do:d,ok:true});}
      else if(d==='extract'){const t=await js('(()=>{const el=document.querySelector('+sel(st.selector||'body')+');return el?String(el.innerText||\'\').slice(0,1000):null})()');out.steps.push({do:d,ok:t!==null,text:t===null?undefined:t});}
      else if(d==='screenshot'){
-      const img=await win.webContents.capturePage();const buf=img.toPNG();
+      const img=await Promise.race([win.webContents.capturePage(),new Promise((_,rej)=>setTimeout(()=>rej(new Error('capture timeout')),15000))]);
+      const buf=img.toPNG();
       const u=new URL(uploadUrl);u.searchParams.set('name','webtask-'+String(id).replace(/[^\w-]/g,'').slice(0,40)+'.png');
-      const r=await fetch(u,{method:'POST',headers:{'content-type':'image/png','X-GW-Key':cmdKey},body:buf,signal:AbortSignal.timeout(60000)});
+      const r=await fetch(u,{method:'POST',headers:{'content-type':'image/png','X-GW-Key':cmdKey},body:buf,signal:AbortSignal.timeout(30000)});
       if(!r.ok)throw new Error('upload '+r.status);
       const j=await r.json().catch(()=>({}));if(!j.file_id)throw new Error('upload bad response');
       out.steps.push({do:d,ok:true,file_id:String(j.file_id),bytes:buf.length});}
-     else out.steps.push({do:d||'?',ok:false,error:'unknown step'});
-    }catch(se){out.steps.push({do:d,ok:false,error:String(se&&se.message||se).slice(0,150)});}
+     else{out.steps.push({do:d||'?',ok:false,error:'unknown step'});stepAudit(i,d,false,'unknown step');continue}
+     stepAudit(i,d,out.steps[out.steps.length-1].ok,out.steps[out.steps.length-1].error);
+    }catch(se){out.steps.push({do:d,ok:false,error:String(se&&se.message||se).slice(0,150)});stepAudit(i,d,false,se&&se.message||se)}
    }
+  };
+  try{
+   await Promise.race([body(),new Promise(res=>setTimeout(()=>{timedOut=true;if(win&&!win.isDestroyed())win.destroy();res()},60000))]);
+   if(timedOut){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:'hard task timeout 60s'});return ack(id,'failed','task timeout (60s hard limit)',webTaskResultCap(out))}
    audit({kind:'web_task',stage:'executed',url:url.slice(0,200),steps:out.steps.length,ok:out.steps.filter(x=>x.ok).length});
-   return ack(id,'done','web task: '+out.steps.filter(x=>x.ok).length+'/'+out.steps.length+' steps ok',out);
+   return ack(id,'done','web task: '+out.steps.filter(x=>x.ok).length+'/'+out.steps.length+' steps ok',webTaskResultCap(out));
   }catch(e){audit({kind:'web_task',stage:'failed',url:url.slice(0,200),error:String(e&&e.message||e).slice(0,200)});return ack(id,'failed',String(e&&e.message||'web task error').slice(0,200))}
   finally{if(win&&!win.isDestroyed())win.destroy()}
  }
  function webTask(id,task){
   const url=String(task&&task.url||'').trim();
-  if(!/^https?:\/\/\S+$/i.test(url))return ack(id,'failed','bad url');
+  if(!webUrlOk(url))return ack(id,'failed','url refused - https only, no private/local targets');
+  const steps=(Array.isArray(task.steps)?task.steps:[]).slice(0,20);
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps:task.steps},timer});
-  audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:Array.isArray(task.steps)?task.steps.length:0});
+  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
+  audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
   const label=String(task.label||'').slice(0,200);
-  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body:'השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url.slice(0,200)+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+  const plan=steps.map((st,i)=>{const d=String(st.do||'?').toLowerCase();const t=d==='goto'?String(st.url||'').slice(0,60):['click','type','extract'].includes(d)?String(st.selector||'').slice(0,40):d==='wait'?Math.min(+st.ms||1000,10000)+'ms':'';return (i+1)+'. '+d+(t?' '+t:'')}).join('\n').slice(0,700);
+  broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',body:'השרת מבקש לבצע משימת דפדפן נסתרת במחשב:'+(label?'\n'+label:'')+'\n'+url.slice(0,200)+(plan?'\n\nהצעדים:\n'+plan:'')+'\n\nהמשימה רצה ברקע בלבד ולא נוגעת במסך או בעכבר. בלי אישור - תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
  // update_app: the ONLY pre-authorized mutating command (the user's standing grant: app updates install
