@@ -903,7 +903,14 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // is localized, and whose names are unresolvable-SID ambiguous). The pure evaluator lives in
  // acl-check.js and is fixture-tested.
  const{evalAclDump}=require('./acl-check');
- const ACL_PS="$a=(Get-Acl -LiteralPath $args[0]).Access;$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$rules=@();foreach($x in $a){$sid=$null;try{$sid=$x.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$sid=[string]$x.IdentityReference};$rules+=@{sid=$sid;rights=[int64]$x.FileSystemRights;allow=($x.AccessControlType -eq 'Allow');inherited=[bool]$x.IsInherited}};@{me=$me;rules=$rules}|ConvertTo-Json -Compress -Depth 4";
+ // the dump also carries DACL protection + owner SID; the path travels via ENV (never argv
+ // interpolation), the script via -EncodedCommand (UTF-16LE base64) - no shell parsing of either.
+ const ACL_PS="$ErrorActionPreference='Stop';$p=$env:GW_ACL_PATH;$acl=Get-Acl -LiteralPath $p;$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$rules=@();foreach($x in $acl.Access){$sid=$null;try{$sid=$x.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$sid=[string]$x.IdentityReference};$rules+=@{sid=$sid;rights=[int64]$x.FileSystemRights;allow=($x.AccessControlType -eq 'Allow');inherited=[bool]$x.IsInherited}};$own=$null;try{$own=([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value}catch{$own=[string]$acl.Owner};@{me=$me;protected=[bool]$acl.AreAccessRulesProtected;owner=$own;rules=$rules}|ConvertTo-Json -Compress -Depth 4";
+ const aclDump=p=>{
+  const b64=Buffer.from(ACL_PS,'utf16le').toString('base64');
+  const out=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-EncodedCommand',b64],{env:{...process.env,GW_ACL_PATH:p},windowsHide:true,timeout:10000}).toString();
+  return JSON.parse(out);
+ };
  function currentSid(){
   if(process.platform!=='win32')return null;
   try{const out=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-Command','[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],{windowsHide:true,timeout:8000}).toString().trim();
@@ -912,9 +919,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  function aclOwnerOnly(p){
   if(process.platform!=='win32')return true;
   try{
-   const out=execFileSync('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-Command',ACL_PS,p],{windowsHide:true,timeout:10000}).toString();
-   const dump=JSON.parse(out);
-   return evalAclDump(dump,dump&&dump.me); // exact-SID, allow-only, non-inherited, rights-masked, single-ACE
+   const dump=aclDump(p);
+   return evalAclDump(dump,dump&&dump.me); // exact-SID, allow-only, non-inherited, rights-bounded, single-ACE, protected DACL, expected owner
   }catch{return false}
  }
  function aclHarden(p,isDir){
@@ -925,7 +931,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  let devKey=null,devId='',devPubB64='';
  function loadDevice(){
   try{
-   if(process.platform==='win32'&&!aclOwnerOnly(devFile())){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key fails closed
+   if(process.platform==='win32'&&(!aclOwnerOnly(devDir())||!aclOwnerOnly(devFile()))){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key (dir OR file) fails closed
    const j=JSON.parse(fs.readFileSync(devFile(),'utf8'));
    const priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});
    const pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64');
@@ -941,7 +947,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   try{
    fs.mkdirSync(dir,{recursive:true});
    if(process.platform==='win32'&&!aclHarden(dir,true)){audit({kind:'enroll_device',stage:'persist_fail',err:'dir acl'});return false}
-   fs.writeFileSync(tmp,JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600});
+   fs.writeFileSync(tmp,JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600,flag:'wx'}); // exclusive create - a pre-existing path is never rewritten
    if(process.platform==='win32'&&!aclHarden(tmp,false)){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:'file acl'});return false}
    fs.renameSync(tmp,f);
    return true;

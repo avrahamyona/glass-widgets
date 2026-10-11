@@ -383,13 +383,15 @@ const launch=async()=>{
 
  // 15f) tunnel transport authority is enforced at EXECUTION time: a card approved AFTER the
  // envelope expired is refused - the command never runs
- ts=Date.now();exp=Date.now()+2000; // live at intake, dead by approval time
+ ts=Date.now();exp=Date.now()+1500; // live at intake, dead by approval time
  const dataX={command:'echo SHOULD-NOT-RUN'};
  const sigX=sign('t7','run_command',ts,exp,JSON.stringify(dataX));
  const okX=await tunPost({id:'t7',kind:'run_command',ts,exp,sig:sigX,data:dataX});
  assert(okX.status===202,'short-lived signed envelope accepted at intake: '+JSON.stringify(okX));
  await card('SHOULD-NOT-RUN');
- await sleep(2500); // transport authority now expired (card TTL is 4000 - still parked)
+ await sleep(2200); // transport authority now expired (card TTL is 4000 - still parked)
+ const stillThere=await A.evaluate(()=>[...document.querySelectorAll('#pillBody .card')].some(e=>e.textContent.includes('SHOULD-NOT-RUN')));
+ assert(stillThere,'card still parked at approval time (inside the 1500..4000ms window)');
  await clickBtn('SHOULD-NOT-RUN','אשר');
  const aX=await waitAck('t7','failed');
  assert(/expired/.test(aX.note||''),'approval after transport expiry refused: '+aX.note);
