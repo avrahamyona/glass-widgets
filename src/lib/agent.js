@@ -417,31 +417,36 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  }
 
 
- // ui_automation: REAL screen input (mouse clicks at logical-pixel coordinates) - capability the user
- // explicitly granted (voice note 2026-10-11: build screen-click input so server-dispatched tasks like
- // the Efi Music update can drive the PC UI). Safety mirrors web_task: ALWAYS behind an island approval
- // card that lists the COMPLETE step plan (coords included); a worker Ed25519 pre-approval (payload =
- // JSON.stringify(steps as sent)) swaps it for a 5s cancelable auto-run card, and only tasks answering
- // an explicit user instruction get signed. Duplicate-id + persisted replay guards, hard caps (<=20
- // steps, wait<=10s each, coords must sit inside a real display), stop at the first failed click, and
- // every step lands in the audit log. Injection runs on Windows via ui-input.ps1 (user32 SetCursorPos /
- // mouse_event); other platforms refuse at exec. GLASSWIDGETS_UI_DRYRUN is a test-only hook.
+ // ui_automation: REAL screen input - PHYSICAL-PIXEL contract end to end. Steps carry physical
+ // screen coordinates (same-scale screenshot image pixels map 1:1: click = origin + image pixel).
+ // Each display's physical rect = Electron logical bounds * its scaleFactor; a click must land
+ // inside ONE actual display - never the gap-filled bounding box - validated on rounded coords when
+ // the command arrives and AGAIN right before each injection (displays can change mid-task).
+ // ui-input.ps1 sets per-monitor DPI awareness so SetCursorPos receives physical px, then VERIFIES
+ // the observed cursor position (3px tolerance); a refused or misplaced injection fails the step and
+ // stops the plan. Steps report INJECTED, never "target hit": what was under the cursor is verified
+ // by the screenshot loop, not claimed by the injector. A hard task deadline (default 120s) is
+ // checked before every step; a wait or input past it never runs. The rest mirrors web_task: the
+ // island card shows the COMPLETE plan, a worker Ed25519 pre-approval (payload = JSON.stringify
+ // (steps as sent)) is reserved for tasks answering an explicit user instruction, duplicate-id +
+ // persisted replay guards, per-step audit. GLASSWIDGETS_UI_DRYRUN is a test-only hook.
  const UI_ACTIONS=['click','dblclick','rclick','move','wait'];
  const UI_DRYRUN=process.env.GLASSWIDGETS_UI_DRYRUN==='1';
  const UI_PS1=path.join(__dirname,'ui-input.ps1');
- function uiBounds(){let r={minX:0,minY:0,maxX:0,maxY:0};try{const ds=screen.getAllDisplays();
-   r.minX=Math.min(...ds.map(d=>d.bounds.x));r.minY=Math.min(...ds.map(d=>d.bounds.y));
-   r.maxX=Math.max(...ds.map(d=>d.bounds.x+d.bounds.width));r.maxY=Math.max(...ds.map(d=>d.bounds.y+d.bounds.height))}catch{}
-  return r}
+ const UI_TASK_MS=+process.env.GLASSWIDGETS_UI_TASK_MS||120000; // hard whole-task deadline
+ function uiDisplays(){ // physical-pixel rects, one entry per ACTUAL display
+  try{return screen.getAllDisplays().map(d=>{const sf=d.scaleFactor||1;
+   return {x:Math.round(d.bounds.x*sf),y:Math.round(d.bounds.y*sf),w:Math.round(d.bounds.width*sf),h:Math.round(d.bounds.height*sf)}})}catch{return []}
+ }
+ function uiPointOk(x,y){return uiDisplays().some(r=>x>=r.x&&x<r.x+r.w&&y>=r.y&&y<r.y+r.h)}
  function uiStepsOk(raw){
   if(!Array.isArray(raw)||!raw.length||raw.length>20)return false;
-  const b=uiBounds();
   for(const st of raw){if(!st||typeof st!=='object')return false;
    const d=String(st.do||'').toLowerCase();
    if(!UI_ACTIONS.includes(d))return false;
    if(d==='wait'){const ms=+st.ms;if(!Number.isFinite(ms)||ms<100||ms>10000)return false;continue}
-   const x=+st.x,y=+st.y;
-   if(!Number.isFinite(x)||!Number.isFinite(y)||x<b.minX||x>=b.maxX||y<b.minY||y>=b.maxY)return false}
+   const x=Math.round(+st.x),y=Math.round(+st.y);
+   if(!Number.isFinite(x)||!Number.isFinite(y)||!uiPointOk(x,y))return false}
   return true}
  function uiPlan(steps){return steps.map((st,i)=>{const d=String(st.do||'?').toLowerCase();
    if(d==='wait')return (i+1)+'. המתנה '+Math.round(+st.ms)+'ms';
@@ -450,23 +455,28 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
  function uiStep(d,x,y){return new Promise(res=>{
   if(UI_DRYRUN)return res({ok:true,dry:true});
   if(process.platform!=='win32')return res({ok:false,error:'ui input is supported on Windows only'});
-  execFile('powershell',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',UI_PS1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:10000,windowsHide:true},(e,so,se)=>res(e?{ok:false,error:String(se||e.message||e).slice(0,150)}:{ok:true}));
+  execFile('powershell',['-NoP','-NonI','-ExecutionPolicy','Bypass','-File',UI_PS1,'-X',String(x),'-Y',String(y),'-Action',d],{timeout:10000,windowsHide:true},
+   (e,so,se)=>res(e?{ok:false,error:String(se||so||e.message||e).replace(/\s+/g,' ').trim().slice(0,150)}:{ok:true}));
  })}
  async function execUi(id,steps){
-  const out={steps:[]};
+  const out={steps:[],coord:'physical'};const deadline=Date.now()+UI_TASK_MS;
   for(let i=0;i<steps.length;i++){
+   if(Date.now()>=deadline){out.deadline=true;audit({kind:'ui_automation',stage:'deadline',task:String(id).slice(0,60),step:i});break} // stop BEFORE the next input
    const st=steps[i],d=String(st.do||'').toLowerCase();
    if(d==='wait'){await new Promise(r=>setTimeout(r,Math.round(+st.ms)));out.steps.push({do:d,ok:true});
     audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,ok:true});continue}
-   const x=Math.round(+st.x),y=Math.round(+st.y),r=await uiStep(d,x,y);
-   out.steps.push({do:d,x,y,ok:r.ok,...(r.error?{error:r.error}:{}),...(r.dry?{dry:true}:{})});
-   audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,ok:r.ok,error:r.error});
-   if(!r.ok)break; // stop at the first failed click - never keep clicking blind
+   const x=Math.round(+st.x),y=Math.round(+st.y);
+   if(!uiPointOk(x,y)){out.steps.push({do:d,x,y,ok:false,error:'point no longer inside a display'});
+    audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,ok:false,error:'pre-exec revalidation failed'});break}
+   const r=await uiStep(d,x,y);
+   out.steps.push({do:d,x,y,ok:r.ok,injected:!!r.ok,...(r.error?{error:r.error}:{}),...(r.dry?{dry:true}:{})});
+   audit({kind:'ui_automation',stage:'step',task:String(id).slice(0,60),step:i,do:d,x,y,injected:!!r.ok,error:r.error});
+   if(!r.ok)break; // stop at the first failed injection - never keep clicking blind
   }
   const ok=out.steps.filter(s=>s.ok).length;
-  audit({kind:'ui_automation',stage:'executed',task:String(id).slice(0,60),steps:out.steps.length,ok});
-  return ok===out.steps.length?ack(id,'done','ui: '+ok+'/'+out.steps.length+' steps ok',out)
-   :ack(id,'failed','ui: stopped at first failure ('+ok+'/'+out.steps.length+' ok)',out);
+  audit({kind:'ui_automation',stage:'executed',task:String(id).slice(0,60),steps:out.steps.length,ok,deadline:!!out.deadline});
+  if(ok===steps.length)return ack(id,'done','ui: '+ok+'/'+steps.length+' inputs injected',out);
+  return ack(id,'failed','ui: stopped ('+ok+'/'+steps.length+' injected'+(out.deadline?', task deadline':'')+') - injection is not target success, verify by screenshot',out);
  }
  function uiAutomation(id,m){
   const rawSteps=Array.isArray(m.steps)?m.steps:[];
@@ -503,28 +513,30 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,updateApp,mediaCmd}){
   broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
 
- // screenshot: read-only full-screen capture of the primary display, uploaded to the worker as a PNG
- // (the same channel as get_file / web_task screenshots). No approval card - it only reads the screen
- // back to its owner, like clipboard_read; every capture is audited. The ack carries the display's
- // logical size + scaleFactor so ui_automation coordinates (logical pixels) can be computed from the
- // returned image's pixels (logical = pixel / scale).
+ // screenshot: read-only full-screen capture of the PRIMARY display at its physical pixel size,
+ // uploaded to the worker as a PNG (same channel as get_file / web_task). FAILS CLOSED when the
+ // primary display's capture source cannot be matched - never returns a different screen carrying
+ // primary geometry. No approval card (read-only, like clipboard_read); every capture is audited.
+ // The ack carries the display's physical origin + scale so image pixels map 1:1 onto ui_automation
+ // physical coordinates: click_x = origin_x + img_x, click_y = origin_y + img_y.
  async function screenshotCmd(id){
   try{
    const {desktopCapturer}=require('electron');
    const prim=screen.getPrimaryDisplay(),sf=prim.scaleFactor||1;
    const w=Math.max(1,Math.round(prim.size.width*sf)),h=Math.max(1,Math.round(prim.size.height*sf));
    const srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:w,height:h}});
-   if(!srcs||!srcs.length){audit({kind:'screenshot',stage:'failed',error:'no source'});return ack(id,'failed','no screen source')}
-   const src=srcs.find(s=>String(s.display_id)===String(prim.id))||srcs[0];
+   const src=(srcs||[]).find(s=>String(s.display_id)===String(prim.id));
+   if(!src){audit({kind:'screenshot',stage:'failed',error:'primary source not found'});return ack(id,'failed','primary display source not found - refused to guess')}
    const sz=src.thumbnail.getSize();
    if(!sz.width||!sz.height){audit({kind:'screenshot',stage:'failed',error:'empty capture'});return ack(id,'failed','empty capture')}
+   const ox=Math.round(prim.bounds.x*sf),oy=Math.round(prim.bounds.y*sf);
    const buf=src.thumbnail.toPNG();
    const u=new URL(uploadUrl);u.searchParams.set('name','screenshot-'+String(id).replace(/[^\w-]/g,'').slice(0,40)+'.png');
    const r=await fetch(u,{method:'POST',headers:{'content-type':'image/png','X-GW-Key':cmdKey},body:buf,signal:AbortSignal.timeout(30000)});
    if(!r.ok)return ack(id,'failed','upload '+r.status);
    const j=await r.json().catch(()=>({}));if(!j.file_id)return ack(id,'failed','upload bad response');
    audit({kind:'screenshot',stage:'captured',bytes:buf.length,width:sz.width,height:sz.height});
-   return ack(id,'done','screenshot '+sz.width+'x'+sz.height,{file_id:String(j.file_id),bytes:buf.length,img_width:sz.width,img_height:sz.height,logical_width:prim.size.width,logical_height:prim.size.height,scale:sf,display_id:String(prim.id)});
+   return ack(id,'done','screenshot '+sz.width+'x'+sz.height,{file_id:String(j.file_id),bytes:buf.length,img_width:sz.width,img_height:sz.height,origin_x:ox,origin_y:oy,logical_width:prim.size.width,logical_height:prim.size.height,scale:sf,display_id:String(prim.id),coord:'physical: click = origin + image pixel'});
   }catch(e){audit({kind:'screenshot',stage:'failed',error:String(e&&e.message||e)});return ack(id,'failed','screenshot error')}
  }
 
