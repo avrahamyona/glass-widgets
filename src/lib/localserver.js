@@ -7,13 +7,19 @@ const http=require('http');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log}){
+function startLocalServer({port,token,version,caps,onCommand,log,deviceId,deviceSign}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
   const reply=(code,obj)=>{const s=JSON.stringify(obj);res.writeHead(code,{'content-type':'application/json','content-length':Buffer.byteLength(s)});res.end(s)};
   if(req.headers['x-gw-key']!==token){say('warn',{kind:'server',stage:'auth_fail',method:req.method,url:String(req.url).slice(0,60)});return reply(403,{ok:false,error:'auth'})}
-  if(req.method==='GET'&&req.url==='/health')return reply(200,{ok:true,v:version||'',caps:caps||''});
+  if(req.method==='GET'&&req.url.startsWith('/health')){
+   // sender-side identity proof: with ?nonce= the server signs deviceId+nonce with the per-device
+   // key, so the sender verifies the endpoint holds the enrolled device key BEFORE any payload.
+   const body={ok:true,v:version||'',caps:caps||''};
+   if(deviceId&&deviceSign){const nonce=(req.url.split('nonce=')[1]||'').split('&')[0];
+    if(/^[A-Za-z0-9_-]{8,64}$/.test(nonce)){try{body.deviceId=deviceId;body.sig=deviceSign(nonce)}catch{}}}
+   return reply(200,body)}
   if(req.method==='POST'&&req.url==='/cmd'){
    let n=0,chunks=[];
    req.on('data',c=>{n+=c.length;if(n>BODY_CAP){say('warn',{kind:'server',stage:'body_cap',bytes:n});reply(413,{ok:false,error:'too_large'});req.destroy()}else chunks.push(c)});
