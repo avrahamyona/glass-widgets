@@ -925,7 +925,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // task-result polling from the same durable record, so no crash window can strand a command
  // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
  const{createLedger,RESULT_TTL_MS,RESULT_CAP,capResult}=require('./ledger');
-const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIEWED durable store - the pairing journal lives here, no weaker local copy
+const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable store, packed with the app (src/**) - the pairing journal lives here, no weaker local copy
  const{fingerprint}=require('./fingerprint'); // pairing fingerprint: the PC-side local source the user compares against the sender's approval request
  const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
  // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
@@ -1081,6 +1081,7 @@ const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIE
  // the pairing journal lives in the REVIEWED durable store (server/lib/outbox-file.js: fail-closed
  // sync/privacy/short-write, immutable envelope + one-way receipt). No local re-implementation.
  let journalStore=null,journalTried=false;
+ const pendingRecovery=new Set(); // in-flight boot-recovery ops - stop() drains them before the journal lease closes
  const journal=()=>{
   if(journalStore||journalTried)return journalStore;
   journalTried=true;
@@ -1096,7 +1097,6 @@ const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIE
  const writePairingPending=async r=>{const j=journal();if(!j)return false;
   try{return (await j.put(String(r.cmdId),{envelope:{v:1,cmdId:String(r.cmdId),cardId:String(r.cardId||''),fingerprint:String(r.fingerprint||''),pubB64:String(r.pubB64||''),challenge:r.challenge?String(r.challenge):null,exp:+r.exp||0,stagedAt:Date.now()},receipt:null}))===true}
   catch(e){audit({kind:'enroll_device',stage:'pairing_persist_failed',id:String(r&&r.cmdId||'').slice(0,40),err:String(e&&e.message||e).slice(0,120)});return false}};
- const readPairingPending=async cmdId=>{const j=journal();if(!j)return null;try{return await j.get(String(cmdId))}catch{return null}};
  const approvePairingPending=async(cmdId,approvedAt)=>{ // receipt null->set: the approval evidence is durable BEFORE any key persist - no evidence, no effect
   const j=journal();if(!j)return false;
   try{const cur=await j.get(String(cmdId));if(!cur||!cur.envelope)return false;
@@ -1149,18 +1149,30 @@ const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIE
  //  approved + a DIFFERENT key on disk                         -> failed 'superseded' (never success on another key)
  //  anything unreadable or impossible (staged but persisted)   -> PRESERVE unknown, keep the record, audit
  for(const rid of readPairingPendings()){
-  (async()=>{
-   const jr=await readPairingPending(rid);
-   if(!jr||!jr.envelope||typeof jr.envelope!=='object'){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unreadable'});return} // preserve unknown, keep the record
-   const env=jr.envelope,approvedAt=jr.receipt&&+jr.receipt.approvedAt>0?+jr.receipt.approvedAt:0;
-   let diskPub=null;try{const dj=JSON.parse(fs.readFileSync(devFile(),'utf8'));if(typeof dj.pub==='string')diskPub=dj.pub}catch{} // no file = no persisted identity
-   const fpMatch=!!(diskPub&&env.pubB64&&diskPub===String(env.pubB64)&&fingerprint(diskPub)===env.fingerprint);
+  const pr=(async()=>{
+   const j=journal();
+   if(!j){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unavailable'});return}
+   let jr=null;try{jr=await j.get(rid)}catch(e){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unreadable'});return} // corrupt/foreign record: preserve unknown, keep the file
+   const env=jr&&jr.envelope;
+   const schemaOk=env&&typeof env==='object'&&!Array.isArray(env)&&env.v===1&&String(env.cmdId||'')===rid
+    &&typeof env.pubB64==='string'&&env.pubB64.length>0&&typeof env.fingerprint==='string'&&fingerprint(env.pubB64)===env.fingerprint
+    &&String(env.cardId||'')===pairingCardId(rid)&&(env.challenge==null||typeof env.challenge==='string')
+    &&(jr.receipt==null||(jr.receipt&&typeof jr.receipt==='object'&&!Array.isArray(jr.receipt)&&+jr.receipt.approvedAt>0));
+   if(!schemaOk){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal schema'});return} // a record that is not EXACTLY ours never drives a terminal
+   let durable=false;try{durable=await j.confirm(rid)===true}catch{durable=false} // reopen cannot remember a failed dir sync: a receipt without a FRESH fsync is not approval evidence
+   if(!durable){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'durability unconfirmed'});return}
+   const approvedAt=jr.receipt?+jr.receipt.approvedAt:0;
+   // disk identity: ABSENT (no file) is evidence; EXISTING but not loaded (ACL, priv/pub mismatch,
+   // corrupt) is UNVERIFIABLE - loadDevice already judged at boot, its verdict is reused, never a raw read
+   if(fs.existsSync(devFile())&&!devKey){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'device key invalid or unverifiable'});return}
+   const diskPub=devKey?devPubB64:null; // the VERIFIED loaded keypair only
+   const fpMatch=!!(diskPub&&diskPub===env.pubB64); // schema already proved fingerprint(env.pubB64)
    let term=null;
    if(!approvedAt){
     if(fpMatch){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'staged journal but candidate key persisted'});return} // impossible order - never claim
     term={status:'failed',note:'cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר'}; // exact: no approval receipt, no key from THIS episode
    }else if(fpMatch){ // approval + persist BOTH landed; only the terminal was lost to the crash
-    term={status:'done',note:'enrolled',result:{deviceId:crypto.createHash('sha256').update(diskPub).digest('hex').slice(0,16),pubkey:diskPub,...chProofFor(env.challenge?{challenge:String(env.challenge)}:{}),pairing:{fingerprint:env.fingerprint,cardId:String(env.cardId||''),approvedAt}}};
+    term={status:'done',note:'enrolled',result:{deviceId:devId,pubkey:diskPub,...chProofFor(env.challenge?{challenge:String(env.challenge)}:{}),pairing:{fingerprint:env.fingerprint,cardId:String(env.cardId||''),approvedAt}}};
    }else if(!diskPub){ // approval landed, persist did not (crash in the gap)
     term={status:'failed',note:'approved but the key persist did not complete - האישור נרשם אך המפתח לא נשמר'};
    }else{ // approval landed but a DIFFERENT key is on disk
@@ -1169,11 +1181,13 @@ const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIE
    audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:rid.slice(0,40),fingerprint:env.fingerprint||undefined,approved:!!approvedAt,terminal:term.status});
    const rec=ledger.get(rid);
    if(rec&&rec.status==='unknown'&&rec.result==null)ledger.reconcileUnknown(rid,term); // narrow: FINAL unknown with NO recorded result, and ONLY under this journal+disk evidence - never a generic unknown rewrite
-   await ack(rid,term.status,term.note,term.result); // the SSE ack ALWAYS fires; ledger.put is a no-op on the reconciled FINAL record
    const back=ledger.get(rid);
-   if(back&&back.status===term.status){clearPairingPending(rid);pendingEnrollRead={id:rid,device:devId,until:Date.now()+120000}} // the sender can still fetch THIS terminal under '-'
-   else audit({kind:'enroll_device',stage:'pairing_recovery_unverified',id:rid.slice(0,40)}); // recovery record PRESERVED for the next boot
+   const exact=!!(back&&back.status===term.status&&JSON.stringify(back.result||null)===JSON.stringify(term.result||null)); // FULL expected record (status+result), not status alone
+   if(!exact){audit({kind:'enroll_device',stage:'pairing_recovery_unverified',id:rid.slice(0,40),want:term.status,got:back&&back.status||'missing'});return} // the durable store did not commit the computed terminal - NEVER declare it on the wire
+   await ack(rid,term.status,term.note,term.result); // external ack only AFTER the exact durable terminal is verified
+   clearPairingPending(rid);pendingEnrollRead={id:rid,device:devId,until:Date.now()+120000}; // the sender can still fetch THIS terminal under '-'
   })().catch(e=>audit({kind:'enroll_device',stage:'pairing_recovery_error',id:rid.slice(0,40),err:String(e&&e.message||e).slice(0,120)}));
+  pendingRecovery.add(pr);pr.finally(()=>pendingRecovery.delete(pr));
  }
  let tunnelStop=null,heartbeat=null;
  let currentTunnelUrl='';
@@ -1202,6 +1216,9 @@ const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIE
   tunnelStop=t.stop;
  }
  if(cmdKey)resolveFolders().then(()=>{if(folders.length)loop()});
- return {stop:()=>{stop=true;clearInterval(heartbeat);if(tunnelStop)tunnelStop();if(srvStop)srvStop()}};
+ return {stop:async()=>{stop=true;clearInterval(heartbeat);if(tunnelStop)tunnelStop();if(srvStop)srvStop();
+  await Promise.allSettled([...pendingRecovery]); // in-flight recovery finishes BEFORE the journal lease closes
+  if(journalStore){try{journalStore.close()}catch{}journalStore=null;journalTried=false} // an in-process restart re-acquires cleanly (a same-PID live lock would refuse)
+ }};
 }
 module.exports=startAgent;

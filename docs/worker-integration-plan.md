@@ -25,6 +25,7 @@ Quota rollout / external-service gates are never on the critical path of the PC 
   The code as written only mints worker-signed enroll_device envelopes; the /enroll endpoint requires the private reply key, so the order above is the only safe wiring.
 - Locus: worker/tunnel-route.js (enroll route EXISTS), src/lib/agent.js enroll_device handler (EXISTS, idempotent), src/lib/tunnel.js publish loop (EXISTS).
 - Verify: live round-trip on a staging worker: fresh profile enrolls, re-enroll same id+pubkey is idempotent, different pubkey refused, device limit enforced, and the PC config/data dir provably contains NO sender secret. Evidence: worker logs + agent audit + ledger record.
+- Sender composition: preEnroll (unpinned) senders are BOOTSTRAP-ONLY. After a successful owner pairing, every later sender MUST be composed pinned (devicePub + device); unpinned re-enroll is refused by design (the 'already enrolled' note is untrusted). A paired flow that cannot pin is a composition bug, never a reason to reopen bootstrap.
 
 ### A2. Read signer (MISSING)
 - What: worker route that authorizes /task (and /info) reads: signs the six-field read canonical exactly as the handler verifies it - [method, path, query, ts, nonce, device] joined by newlines - with GW_SIGN_PRIVATE, so the agent's verifyReadAuth (EXISTS, device-bound) returns 200; wrong sig / stale ts / replayed nonce -> 403 read_auth. (403 device_required is only the STRICT_ENVELOPES v1-command refusal; read failures surface as read_auth.)

@@ -146,5 +146,15 @@ const realOpen=fs.openSync;
  }
  b4.close();
  fs.rmSync(dir,{recursive:true,force:true});
- console.log('SENDER-OUTBOX-UNIT: PASS');
+ // in-process lifecycle: create -> close -> create on the SAME dir with the SAME live pid must work
+// (the agent stop() path closes the journal before any restart; a stale same-pid lock would refuse)
+{const d=fs.mkdtempSync('/tmp/gw-outbox-life-');
+ const b1=createFileOutbox(d);await b1.put('life1',{envelope:{x:1},receipt:null});b1.close();
+ const b2=createFileOutbox(d);
+ assert((await b2.get('life1'))&&JSON.stringify((await b2.get('life1')).envelope)==='{"x":1}','record readable after close+reopen in the same process');
+ assert(await b2.put('life2',{envelope:{y:2},receipt:null})===true,'write works after close+reopen in the same process');
+ b2.close();
+ const b3=createFileOutbox(d);b3.close(); // a third cycle: no residue blocks re-acquire
+ console.log('OUTBOX-LIFECYCLE: PASS')}
+console.log('SENDER-OUTBOX-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});

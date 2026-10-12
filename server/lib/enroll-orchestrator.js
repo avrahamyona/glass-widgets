@@ -8,6 +8,11 @@
 //     never the device origin)
 // Safe order: the PC never receives a sender secret; a bare self-signed pubkey is never
 // registered. Re-enroll of the same device resolves idempotently (already:true).
+// SENDER COMPOSITION RULE (hardened): preEnroll (unpinned) senders are BOOTSTRAP-ONLY - an
+// unpinned re-enroll is refused (the 'already enrolled' note is untrusted and bypasses nothing).
+// After a successful owner pairing the composition MUST construct every later sender PINNED
+// (devicePub + device from this run's result or the registry record); a paired flow that cannot
+// pin is a composition bug, never a reason to reopen the bootstrap path.
 const crypto=require('crypto');
 const{CHALLENGE_RE,verifyChallenge}=require('../../src/lib/enroll-challenge');
 const{fingerprint}=require('../../src/lib/fingerprint'); // ONE canonical - the PC shows the SAME string locally, so the user can compare
