@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 6 (SHA נעוץ, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 7 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - הקוד מעניק R+W בכוונת least-privilege, FullControl נדרש רק לתיקייה)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -73,7 +73,9 @@ try{
     if($rules.Count -ne 1){throw ('ACL rule count != 1 on '+$p+': '+$rules.Count)}
     $ruleSid=$rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
     if($ruleSid -ne $mySid){throw ('ACL rule SID is not the current user on '+$p+': '+$ruleSid)}
-    if($rules[0].FileSystemRights -notmatch 'FullControl'){throw ('ACL rights not FullControl on '+$p+': '+$rules[0].FileSystemRights)}
+    $rw=[string]$rules[0].FileSystemRights
+    if($isDir){ if($rw -notmatch 'FullControl'){throw ('ACL rights not FullControl on dir '+$p+': '+$rw)} }
+    elseif($rw -notmatch 'FullControl' -and ($rw -notmatch 'Read' -or $rw -notmatch 'Write')){throw ('ACL rights missing Read/Write on file '+$p+': '+$rw)} # files: the code grants owner R+W by design (least privilege) - FullControl is NOT required for privacy
     if($rules[0].AccessControlType -ne 'Allow'){throw ('ACL rule is not Allow on '+$p)}
   }
   Assert-OwnerOnlyAcl $devFile $false
