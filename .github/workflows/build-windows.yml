@@ -59,6 +59,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: GlassWidgets-win, path: dist/*.exe }
       - name: Release
+        if: github.event_name == 'push' # a branch-dispatch build produces a TEST artifact only - never a published release
         shell: bash
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
