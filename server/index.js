@@ -43,7 +43,7 @@ if(devExists){
  // write access to the DIR could replace the identity even when the file itself is owner-only
  if(process.platform==='win32'&&(!aclOwnerOnly(dataDir)||!aclOwnerOnly(devFile)))throw new Error('device identity ACL failed (dir or file not owner-only) - refusing to boot');
  devRaw=fs.readFileSync(devFile,'utf8');
- device=JSON.parse(devRaw); // a CORRUPT file throws here - boot fails loud, identity never silently renews
+ try{device=JSON.parse(devRaw)}catch(e){throw new Error('device identity file is corrupt JSON ('+String(e&&e.message||e).slice(0,80)+') - refusing to boot over a corrupt identity')} // a CORRUPT file fails boot loud and ATTRIBUTED - identity never silently renews
  if(!device||!device.priv||!device.pub||derivePub(device.priv)!==device.pub)throw new Error('device identity file failed the private/public pair check - refusing to boot over a corrupt identity');
  const want=crypto.createHash('sha256').update(device.pub).digest('hex').slice(0,16);
  if(device.id!==want)throw new Error('device id does not match its pubkey - refusing to boot over a corrupt identity');
