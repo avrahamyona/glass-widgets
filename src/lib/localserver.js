@@ -1,13 +1,14 @@
 // Embedded localhost HTTP server: the "own server" leg (Efi's model - server on his PC, exposed by
 // an outbound tunnel; no VPS, no open ports). cloudflared proxies https://<tunnel> to this listener.
 // Electron-free by design so tests/agent-server-unit.js can run it directly.
-// Auth: every request must carry the agent command key (X-GW-Key); the listener binds to
-// 127.0.0.1 only, so it is unreachable from the LAN - the tunnel is the only way in.
+// Auth: every request must carry the agent command key (X-GW-Key). The listener binds to
+// 127.0.0.1 by default, so it is unreachable from the LAN; a non-loopback host is an explicit,
+// audited opt-in (bind_lan) for the direct phone->PC path - envelope/read auth is unchanged.
 const http=require('http'),crypto=require('crypto');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth}){
+function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth,host}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
@@ -80,9 +81,11 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
   }
   reply(404,{ok:false,error:'not_found'});
  });
+ const bindHost=host||'127.0.0.1';
+ if(bindHost!=='127.0.0.1'&&bindHost!=='::1'&&bindHost!=='localhost')say('warn',{kind:'server',stage:'bind_lan',host:String(bindHost).slice(0,64)}); // LAN exposure is always audited; the trust model (public token + signed envelopes/reads) does not change
  return new Promise(resolve=>{
   server.on('error',e=>{say('warn',{kind:'server',stage:'listen_fail',err:String(e&&e.code||e)});resolve({started:false,reason:String(e&&e.code||e)})});
-  server.listen(port,'127.0.0.1',()=>{const bound=server.address().port;say('info',{kind:'server',stage:'listening',port:bound});resolve({started:true,port:bound,stop:()=>new Promise(r=>server.close(r))})});
+  server.listen(port,bindHost,()=>{const bound=server.address().port;say('info',{kind:'server',stage:'listening',port:bound,host:bindHost});resolve({started:true,port:bound,host:bindHost,stop:()=>new Promise(r=>server.close(r))})});
  });
 }
 module.exports={startLocalServer,BODY_CAP};

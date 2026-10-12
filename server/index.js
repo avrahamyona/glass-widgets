@@ -70,7 +70,7 @@ const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().
 const{createVerifier}=require('./lib/verify');
 const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
 async function main(){
- const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),token:cfg.token,version:'server-0.1.0',caps:deriveCaps(OPS),
+ const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.1.0',caps:deriveCaps(OPS),
   getDevice:()=>({deviceId:device.id,deviceSign}),
   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
   getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub,fingerprint:fingerprint(device.pub)}),

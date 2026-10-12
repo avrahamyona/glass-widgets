@@ -11,6 +11,25 @@ async function main(){
  {const r=await startLocalServer({port:0,token:'',version:'x',caps:'',onCommand:()=>({accepted:true})});
   assert(r.started===false&&r.reason==='no-token','no-token refuses: '+JSON.stringify(r))}
 
+ // 1b) bind address: the default is loopback-ONLY (a LAN-IP request must not be answered);
+ // a non-loopback host is an explicit opt-in and is audited (bind_lan)
+ {const os=require('os');
+  const lan=(Object.values(os.networkInterfaces()).flat().find(i=>i&&i.family==='IPv4'&&!i.internal)||{}).address;
+  if(lan){
+   {const rl=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true})});
+    let refused=false;try{const x=await fetch('http://'+lan+':'+rl.port+'/health',{headers:{'X-GW-Key':TOKEN},signal:AbortSignal.timeout(3000)});refused=(x.status!==200)}catch{refused=true}
+    assert(refused,'default bind must be loopback-only - the LAN IP must not answer');
+    assert(rl.host==='127.0.0.1','default host reported as loopback');
+    await rl.stop()}
+   const lanLogs=[];
+   {const rw=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),host:'0.0.0.0',log:(l,o)=>lanLogs.push({l,...o})});
+    assert(rw.started&&rw.host==='0.0.0.0','host opt-in reported in the result');
+    const h=await fetch('http://'+lan+':'+rw.port+'/health',{headers:{'X-GW-Key':TOKEN},signal:AbortSignal.timeout(3000)});
+    assert(h.status===200,'LAN bind answers on the LAN IP');
+    assert(lanLogs.some(l=>l.stage==='bind_lan'),'LAN bind is audited (bind_lan stage)');
+    await rw.stop()}
+  }else console.log('note: no LAN interface here - bind test skipped');}
+
  const calls=[];
  const logs=[];
  const r=await startLocalServer({port:0,token:TOKEN,version:'0.4.61',caps:'approve,update',
