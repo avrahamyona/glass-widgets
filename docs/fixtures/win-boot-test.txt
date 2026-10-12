@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 10 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - R+W בכוונת least-privilege, FullControl רק לתיקייה; תיקון v8: verify-sig.js עם String.fromCharCode(10); תיקון v9: PASS 7 מייחס משני הזרמים; תיקון v10: החוזה האמיתי = exit לא-אפס + אין listener + הזהות לא שוכתבה (SyntaxError גולמי של b78d70e מקובל) + ProgressPreference מושתק)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 11 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - R+W בכוונת least-privilege, FullControl רק לתיקייה; תיקון v8: verify-sig.js עם String.fromCharCode(10); תיקון v9: PASS 7 מייחס משני הזרמים; תיקון v10: החוזה האמיתי = exit לא-אפס + אין listener + הזהות לא שוכתבה (SyntaxError גולמי של b78d70e מקובל) + ProgressPreference מושתק; תיקון v11: `n מילולי בשורה 25 הוחלף בשורה אמיתית - כל הקובץ אומת במנתח PowerShell אמיתי, 0 שגיאות)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -22,7 +22,8 @@
 #
 # גם אם משהו נכשל - הכל נשמר ב-boot-test-log.txt. שלח אותו כמו שהוא.
 # =================================================================
-$ErrorActionPreference='Stop'`n$ProgressPreference='SilentlyContinue' # no progress CLIXML in redirected child streams
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue' # no progress CLIXML in redirected child streams
 $scriptDir=$PSScriptRoot; if(-not $scriptDir){$scriptDir=(Get-Location).Path}
 $logPath=Join-Path $scriptDir 'boot-test-log.txt'
 try{Start-Transcript -Path $logPath -Force | Out-Null}catch{}
