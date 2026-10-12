@@ -1,0 +1,65 @@
+﻿# =================================================================
+# דחיפת wip-0465 ל-GitHub מהמחשב - גרסה 1
+# למה מהמחשב? הטוקן ב-vault נגיש רק לדפדפן (לא ל-git בשורת הפקודה),
+# ו-gh על המחשב כבר מאומת עם scope של workflow. הקובץ wip0465.bundle
+# מכיל את כל ההיסטוריה - כל ה-SHA נשמרים בדיוק (כולל גידור 0d1af63).
+#
+# הרצה (דרך אחת מדויקת):
+#   1. שמור על שולחן העבודה את שני הקבצים: win-push-wip.txt וגם wip0465.bundle
+#   2. פתח PowerShell והדבק שתי שורות:
+#      $d=[Environment]::GetFolderPath('Desktop'); Copy-Item "$d\win-push-wip.txt" "$d\push-wip.ps1" -Force
+#      powershell -ExecutionPolicy Bypass -File "$d\push-wip.ps1"
+#   3. בסוף: שלח בחזרה את כל הטקסט על המסך + push-wip-log.txt משולחן העבודה
+# =================================================================
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+$d=[Environment]::GetFolderPath('Desktop')
+$logPath=Join-Path $d 'push-wip-log.txt'
+try{Start-Transcript -Path $logPath -Force | Out-Null}catch{}
+function Say($m){Write-Host $m}
+$work=$null
+function Run-Cmd([string]$line,[string]$tag){
+  $o=Join-Path $env:TEMP ("pc-out-$tag.txt"); $e=Join-Path $env:TEMP ("pc-err-$tag.txt")
+  cmd /c "$line 1> `"$o`" 2> `"$e`"" | Out-Null
+  $code=$LASTEXITCODE
+  $ot=(Get-Content $o -Raw -ErrorAction SilentlyContinue); if($ot){Say $ot.TrimEnd()}
+  $et=(Get-Content $e -Raw -ErrorAction SilentlyContinue); if($et){Say $et.TrimEnd()}
+  return $code
+}
+try{
+  $bundle=Join-Path $d 'wip0465.bundle'
+  if(-not (Test-Path $bundle)){throw 'wip0465.bundle not found on Desktop - save it there from WhatsApp first'}
+  Say 'PASS 0: bundle found on Desktop'
+  $gitOk=$false
+  try{$gv=(git --version 2>$null); if($gv){$gitOk=$true}}catch{}
+  if(-not $gitOk){
+    Say 'git not found - installing Git via winget (one time)...'
+    [void](Run-Cmd 'winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements' 'winget')
+    $env:Path='C:\Program Files\Git\cmd;'+$env:Path
+    try{$gv=(git --version 2>$null)}catch{$gv=$null}
+    if(-not $gv){throw 'git still not available after winget install - close this window, open a NEW PowerShell, and run this script again'}
+  }
+  Say ("PASS 1: git ready ({0})" -f (git --version))
+  [void](Run-Cmd 'gh auth setup-git' 'ghsetup')
+  Say 'PASS 2: gh credential helper for git configured'
+  $work=Join-Path $env:TEMP ('gw-push-'+[guid]::NewGuid().ToString('N').Substring(0,8))
+  if((Run-Cmd ('git clone "'+$bundle+'" "'+$work+'"') 'clone') -ne 0){throw 'git clone from bundle failed'}
+  Say 'PASS 3: bundle cloned - full history, exact SHAs'
+  $head=((git -C $work rev-parse HEAD 2>$null)).Trim()
+  Say ('PASS 4: local wip-0465 head = '+$head)
+  [void](Run-Cmd ('git -C "'+$work+'" remote set-url origin https://github.com/avrahamyona/glass-widgets.git') 'remote')
+  if((Run-Cmd ('git -C "'+$work+'" push origin wip-0465') 'push') -ne 0){throw 'git push failed - if this was an auth error run: gh auth login -s workflow   then run this script again'}
+  Say 'PASS 5: pushed to GitHub'
+  $ls=((git -C $work ls-remote origin refs/heads/wip-0465 2>$null) -split '\s+')[0]
+  if($ls -ne $head){throw ('remote head mismatch: local='+$head+' remote='+$ls)}
+  Say ('PASS 6: remote wip-0465 verified = '+$ls)
+  Say 'DONE - wip-0465 is on GitHub with the exact reviewed SHAs (gate commit 0d1af63 included)'
+}catch{
+  Say ('FAIL: '+$_.Exception.Message)
+  Say ($_.ScriptStackTrace)
+  Say 'send this whole output back + push-wip-log.txt'
+}finally{
+  if($work -and (Test-Path $work)){Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue}
+  try{Stop-Transcript | Out-Null}catch{}
+  Read-Host 'Press Enter to close'
+}
