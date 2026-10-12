@@ -203,7 +203,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   if(r.status===202){const ok=await persist({accepted:now()});
    return ok?{id,status:'accepted',trusted:false,note:'HTTP acceptance only - not a device execution proof'}:{id,status:'unknown',reason:'receipt_persist_failed',trusted:false};}
   if(r.status===409){await persist({duplicate:now()});
-   return {id,status:'duplicate',outcome:parseJson(r),trusted:false,note:'cached outcome - not device-signed, not trusted completion'};}
+   return {id,status:'duplicate',outcome:parseJson(r),trusted:false,note:'unsigned cached outcome HINT - not device-signed, never proof of a terminal; reconcile via a device-signed channel or a human decision, never an automatic new episode'};}
   return {id,status:'refused',code:r.status,reason:r.rawBody.slice(0,200),trusted:false};
  }
  async function sendCommand(opts){return send(await prepare(opts));}

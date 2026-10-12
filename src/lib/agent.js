@@ -218,6 +218,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(p.button_id==='approve'){
    if(pend.texp&&Date.now()>=pend.texp){audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});settleCard(cardId,'expired');if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');else ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
    pend.approvedAt=Date.now();pend.cardId=cardId; // the human-tap instant + card identity ride the terminal as pairing evidence
+   if(pend.kind==='enroll_device'&&!await approvePairingPending(pend.cmdId,pend.approvedAt)){audit({kind:'enroll_device',stage:'pairing_journal_unavailable',id:String(pend.cmdId||'').slice(0,40)});settleCard(cardId,'denied');pairingTerminal(pend.cmdId,'failed','pairing evidence store unavailable - לא נרשמה ראיית אישור');return {ok:true}} // no durable approval evidence -> NO effect
    audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
    settleCard(cardId,'approved');execPending(pend);return {ok:true}}
   if(pend.pre)markSeen(pend.cmdId,'cancelled');
@@ -924,6 +925,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // task-result polling from the same durable record, so no crash window can strand a command
  // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
  const{createLedger,RESULT_TTL_MS,RESULT_CAP,capResult}=require('./ledger');
+const{createFileOutbox}=require('../../server/lib/outbox-file.js'); // the REVIEWED durable store - the pairing journal lives here, no weaker local copy
  const{fingerprint}=require('./fingerprint'); // pairing fingerprint: the PC-side local source the user compares against the sender's approval request
  const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
  // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
@@ -978,7 +980,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
       audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
       return {accepted:false,status:403,reason:'unsigned'}}}
     if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
-    if(ledger.has(m.id)){const prev=ledger.get(m.id);audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40),outcome:prev&&prev.status});return {accepted:false,status:409,reason:'duplicate',outcome:prev?{status:prev.status,note:prev.note}:null}} // a replayed envelope gets a stable 409 carrying the CACHED durable outcome (denied/expired/restart-cancel reconcile over THIS authenticated channel - no new episode, no popup)
+    if(ledger.has(m.id)){const prev=ledger.get(m.id);audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40),outcome:prev&&prev.status});return {accepted:false,status:409,reason:'duplicate',outcome:prev?{status:prev.status,note:prev.note}:null}} // a replayed envelope gets a stable 409 carrying the cached durable outcome as an UNSIGNED informative HINT (this response is not device-signed - it is never proof of a terminal; the sender reconciles via a device-signed channel or a human decision, never an automatic new episode or popup)
     // durable commit BEFORE any effect: the accepted record IS the dispatch permit. If it cannot
     // be committed, nothing runs and the sender may retry the same envelope (it was not consumed).
     const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
@@ -1060,9 +1062,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
   const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
   const fp=fingerprint(pubB64); // LOCAL, computed from the in-memory candidate - the trusted display the owner compares
-  const cardId='local-approve-'+String(m.id).replace(/[^\w-]/g,'').slice(0,60);
+  const cardId=pairingCardId(m.id);
   const texp=intake&&+intake.exp||0;
-  if(!writePairingPending({cmdId:String(m.id),fingerprint:fp,exp:texp||Date.now()+APPROVAL_TTL}))return ack(m.id,'failed','pairing storage unavailable'); // fail closed BEFORE the card exists
+  if(!await writePairingPending({cmdId:String(m.id),cardId,fingerprint:fp,pubB64,challenge:'challenge' in eData?String(eData.challenge):null,exp:texp||Date.now()+APPROVAL_TTL}))return ack(m.id,'failed','pairing storage unavailable'); // fail closed BEFORE the card exists
   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'enroll_device',stage:'pairing_expired',id:String(p.cmdId).slice(0,40),fingerprint:p.fp});settleCard(cardId,'expired');pairingTerminal(p.cmdId,'failed','expired - הצימוד לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
   timer.unref&&timer.unref();
@@ -1075,34 +1077,40 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
  // pairing-pending durability: one record in userData (NO key material) so a restart between park
  // and decision becomes a durable terminal the sender can reconcile, not a silently lost enroll.
- const pairingPendingDir=()=>path.join(app.getPath('userData'),'pairing-pending');
- const pairingPendingFile=cmdId=>path.join(pairingPendingDir(),String(cmdId).replace(/[^\w-]/g,'').slice(0,60)+'.json');
- // one record PER parked enroll (parallel cards never overwrite each other), written BEFORE the card
- // is published, atomic: tmp wx + full write + file fsync + rename + dir fsync. FAIL CLOSED: no
- // durable recovery record -> no card, terminal failure instead (a parked approval must never exist
- // without the record that turns a mid-gap restart into a durable terminal).
- const writePairingPending=r=>{
-  try{
-   fs.mkdirSync(pairingPendingDir(),{recursive:true,mode:0o700});
-   const file=pairingPendingFile(r.cmdId);
-   const tmp=file+'.'+process.pid+'.'+Date.now()+'.tmp';
-   const b=Buffer.from(JSON.stringify(r),'utf8');
-   const fd=fs.openSync(tmp,'wx',0o600);
-   try{let off=0;while(off<b.length)off+=fs.writeSync(fd,b,off,b.length-off,null);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}
-   fs.renameSync(tmp,file);
-   try{const dfd=fs.openSync(pairingPendingDir(),'r');try{fs.fsyncSync(dfd)}finally{fs.closeSync(dfd)}}catch{} // dir fsync: hard on POSIX, best-effort where unsupported
-   return true;
-  }catch(e){audit({kind:'enroll_device',stage:'pairing_persist_failed',id:String(r&&r.cmdId||'').slice(0,40)});return false}
+ const journalDir=()=>path.join(app.getPath('userData'),'pairing-pending');
+ // the pairing journal lives in the REVIEWED durable store (server/lib/outbox-file.js: fail-closed
+ // sync/privacy/short-write, immutable envelope + one-way receipt). No local re-implementation.
+ let journalStore=null,journalTried=false;
+ const journal=()=>{
+  if(journalStore||journalTried)return journalStore;
+  journalTried=true;
+  try{journalStore=createFileOutbox(journalDir())}catch(e){journalStore=null;audit({kind:'enroll_device',stage:'pairing_journal_unavailable',err:String(e&&e.message||e).slice(0,120)})}
+  return journalStore;
  };
- const clearPairingPending=cmdId=>{try{fs.unlinkSync(pairingPendingFile(cmdId))}catch{}};
- const readPairingPendings=()=>{try{return fs.readdirSync(pairingPendingDir()).filter(f=>f.endsWith('.json')).map(f=>{try{return JSON.parse(fs.readFileSync(path.join(pairingPendingDir(),f),'utf8'))}catch{return null}}).filter(r=>r&&r.cmdId)}catch{return[]}};
+ // deterministic, collision-proof card id per episode (sha256 of the EXACT strict cmdId) - never a
+ // stripped/truncated raw id, always inside the 80-char settle boundary.
+ const pairingCardId=cmdId=>'local-approve-'+crypto.createHash('sha256').update(String(cmdId),'utf8').digest('hex').slice(0,32);
+ // envelope = the staged candidate (immutable); receipt = null while parked, {approvedAt} after the
+ // human tap (one-way). Written BEFORE the card is published. FAIL CLOSED: no durable journal record
+ // -> no card, terminal failure instead.
+ const writePairingPending=async r=>{const j=journal();if(!j)return false;
+  try{return (await j.put(String(r.cmdId),{envelope:{v:1,cmdId:String(r.cmdId),cardId:String(r.cardId||''),fingerprint:String(r.fingerprint||''),pubB64:String(r.pubB64||''),challenge:r.challenge?String(r.challenge):null,exp:+r.exp||0,stagedAt:Date.now()},receipt:null}))===true}
+  catch(e){audit({kind:'enroll_device',stage:'pairing_persist_failed',id:String(r&&r.cmdId||'').slice(0,40),err:String(e&&e.message||e).slice(0,120)});return false}};
+ const readPairingPending=async cmdId=>{const j=journal();if(!j)return null;try{return await j.get(String(cmdId))}catch{return null}};
+ const approvePairingPending=async(cmdId,approvedAt)=>{ // receipt null->set: the approval evidence is durable BEFORE any key persist - no evidence, no effect
+  const j=journal();if(!j)return false;
+  try{const cur=await j.get(String(cmdId));if(!cur||!cur.envelope)return false;
+   return (await j.put(String(cmdId),{envelope:cur.envelope,receipt:{approvedAt:+approvedAt}}))===true}
+  catch(e){audit({kind:'enroll_device',stage:'pairing_approve_persist_failed',id:String(cmdId||'').slice(0,40)});return false}};
+ const clearPairingPending=cmdId=>{try{fs.unlinkSync(path.join(journalDir(),String(cmdId)+'.json'))}catch{}}; // removal runs ONLY after the durable ledger terminal verifies; a crash-leftover re-enters boot recovery and clears against the existing terminal
+ const readPairingPendings=()=>{try{return fs.readdirSync(journalDir()).filter(f=>/^[\w-]{1,80}\.json$/.test(f)).map(f=>f.slice(0,-5))}catch{return[]}}; // EXACT strict ids only; records read through the fail-closed store
  // terminal-FIRST ordering (blocker: clear-before-terminal loses recovery in the crash gap): the
  // durable ledger terminal is committed and VERIFIED before the pairing recovery record is cleared.
  // If the terminal cannot be verified the pending record SURVIVES and the next boot re-terminals it.
  async function pairingTerminal(cmdId,status,note,result){
   await ack(cmdId,status,note,result);
   const back=ledger.get(String(cmdId));
-  if(back&&back.status===status){clearPairingPending(cmdId);return true}
+  if(back&&back.status===status){clearPairingPending(cmdId);audit({kind:'enroll_device',stage:'pairing_terminal_committed',id:String(cmdId||'').slice(0,40),status});return true} // fault checkpoint: terminal durable, journal cleared after
   audit({kind:'enroll_device',stage:'pairing_terminal_unverified',id:String(cmdId||'').slice(0,40),want:status,got:back&&back.status||'missing'});
   return false;
  }
@@ -1118,7 +1126,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});
    return pairingTerminal(p.cmdId,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)});
   }
+  audit({kind:'enroll_device',stage:'pairing_persist_begin',id:String(p.cmdId||'').slice(0,40),fingerprint:p.fp}); // fault checkpoint: BEFORE the effect
   if(!persistDevice(pubB64,privB64))return pairingTerminal(p.cmdId,'failed','device key persist failed');
+  audit({kind:'enroll_device',stage:'pairing_persisted',id:String(p.cmdId||'').slice(0,40),fingerprint:p.fp}); // fault checkpoint: the effect LANDED (crash after here = recovery must reconcile done)
   loadDevice();
   if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return pairingTerminal(p.cmdId,'failed','device key persist failed')}
   pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000}; // the preEnroll sender fetches THIS command's terminal under '-' until it learns the id
@@ -1130,21 +1140,38 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return pairingTerminal(p.cmdId,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProofFor(eData),pairing:{fingerprint:p.fp,approvedAt:+p.approvedAt||Date.now(),cardId:String(p.cardId||'')||null}}); // PUBLIC key only travels
  }
  let pendingEnrollRead=null; // {id,device,until}: the ONE bootstrap /task fetch allowed under '-' (set on EVERY accepted enroll_device - fresh mint AND already-enrolled, so a post-restart re-enroll still lets the preEnroll sender fetch its result)
- // restart between park and decision: EVERY parked pairing becomes a durable terminal, NO key was
- // ever persisted. Ordering is terminal-first: a restart turned the parked 'accepted' ledger record
- // into FINAL 'unknown' with NO effect evidence (result==null - the pairing journal proves nothing
- // executed), so the narrow reconcileUnknown resolves it to a REAL terminal; a record carrying effect
- // evidence (result!=null) is NEVER rewritten. The recovery record is cleared ONLY after the durable
- // terminal verifies - on any persist failure it survives for the next boot.
- for(const pp of readPairingPendings()){
-  const rid=String(pp.cmdId),rnote='cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר';
-  audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:rid.slice(0,40),fingerprint:pp.fingerprint||undefined});
+ // restart recovery over the pairing journal. The journal ALONE never proves no-effect: each parked
+ // record is cross-read against the ACTUAL persisted identity on disk, and the reload-FINAL 'unknown'
+ // is reconciled ONLY with exact evidence:
+ //  staged (no approval receipt) + candidate key NOT on disk   -> failed (no approval, no effect)
+ //  approved + the CANDIDATE key persisted (fp match)          -> done 'enrolled' (approval+persist landed; only the terminal was lost) with a FRESH challenge proof
+ //  approved + NO key on disk                                  -> failed 'persist did not complete' (precise; never a success claim)
+ //  approved + a DIFFERENT key on disk                         -> failed 'superseded' (never success on another key)
+ //  anything unreadable or impossible (staged but persisted)   -> PRESERVE unknown, keep the record, audit
+ for(const rid of readPairingPendings()){
   (async()=>{
+   const jr=await readPairingPending(rid);
+   if(!jr||!jr.envelope||typeof jr.envelope!=='object'){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unreadable'});return} // preserve unknown, keep the record
+   const env=jr.envelope,approvedAt=jr.receipt&&+jr.receipt.approvedAt>0?+jr.receipt.approvedAt:0;
+   let diskPub=null;try{const dj=JSON.parse(fs.readFileSync(devFile(),'utf8'));if(typeof dj.pub==='string')diskPub=dj.pub}catch{} // no file = no persisted identity
+   const fpMatch=!!(diskPub&&env.pubB64&&diskPub===String(env.pubB64)&&fingerprint(diskPub)===env.fingerprint);
+   let term=null;
+   if(!approvedAt){
+    if(fpMatch){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'staged journal but candidate key persisted'});return} // impossible order - never claim
+    term={status:'failed',note:'cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר'}; // exact: no approval receipt, no key from THIS episode
+   }else if(fpMatch){ // approval + persist BOTH landed; only the terminal was lost to the crash
+    term={status:'done',note:'enrolled',result:{deviceId:crypto.createHash('sha256').update(diskPub).digest('hex').slice(0,16),pubkey:diskPub,...chProofFor(env.challenge?{challenge:String(env.challenge)}:{}),pairing:{fingerprint:env.fingerprint,cardId:String(env.cardId||''),approvedAt}}};
+   }else if(!diskPub){ // approval landed, persist did not (crash in the gap)
+    term={status:'failed',note:'approved but the key persist did not complete - האישור נרשם אך המפתח לא נשמר'};
+   }else{ // approval landed but a DIFFERENT key is on disk
+    term={status:'failed',note:'superseded - מפתח אחר צומד בזמן שהאישור המתין; יש להתחיל צימוד חדש ולאשר את הטביעת הנוכחית'};
+   }
+   audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:rid.slice(0,40),fingerprint:env.fingerprint||undefined,approved:!!approvedAt,terminal:term.status});
    const rec=ledger.get(rid);
-   if(rec&&rec.status==='unknown'&&rec.result==null)ledger.reconcileUnknown(rid,{status:'failed',note:rnote});
-   await ack(rid,'failed',rnote); // the SSE ack ALWAYS fires - the sender reconciles through it; ledger.put is a no-op on the reconciled FINAL record
+   if(rec&&rec.status==='unknown'&&rec.result==null)ledger.reconcileUnknown(rid,term); // narrow: FINAL unknown with NO recorded result, and ONLY under this journal+disk evidence - never a generic unknown rewrite
+   await ack(rid,term.status,term.note,term.result); // the SSE ack ALWAYS fires; ledger.put is a no-op on the reconciled FINAL record
    const back=ledger.get(rid);
-   if(back&&back.status==='failed'){clearPairingPending(rid);pendingEnrollRead={id:rid,device:devId,until:Date.now()+120000}} // the sender can still fetch THIS terminal under '-'
+   if(back&&back.status===term.status){clearPairingPending(rid);pendingEnrollRead={id:rid,device:devId,until:Date.now()+120000}} // the sender can still fetch THIS terminal under '-'
    else audit({kind:'enroll_device',stage:'pairing_recovery_unverified',id:rid.slice(0,40)}); // recovery record PRESERVED for the next boot
   })().catch(e=>audit({kind:'enroll_device',stage:'pairing_recovery_error',id:rid.slice(0,40),err:String(e&&e.message||e).slice(0,120)}));
  }

@@ -26,6 +26,7 @@ function createEnrollOrchestrator({sender,approvePairing}){
  // one enrollment episode: fresh challenge -> command -> trusted terminal -> proof -> registry
  async function run({timeoutMs=120000}={}){
   const challenge=crypto.randomBytes(16).toString('base64').replace(/[+/=]/g,c=>({'+':'-','/':'_','=':''}[c])); // url-safe nonce shape
+  const sentAt=Date.now(); // episode window anchor for the pairing-evidence approvedAt check
   const sent=await sender.sendCommand({kind:'enroll_device',data:{challenge},ttlMs:120000});
   if(sent.status!=='accepted')return {ok:false,stage:'send',reason:sent.reason||sent.status,id:sent.id};
   const term=await sender.waitTerminal(sent.id,{timeoutMs});
@@ -39,20 +40,23 @@ function createEnrollOrchestrator({sender,approvePairing}){
   if(!r.pubkey||!r.deviceId||!r.challengeSig)return {ok:false,stage:'proof',reason:'missing challenge proof fields',id:sent.id};
   if(!verifyChallenge({challenge,pubkey:r.pubkey,deviceId:r.deviceId,sig:r.challengeSig}))return {ok:false,stage:'proof',reason:'challenge proof invalid',id:sent.id}; // possession + freshness of the RETURNED key
   const fp=fingerprint(r.pubkey);
-  // on-PC pairing evidence: copied fields alone are NOT evidence, so they are CROSS-CHECKED. A FRESH
-  // mint terminal must carry the pairing record of the exact card the human approved, bound to THIS
-  // returned key: the recorded fingerprint must equal fp(returned pubkey), with the approving card id
-  // and the human-tap instant captured on the PC at approval time. An 'already enrolled' re-enroll
-  // carries no pairing (its original mint had its own card); any other terminal without pairing
-  // evidence REFUSES - a fresh key mint can never slip through as an approval-less registration.
-  const isReEnroll=String(term.note||'')==='already enrolled';
+  // on-PC pairing evidence: copied fields can NEVER authenticate themselves, so every field is
+  // cross-checked against INDEPENDENT recomputation: the card id must be the EXACT deterministic id
+  // of THIS episode (recomputed from sent.id, not prefix-matched), the fingerprint must equal
+  // fp(returned pubkey), and the human-tap instant must sit inside THIS episode's measured window.
+  // A FRESH sender (no pinned key) always requires this evidence; an untrusted 'already enrolled'
+  // note bypasses NOTHING (dropped entirely). A PINNED sender's terminal is already device-proven
+  // (trusted===true enforced above), so its re-enroll needs no fresh pairing record - but one that
+  // arrives is still cross-checked.
+  const expectCard='local-approve-'+crypto.createHash('sha256').update(String(sent.id),'utf8').digest('hex').slice(0,32);
+  const fresh=!senderHasPinnedKey();
   let pairing=null;
   if(r.pairing&&typeof r.pairing==='object'){
    const pr=r.pairing;
-   if(typeof pr.fingerprint!=='string'||pr.fingerprint!==fp||typeof pr.cardId!=='string'||pr.cardId.indexOf('local-approve-')!==0||!(+pr.approvedAt>0))
+   if(typeof pr.fingerprint!=='string'||pr.fingerprint!==fp||pr.cardId!==expectCard||!(+pr.approvedAt>=sentAt-10000&&+pr.approvedAt<=Date.now()+10000))
     return {ok:false,stage:'pairing',reason:'pairing evidence mismatch',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
    pairing={fingerprint:pr.fingerprint,cardId:pr.cardId,approvedAt:+pr.approvedAt};
-  }else if(!isReEnroll)return {ok:false,stage:'pairing',reason:'fresh mint without on-PC pairing evidence',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
+  }else if(fresh)return {ok:false,stage:'pairing',reason:'fresh mint without on-PC pairing evidence',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};
   if(typeof approvePairing!=='function')return {ok:false,stage:'pairing',reason:'no pairing approval channel',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp}; // fail closed - never register unapproved
   let approved=false;try{approved=(await approvePairing({deviceId:String(r.deviceId),pubkey:String(r.pubkey),fingerprint:fp,episode:String(sent.id),challenge,pairing}))===true}catch{approved=false} // STRICT true - a truthy string/object is NOT an approval; the callback receives the episode id + challenge + the cross-checked on-PC pairing record (null on a re-enroll claim) so its decision binds to THIS enrollment and THIS key
   if(!approved)return {ok:false,stage:'pairing',reason:'pairing not approved',id:sent.id,deviceId:r.deviceId,pubkey:r.pubkey,fingerprint:fp};

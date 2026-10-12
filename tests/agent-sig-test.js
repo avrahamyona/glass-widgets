@@ -15,6 +15,7 @@ const srv=http.createServer((q,r)=>{const u=new URL(q.url,'http://x');
  if(u.pathname==='/web'){r.writeHead(200,{'content-type':'text/html'});r.end('<html><body>webtask-ok</body></html>');return}
  r.statusCode=404;r.end()});
 const pushCmd=m=>{if(global.cmdRes)global.cmdRes.write('data: '+JSON.stringify(m)+'\n\n')};
+const cidOf=id=>'local-approve-'+crypto.createHash('sha256').update(String(id),'utf8').digest('hex').slice(0,32); // the EXACT deterministic episode card id (matches the agent)
 const M=n=>path.join(os.tmpdir(),'gw-sig-'+n+'-'+Date.now()+'.txt');
 const m1=M(1),m2=M(2),m3=M(3),m4=M(4),m5=M(5),m6=M(6),m7=M(7),m8=M(8);
 const EX=()=>Date.now()+300000;
@@ -149,7 +150,7 @@ const launch=async()=>{
  pushCmd({id:'enr1',kind:'enroll_device',data:{challenge:CH},ts,exp,sig:sign('enr1','enroll_device',ts,exp,ePay)});
  // PAIRING GATE: a signed enroll PARKS an on-PC approval card; nothing persists before the human tap
  const cP=await card('אישור צימוד טלפון');
- assert(cP.cid==='local-approve-enr1','pairing card bound to THIS command id: '+cP.cid);
+ assert(cP.cid===cidOf('enr1'),'pairing card bound to THIS command id: '+cP.cid);
  const cardFp=(cP.body.match(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/)||[])[0];
  assert(cardFp,'pairing card shows the LOCAL candidate fingerprint: '+cP.body);
  assert(cP.body.includes('אשר רק אם יזמת צימוד'),'pairing card carries explicit compare-and-deny copy');
@@ -159,7 +160,7 @@ const launch=async()=>{
  await clickBtn('אישור צימוד טלפון','אשר צימוד');
  const aE=await waitAck('enr1','done');
  assert(aE.result&&aE.result.deviceId&&aE.result.pubkey&&aE.result.challengeSig,'enroll returns identity+proof: '+JSON.stringify(aE.result));
- assert(aE.result.pairing&&aE.result.pairing.fingerprint===cardFp&&aE.result.pairing.cardId==='local-approve-enr1'&&aE.result.pairing.approvedAt>0,'the SAME approval (fingerprint+card+time) propagates to the registry-adapter terminal: '+JSON.stringify(aE.result.pairing));
+ assert(aE.result.pairing&&aE.result.pairing.fingerprint===cardFp&&aE.result.pairing.cardId===cidOf('enr1')&&aE.result.pairing.approvedAt>0,'the SAME approval (fingerprint+card+time) propagates to the registry-adapter terminal: '+JSON.stringify(aE.result.pairing));
  const devIdE=aE.result.deviceId,pubE=aE.result.pubkey;
  assert(devIdE===crypto.createHash('sha256').update(pubE).digest('hex').slice(0,16),'deviceId derives from the pubkey');
  assert(crypto.verify(null,Buffer.from([CH,pubE,devIdE].join('\n'),'utf8'),crypto.createPublicKey({key:Buffer.from(pubE,'base64'),format:'der',type:'spki'}),Buffer.from(aE.result.challengeSig,'hex')),'challenge proof verifies against the returned key');
@@ -225,16 +226,17 @@ const launch=async()=>{
  const devFpLocal=fpFn(JSON.parse(fs.readFileSync(cfg+'/glasswidgets/device/device.json','utf8')).pub);
  const memBox=()=>{const m=new Map();return{get:async id=>m.get(id)||null,put:async(id,r)=>{m.set(id,r);return true}}}; // in-memory outbox (per-sender, within the run only - durability is covered by fileBox below)
  const mkS=()=>createSenderClient({deviceUrl:'http://127.0.0.1:47732',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,preEnroll:true,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50});
- const orchLive=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint,episode,challenge})=>fingerprint===devFpLocal&&!!episode&&!!challenge});
+ const mkPinLive=()=>createSenderClient({deviceUrl:'http://127.0.0.1:47732',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,devicePub:pubE,device:devIdE,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50}); // the device-proven channel (post-enrollment)
+ const orchLive=createEnrollOrchestrator({sender:mkPinLive(),approvePairing:async({fingerprint,episode,challenge})=>fingerprint===devFpLocal&&!!episode&&!!challenge});
  const rO=await orchLive.run();
  assert(rO.ok===true&&rO.deviceId===devIdE,'integrated orchestrator enrolled against the LIVE Electron runtime: '+JSON.stringify(rO));
  assert(fdb.devices.get(devIdE)&&fdb.devices.get(devIdE).pubkey===pubE,'registry recorded the live device');
- const orchNo=createEnrollOrchestrator({sender:mkS(),approvePairing:async()=>false});
+ const orchNo=createEnrollOrchestrator({sender:mkPinLive(),approvePairing:async()=>false});
  const rNo=await orchNo.run();
  assert(rNo.ok===false&&rNo.stage==='pairing'&&fdb.devices.size===1,'declined pairing writes nothing in the REAL flow');
  const wrongK=crypto.generateKeyPairSync('ed25519');
  const wrongFp=fpFn(wrongK.publicKey.export({format:'der',type:'spki'}).toString('base64'));
- const orchWrongK=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint})=>fingerprint===wrongFp}); // bound to a DIFFERENT (valid but wrong) key
+ const orchWrongK=createEnrollOrchestrator({sender:mkPinLive(),approvePairing:async({fingerprint})=>fingerprint===wrongFp}); // bound to a DIFFERENT (valid but wrong) key
  const rWK=await orchWrongK.run();
  assert(rWK.ok===false&&rWK.stage==='pairing'&&fdb.devices.size===1,'approval bound to a wrong-but-valid key refuses THIS pc in the REAL flow, nothing written');
  // independent X-GW-Device-Sig verification on a live /task response (not via the sender client)
@@ -290,7 +292,7 @@ const launch=async()=>{
  await a.close();
  fs.rmSync(cfg+'/glasswidgets/agent-seen.json',{recursive:true,force:true});
  ({a,A}=await launch());
- const orchRe=createEnrollOrchestrator({sender:mkS(),approvePairing:async({fingerprint})=>fingerprint===devFpLocal});
+ const orchRe=createEnrollOrchestrator({sender:createSenderClient({deviceUrl:'http://127.0.0.1:47732',controlUrl:'http://127.0.0.1:'+ctl.address().port,replyKey:'rk-test',cmdKey:'cmd-key',signPrivate:SIGN_PRIV_B64,devicePub:pubE,device:devIdE,fetchImpl:fetch,outbox:memBox(),pollIntervalMs:50}),approvePairing:async({fingerprint})=>fingerprint===devFpLocal}); // PINNED: post-enrollment proof rides the device-proven channel, never the dropped note bypass
  const rRe=await orchRe.run();
  assert(rRe.ok===true&&rRe.deviceId===devIdE,'post-restart re-enroll resolves the SAME device: '+JSON.stringify(rRe));
  assert(fdb.devices.size===1,'registry still holds exactly the one device');
@@ -353,14 +355,14 @@ const launch=async()=>{
  const pC=await sC.prepare({kind:'enroll_device',data:{challenge:'rsd-'+Date.now().toString(36)+'-abcdefgh'}});
  const uC=await sC.send(pC);
  assert(uC.status==='accepted'&&uC.id,'fresh sender enroll accepted: '+JSON.stringify(uC));
- const uCid='local-approve-'+uC.id.replace(/[^\w-]/g,'').slice(0,60);
+ const uCid=cidOf(uC.id);
  await cardCid(uCid);
  await clickCid(uCid,'דחה');
  const aRsd=await waitAck(uC.id,'failed');
  assert(/denied/.test(aRsd.note),'sender-driven deny is a durable failed terminal: '+aRsd.note);
  assert(ledJ()[uC.id]&&ledJ()[uC.id].status==='failed','denied outcome durable in the ledger');
  const uC2=await sC.send({id:uC.id}); // the SAME stored envelope resent (sender restart shape)
- assert(uC2.status==='duplicate'&&uC2.outcome&&uC2.outcome.outcome&&uC2.outcome.outcome.status==='failed','same-ID resend reconciles the cached DENIED outcome via 409: '+JSON.stringify(uC2));
+ assert(uC2.status==='duplicate'&&uC2.trusted===false&&uC2.outcome&&uC2.outcome.outcome&&uC2.outcome.outcome.status==='failed','same-ID resend reconciles the cached DENIED outcome via 409 as an UNSIGNED HINT (trusted:false, never terminal proof): '+JSON.stringify(uC2));
  const audRs=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert((audRs.match(new RegExp('"stage":"pairing_requested","id":"'+uC.id.slice(0,40).replace(/[^\w-]/g,'')+'"','g'))||[]).length===1,'the resend published NO second card (one pairing_requested for the id)');
 
@@ -369,13 +371,13 @@ const launch=async()=>{
  const CHa='ia-'+Date.now().toString(36)+'-abcdefgh',CHb='ib-'+Date.now().toString(36)+'-abcdefgh';
  ts=Date.now();exp=EX();pushCmd({id:'enrA',kind:'enroll_device',data:{challenge:CHa},ts,exp,sig:sign('enrA','enroll_device',ts,exp,JSON.stringify({challenge:CHa}))});
  ts=Date.now();exp=EX();pushCmd({id:'enrB',kind:'enroll_device',data:{challenge:CHb},ts,exp,sig:sign('enrB','enroll_device',ts,exp,JSON.stringify({challenge:CHb}))});
- const bodyA=await cardCid('local-approve-enrA'),bodyB=await cardCid('local-approve-enrB');
+ const bodyA=await cardCid(cidOf('enrA')),bodyB=await cardCid(cidOf('enrB'));
  const fpA=(bodyA.match(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/)||[])[0],fpB=(bodyB.match(/[0-9a-f]{4}(-[0-9a-f]{4}){3}/)||[])[0];
  assert(fpA&&fpB&&fpA!==fpB,'two parked pairings show DIFFERENT candidate fingerprints: '+fpA+' vs '+fpB);
- await clickCid('local-approve-enrA','אשר צימוד');
+ await clickCid(cidOf('enrA'),'אשר צימוד');
  const aA=await waitAck('enrA','done');
- assert(aA.result&&aA.result.pairing&&aA.result.pairing.fingerprint===fpA&&aA.result.pairing.cardId==='local-approve-enrA','A enrolled with ITS shown fingerprint + card: '+JSON.stringify(aA.result.pairing));
- await clickCid('local-approve-enrB','אשר צימוד');
+ assert(aA.result&&aA.result.pairing&&aA.result.pairing.fingerprint===fpA&&aA.result.pairing.cardId===cidOf('enrA'),'A enrolled with ITS shown fingerprint + card: '+JSON.stringify(aA.result.pairing));
+ await clickCid(cidOf('enrB'),'אשר צימוד');
  const aB=await waitAck('enrB','failed');
  assert(/superseded/.test(aB.note),'stale B NEVER succeeds on a different key: '+aB.note);
  const{fingerprint:fpOf}=require(REPO+'/src/lib/fingerprint');
@@ -386,5 +388,41 @@ const launch=async()=>{
  assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrA.json')&&!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrB.json'),'both recovery records cleared after their terminals verified');
  const aud2=fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8');
  assert(aud2.includes('"stage":"pairing_requested"')&&aud2.includes('"stage":"pairing_expired"')&&aud2.includes('"stage":"pairing_restart_cancel"')&&aud2.includes('"stage":"denied"')&&aud2.includes('"stage":"pairing_superseded"'),'pairing audit trail complete: requested/approved-or-denied/expired/restart-cancel/superseded');
+ // 12d) crash fault checkpoints: the boot recovery reconciles ONLY with exact journal+disk evidence
+ // (i) approved receipt but NO persisted key -> precise failure, never a success claim
+ await a.close();
+ fs.rmSync(cfg+'/glasswidgets/device',{recursive:true,force:true}); // never-enrolled again
+ fs.rmSync(cfg+'/glasswidgets/pairing-pending',{recursive:true,force:true});
+ const{SCHEMA_V}=require(REPO+'/src/lib/ledger.js');
+ const craftParked=id=>{const f=cfg+'/glasswidgets/agent-tunnel-ledger.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j[id]={v:SCHEMA_V,status:'accepted',note:'parked',at:Date.now(),dedupExp:Date.now()+600000,resultExp:Date.now()+600000,terminal:false,result:null};fs.writeFileSync(f,JSON.stringify(j))};
+ const kpD=crypto.generateKeyPairSync('ed25519'),pubD=kpD.publicKey.export({format:'der',type:'spki'}).toString('base64');
+ {const box=createFileOutbox(cfg+'/glasswidgets/pairing-pending');
+  await box.put('enrD',{envelope:{v:1,cmdId:'enrD',cardId:cidOf('enrD'),fingerprint:fpOf(pubD),pubB64:pubD,challenge:'chd',exp:Date.now()+60000,stagedAt:Date.now()-5000},receipt:{approvedAt:Date.now()-4000}});
+  box.close()}
+ craftParked('enrD');
+ ({a,A}=await launch());
+ const aD=await waitAck('enrD','failed');
+ assert(/persist did not complete/.test(aD.note),'approved receipt but NO persisted key: precise failure, never success: '+aD.note);
+ assert(ledJ()['enrD'].status==='failed'&&ledJ()['enrD'].terminal===true,'12d-i terminal durable in the ledger');
+ for(let i=0;i<40&&fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrD.json');i++)await sleep(100);
+ assert(!fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrD.json'),'12d-i journal cleared after the verified terminal');
+ // (ii) approved receipt + candidate key PERSISTED (crash between persist and terminal) -> reconcile DONE;
+ //      a STAGED (never-approved) record whose candidate key persisted -> AMBIGUOUS: unknown preserved
+ await a.close();
+ const kpC=crypto.generateKeyPairSync('ed25519'),pubC=kpC.publicKey.export({format:'der',type:'spki'}).toString('base64'),privC=kpC.privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
+ fs.mkdirSync(cfg+'/glasswidgets/device',{recursive:true});
+ fs.writeFileSync(cfg+'/glasswidgets/device/device.json',JSON.stringify({pub:pubC,priv:privC}),{mode:0o600});
+ {const box=createFileOutbox(cfg+'/glasswidgets/pairing-pending');
+  await box.put('enrC',{envelope:{v:1,cmdId:'enrC',cardId:cidOf('enrC'),fingerprint:fpOf(pubC),pubB64:pubC,challenge:'chc',exp:Date.now()+60000,stagedAt:Date.now()-5000},receipt:{approvedAt:Date.now()-4000}});
+  await box.put('enrE',{envelope:{v:1,cmdId:'enrE',cardId:cidOf('enrE'),fingerprint:fpOf(pubC),pubB64:pubC,challenge:'che',exp:Date.now()+60000,stagedAt:Date.now()-4500},receipt:null}); // staged but the SAME key persisted - impossible order
+  box.close()}
+ craftParked('enrC');craftParked('enrE');
+ ({a,A}=await launch());
+ const aC=await waitAck('enrC','done');
+ assert(aC.result&&aC.result.pairing&&aC.result.pairing.fingerprint===fpOf(pubC)&&aC.result.pairing.approvedAt>0&&aC.result.challengeSig,'crash after approval+persist: recovery reconciles the LANDED effect to done with pairing evidence + fresh challenge proof: '+JSON.stringify(aC.result));
+ assert(ledJ()['enrC'].status==='done'&&ledJ()['enrC'].terminal===true,'12d-ii done terminal durable in the ledger');
+ assert(ledJ()['enrE'].status==='unknown','staged-but-persisted is AMBIGUOUS: unknown preserved, never claimed');
+ assert(fs.existsSync(cfg+'/glasswidgets/pairing-pending/enrE.json'),'the ambiguous record is KEPT for review');
+ assert(fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').includes('"stage":"pairing_recovery_ambiguous"'),'the ambiguous state is audited');
  console.log('AGENT-SIG TESTS PASSED');await a.close();srv.close();process.exit(0);
 })().catch(e=>{console.error('FAIL',e);try{console.error('AUDIT-TAIL:\n'+fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').split('\n').slice(-12).join('\n'))}catch{}try{console.error('ACKS:',JSON.stringify(ACK.slice(-8)))}catch{}process.exit(1)});
