@@ -1025,7 +1025,13 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
  function loadDevice(){
   devKey=null;devId='';devPubB64='';
   try{
-   if(process.platform==='win32'&&(!aclOwnerOnly(devDir())||!aclOwnerOnly(devFile()))){devLoadState='acl';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key (dir OR file) fails closed
+   // STRICT probe FIRST (same order as server/index.js): ONLY a missing file is absence. An ACL
+   // verdict on a path that does not exist yet is meaningless (Get-Acl throws) and mislabeled a
+   // fresh install 'acl' - probe first, harden-check only what exists. stat failures fail CLOSED.
+   let devPresent=true;
+   try{fs.statSync(devFile())}catch(e){if(!e||e.code!=='ENOENT'){devLoadState='unreadable';return}devPresent=false}
+   if(devPresent&&process.platform==='win32'&&(!aclOwnerOnly(devDir())||!aclOwnerOnly(devFile()))){devLoadState='acl';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key (dir OR file) fails closed
+   if(!devPresent){devLoadState='absent';return}
    let raw;try{raw=fs.readFileSync(devFile(),'utf8')}catch(e){devLoadState=e&&e.code==='ENOENT'?'absent':'unreadable';return} // STRICT absence: ENOENT only - EACCES/EPERM/EISDIR stay 'unreadable', never 'absent'
    let j,priv,pub;
    try{j=JSON.parse(raw);priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64')}
@@ -1250,6 +1256,6 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
   while(pendingOps.size)await Promise.allSettled([...pendingOps]); // in-flight card decisions / pairing terminals / enroll effects finish BEFORE the journal lease closes - a LOOP, because a drained op can chain the next one (approval -> enroll exec -> pairing terminal); a caller MUST await this before starting another agent on the same profile
   await Promise.allSettled([...pendingRecovery]); // in-flight recovery finishes BEFORE the journal lease closes
   if(journalStore){try{journalStore.close()}catch{}journalStore=null;journalTried=false} // an in-process restart re-acquires cleanly (a same-PID live lock would refuse)
- },__debug:()=>({timers:agentTimers.size,ops:pendingOps.size,recovery:pendingRecovery.size,parked:pendingApprovals.size,journalOpen:!!journalStore})};
+ },__debug:()=>({timers:agentTimers.size,ops:pendingOps.size,recovery:pendingRecovery.size,parked:pendingApprovals.size,journalOpen:!!journalStore,dev:devLoadState})};
 }
 module.exports=startAgent;
