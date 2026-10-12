@@ -18,7 +18,7 @@ const pushCmd=m=>{if(global.cmdRes)global.cmdRes.write('data: '+JSON.stringify(m
 const cidOf=id=>'local-approve-'+crypto.createHash('sha256').update(String(id),'utf8').digest('hex').slice(0,32); // the EXACT deterministic episode card id (matches the agent)
 const M=n=>path.join(os.tmpdir(),'gw-sig-'+n+'-'+Date.now()+'.txt');
 const m1=M(1),m2=M(2),m3=M(3),m4=M(4),m5=M(5),m6=M(6),m7=M(7),m8=M(8);
-const EX=()=>Date.now()+300000;
+const EX=()=>Date.now()+240000; // inside the 300s pre-approval window with margin - a ts/exp generated a millisecond apart must never straddle the boundary (the intermittent bad_sig race)
 const waitAck=async(id,status)=>{for(let i=0;i<40;i++){const a=ACK.find(x=>x.id===id&&x.status===status);if(a)return a;await sleep(200)}throw new Error('no ack '+id+' '+status+' in '+JSON.stringify(ACK.slice(-6)))};
 let env,cfg,port;
 const launch=async()=>{
@@ -397,7 +397,7 @@ const launch=async()=>{
  const craftParked=id=>{const f=cfg+'/glasswidgets/agent-tunnel-ledger.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j[id]={v:SCHEMA_V,status:'accepted',note:'parked',at:Date.now(),dedupExp:Date.now()+600000,resultExp:Date.now()+600000,terminal:false,result:null};fs.writeFileSync(f,JSON.stringify(j))};
  const kpD=crypto.generateKeyPairSync('ed25519'),pubD=kpD.publicKey.export({format:'der',type:'spki'}).toString('base64');
  {const box=createFileOutbox(cfg+'/glasswidgets/pairing-pending');
-  await box.put('enrD',{envelope:{v:1,cmdId:'enrD',cardId:cidOf('enrD'),fingerprint:fpOf(pubD),pubB64:pubD,challenge:'chd',exp:Date.now()+60000,stagedAt:Date.now()-5000},receipt:{approvedAt:Date.now()-4000}});
+  await box.put('enrD',{envelope:{v:1,cmdId:'enrD',cardId:cidOf('enrD'),fingerprint:fpOf(pubD),pubB64:pubD,challenge:'chd-episode-1',exp:Date.now()+60000,stagedAt:Date.now()-5000},receipt:{approvedAt:Date.now()-4000}});
   box.close()}
  craftParked('enrD');
  ({a,A}=await launch());
@@ -413,8 +413,8 @@ const launch=async()=>{
  fs.mkdirSync(cfg+'/glasswidgets/device',{recursive:true});
  fs.writeFileSync(cfg+'/glasswidgets/device/device.json',JSON.stringify({pub:pubC,priv:privC}),{mode:0o600});
  {const box=createFileOutbox(cfg+'/glasswidgets/pairing-pending');
-  await box.put('enrC',{envelope:{v:1,cmdId:'enrC',cardId:cidOf('enrC'),fingerprint:fpOf(pubC),pubB64:pubC,challenge:'chc',exp:Date.now()+60000,stagedAt:Date.now()-5000},receipt:{approvedAt:Date.now()-4000}});
-  await box.put('enrE',{envelope:{v:1,cmdId:'enrE',cardId:cidOf('enrE'),fingerprint:fpOf(pubC),pubB64:pubC,challenge:'che',exp:Date.now()+60000,stagedAt:Date.now()-4500},receipt:null}); // staged but the SAME key persisted - impossible order
+  await box.put('enrC',{envelope:{v:1,cmdId:'enrC',cardId:cidOf('enrC'),fingerprint:fpOf(pubC),pubB64:pubC,challenge:'chc-episode-1',exp:Date.now()+60000,stagedAt:Date.now()-5000},receipt:{approvedAt:Date.now()-4000}});
+  await box.put('enrE',{envelope:{v:1,cmdId:'enrE',cardId:cidOf('enrE'),fingerprint:fpOf(pubC),pubB64:pubC,challenge:'che-episode-1',exp:Date.now()+60000,stagedAt:Date.now()-4500},receipt:null}); // staged but the SAME key persisted - impossible order
   box.close()}
  craftParked('enrC');craftParked('enrE');
  ({a,A}=await launch());

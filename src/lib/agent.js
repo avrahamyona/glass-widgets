@@ -177,7 +177,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
  if(p.kind==='island_control'){execIsland(p.cmdId,p.task.action);return}
-  if(p.kind==='enroll_device'){execEnroll(p);return}
+  if(p.kind==='enroll_device'){trackOp(execEnroll(p));return}
   execRun(p.cmdId,p.command);
  }
  function runCommand(id,command,msg,intake){
@@ -192,11 +192,10 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(msg&&validPreapproval(msg,cmd)){
    if(!markSeen(id,'pending',+msg.exp)){audit({kind:'run_command',stage:'seen_persist_failed',command:cmd})} // no durable replay guard -> blocking card below
    else{
-    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+    const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
      if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
      markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-    timer.unref&&timer.unref();
-    const cardExp=[+msg.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+msg.exp); // the card's private expiry is min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+        const cardExp=[+msg.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+msg.exp); // the card's private expiry is min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
     pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:cardExp});
     audit({kind:'run_command',stage:'preapprove_card',command:cmd});
     broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',expiresAt:+msg.exp,body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
@@ -204,17 +203,16 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    }
   }
   if(msg&&msg.sig)audit({kind:'run_command',stage:'bad_sig',command:cmd});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'run_command',stage:'expired',command:p.command});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,texp:intake&&+intake.exp||0});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,texp:intake&&+intake.exp||0});
   audit({kind:'run_command',stage:'requested',command:cmd});
   broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
- async function handleCardAction(p){
+ async function handleCardActionRaw(p){
   const cardId=String(p&&p.card_id||''),pend=pendingApprovals.get(cardId);
   if(!pend)return {ok:false,reason:'expired'};
-  pendingApprovals.delete(cardId);clearTimeout(pend.timer);
+  pendingApprovals.delete(cardId);clearLater(pend.timer);
   if(p.button_id==='approve'){
    if(pend.texp&&Date.now()>=pend.texp){audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});settleCard(cardId,'expired');if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');else ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
    pend.approvedAt=Date.now();pend.cardId=cardId; // the human-tap instant + card identity ride the terminal as pairing evidence
@@ -227,6 +225,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   const dNote=pend.pre?'cancelled - המשתמש ביטל מהאי':(pend.kind==='enroll_device'?'denied - המשתמש דחה את הצימוד מהאי':'denied - המשתמש דחה מהאי');
   if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed',dNote);else ack(pend.cmdId,'failed',dNote);
   return {ok:true}}
+ async function handleCardAction(p){return trackOp(handleCardActionRaw(p))} // every card decision is a DRAINED op: stop() waits out approval/deny/ACK effects before the journal closes
  module.exports.handleCardAction=handleCardAction;
 
  // media_control: play/pause/toggle/next/prev via the Windows media bridge (SMTC). An island approval
@@ -247,10 +246,9 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'media_control',stage:'expired',action:p.action});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer,texp:intake&&+intake.exp||0});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer,texp:intake&&+intake.exp||0});
   audit({kind:'media_control',stage:'requested',action:a});
   broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -436,21 +434,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   const cardExp=[+task.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+task.exp); // min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+      const cardExp=[+task.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+task.exp); // min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:cardExp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+task.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,texp:intake&&+intake.exp||0});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,texp:intake&&+intake.exp||0});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
   broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -564,21 +560,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'ui_automation',stage:'preapproved',steps:p.task.steps.length});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+      const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
    pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:cardExp});
    audit({kind:'ui_automation',stage:'preapprove_card',steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע לחיצות שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(m.sig)audit({kind:'ui_automation',stage:'bad_sig'});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'ui_automation',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,texp:intake&&+intake.exp||0});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,texp:intake&&+intake.exp||0});
   audit({kind:'ui_automation',stage:'requested',steps:steps.length});
   broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -606,21 +600,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+      const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
    pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:cardExp});
    audit({kind:'island_control',stage:'preapprove_card',action});
    broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(m.sig)audit({kind:'island_control',stage:'bad_sig'});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'island_control',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,texp:intake&&+intake.exp||0});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,texp:intake&&+intake.exp||0});
   audit({kind:'island_control',stage:'requested',action});
   broadcastCard({id:cardId,title:'🏝️ אישור פעולה על האי',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -686,7 +678,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }
   return JSON.stringify(body);
  }
- async function ack(id,status,note,result){
+ function canonAckResult(result){
   // ONE canonical result for BOTH the durable record and the wire: matches-trim (entry loss
   // always marked) bounded to RESULT_CAP bytes, stdout/stderr shrink with metadata preserved,
   // capResult as the backstop. A cached replay therefore serves EXACTLY what the original ack
@@ -711,17 +703,30 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    }
    canon=capResult(r); // backstop for any other oversize shape
   }
-  try{if(ledger.has(id)&&ledger.put(id,{status,note,result:canon})!==true)audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status})}catch(e){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status})} // a terminal that cannot persist is AUDITED (evidence for reconciliation), never silently dropped
+  return canon;
+ }
+ function ackCommit(id,status,note,canon){ // durable terminal FIRST - a terminal that cannot persist is AUDITED (evidence for reconciliation), never silently dropped
+  if(!ledger.has(id))return true; // unknown id: nothing to commit (the read-back verify below still fails closed)
+  try{if(ledger.put(id,{status,note,result:canon})!==true){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status});return false}}catch(e){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status});return false}
+  return true;
+ }
+ async function ackSend(id,status,note,canon){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
   if(canon!==undefined)body.result=canon;
   const wire=fitAckBody(body);
-  if(wire==null)return; // fitAckBody already audited envelope_fail - the fetch must not happen
+  if(wire==null)return false; // fitAckBody already audited envelope_fail - the fetch must not happen
   try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
    const respText=await r.text().catch(()=> '');
-   if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return} // a rejected ack is EVIDENCE, never a silent drop
+   if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return false} // a rejected ack is EVIDENCE, never a silent drop
    let landed=null;try{landed=JSON.parse(respText).updated}catch{}
    if(landed!==1)audit({kind:'ack',stage:'ack_unconfirmed',id:String(id||''),status,http:r.status,updated:landed}); // 2xx without a row transition is not proof of landing
-  }catch(e){audit({kind:'ack',stage:'send_failed',id:String(id||''),status,error:String(e&&e.message||e).slice(0,200)})}
+   return true;
+  }catch(e){audit({kind:'ack',stage:'send_failed',id:String(id||''),status,error:String(e&&e.message||e).slice(0,200)});return false}
+ }
+ async function ack(id,status,note,result){
+  const canon=canonAckResult(result);
+  ackCommit(id,status,note,canon);
+  await ackSend(id,status,note,canon);
  }
 
  async function walk(dir,depth,terms,hits,state){
@@ -899,6 +904,12 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  }
 
  let stop=false;
+ const pendingOps=new Set(); // in-flight approval/pairing async effects (card decisions, pairing terminals, enroll execution) - stop() drains them BEFORE the journal lease closes
+ const trackOp=p=>{try{pendingOps.add(p);p.finally(()=>pendingOps.delete(p))}catch{};return p};
+ const agentTimers=new Set(); // every parked approval/pairing timer - stop() cancels ALL so no stale timer fires an effect or an ack after stop
+ const later=(fn,ms)=>{const t=setTimeout(()=>{agentTimers.delete(t);fn()},ms);agentTimers.add(t);t.unref&&t.unref();return t};
+ const clearLater=t=>{if(t==null)return;agentTimers.delete(t);clearTimeout(t)};
+ const pendingRecovery=new Set(); // in-flight boot-recovery ops - stop() drains them before the journal lease closes
  async function loop(){let backoff=1000;
   while(!stop){
    let idleT=null;const ctl=new AbortController();
@@ -925,7 +936,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // task-result polling from the same durable record, so no crash window can strand a command
  // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
  const{createLedger,RESULT_TTL_MS,RESULT_CAP,capResult}=require('./ledger');
-const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable store, packed with the app (src/**) - the pairing journal lives here, no weaker local copy
+const{createFileOutbox}=require('./durable-store.js'); // the shared durable store, packed with the app (src/**) - the pairing journal lives here, no weaker local copy
  const{fingerprint}=require('./fingerprint'); // pairing fingerprint: the PC-side local source the user compares against the sender's approval request
  const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
  // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
@@ -1009,15 +1020,18 @@ const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable s
  const{CHALLENGE_RE:ENROLL_CHALLENGE_RE,signChallenge:signEnrollChallenge}=require('./enroll-challenge'); // A1 challenge binding
 
  let devKey=null,devId='',devPubB64='';
+ let devLoadState='absent'; // the LAST loadDevice verdict: ok|absent|acl|mismatch|corrupt|unreadable - recovery distinguishes VERIFIED absence (strict ENOENT) from an unverifiable/inaccessible key
  function loadDevice(){
+  devKey=null;devId='';devPubB64='';
   try{
-   if(process.platform==='win32'&&(!aclOwnerOnly(devDir())||!aclOwnerOnly(devFile()))){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key (dir OR file) fails closed
-   const j=JSON.parse(fs.readFileSync(devFile(),'utf8'));
-   const priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});
-   const pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64');
-   if(pub!==String(j.pub)){devKey=null;devId='';devPubB64='';audit({kind:'enroll_device',stage:'device_mismatch'});return} // the stored pub must DERIVE from the private key - a tampered file fails closed
-   devKey=priv;devPubB64=pub;devId=crypto.createHash('sha256').update(pub).digest('hex').slice(0,16);
-  }catch{devKey=null;devId='';devPubB64=''}
+   if(process.platform==='win32'&&(!aclOwnerOnly(devDir())||!aclOwnerOnly(devFile()))){devLoadState='acl';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key (dir OR file) fails closed
+   let raw;try{raw=fs.readFileSync(devFile(),'utf8')}catch(e){devLoadState=e&&e.code==='ENOENT'?'absent':'unreadable';return} // STRICT absence: ENOENT only - EACCES/EPERM/EISDIR stay 'unreadable', never 'absent'
+   let j,priv,pub;
+   try{j=JSON.parse(raw);priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64')}
+   catch{devLoadState='corrupt';return}
+   if(pub!==String(j.pub)){devLoadState='mismatch';audit({kind:'enroll_device',stage:'device_mismatch'});return} // the stored pub must DERIVE from the private key - a tampered file fails closed
+   devKey=priv;devPubB64=pub;devId=crypto.createHash('sha256').update(pub).digest('hex').slice(0,16);devLoadState='ok';
+  }catch{devKey=null;devId='';devPubB64='';devLoadState='corrupt'}
  }
  // harden the private DIRECTORY first (verified), then write to a UNIQUE tmp (a pre-planted tmp can
  // never smuggle ACEs in), harden it by SID, verify the effective ACL, and rename atomically.
@@ -1065,10 +1079,9 @@ const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable s
   const cardId=pairingCardId(m.id);
   const texp=intake&&+intake.exp||0;
   if(!await writePairingPending({cmdId:String(m.id),cardId,fingerprint:fp,pubB64,challenge:'challenge' in eData?String(eData.challenge):null,exp:texp||Date.now()+APPROVAL_TTL}))return ack(m.id,'failed','pairing storage unavailable'); // fail closed BEFORE the card exists
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'enroll_device',stage:'pairing_expired',id:String(p.cmdId).slice(0,40),fingerprint:p.fp});settleCard(cardId,'expired');pairingTerminal(p.cmdId,'failed','expired - הצימוד לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:String(m.id),kind:'enroll_device',timer,texp,fp,enroll:{pubB64,privB64,eData}});
+    pendingApprovals.set(cardId,{cmdId:String(m.id),kind:'enroll_device',timer,texp,fp,enroll:{pubB64,privB64,eData}});
   audit({kind:'enroll_device',stage:'pairing_requested',id:String(m.id).slice(0,40),fingerprint:fp});
   broadcastCard({id:cardId,title:'🔗 אישור צימוד טלפון',expiresAt:Date.now()+APPROVAL_TTL,body:'התקבלה בקשת צימוד חתומה למחשב הזה.\n\nטביעת המכשיר החדשה: '+fp+'\n\nאשר רק אם יזמת צימוד מהטלפון עכשיו. אחרי האישור תוצג בטלפון אותה טביעת - אם הן שונות, דחה ונתק. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר צימוד',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -1078,10 +1091,9 @@ const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable s
  // pairing-pending durability: one record in userData (NO key material) so a restart between park
  // and decision becomes a durable terminal the sender can reconcile, not a silently lost enroll.
  const journalDir=()=>path.join(app.getPath('userData'),'pairing-pending');
- // the pairing journal lives in the REVIEWED durable store (server/lib/outbox-file.js: fail-closed
+ // the pairing journal lives in the shared durable store (src/lib/durable-store.js: fail-closed
  // sync/privacy/short-write, immutable envelope + one-way receipt). No local re-implementation.
  let journalStore=null,journalTried=false;
- const pendingRecovery=new Set(); // in-flight boot-recovery ops - stop() drains them before the journal lease closes
  const journal=()=>{
   if(journalStore||journalTried)return journalStore;
   journalTried=true;
@@ -1104,16 +1116,21 @@ const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable s
   catch(e){audit({kind:'enroll_device',stage:'pairing_approve_persist_failed',id:String(cmdId||'').slice(0,40)});return false}};
  const clearPairingPending=cmdId=>{try{fs.unlinkSync(path.join(journalDir(),String(cmdId)+'.json'))}catch{}}; // removal runs ONLY after the durable ledger terminal verifies; a crash-leftover re-enters boot recovery and clears against the existing terminal
  const readPairingPendings=()=>{try{return fs.readdirSync(journalDir()).filter(f=>/^[\w-]{1,80}\.json$/.test(f)).map(f=>f.slice(0,-5))}catch{return[]}}; // EXACT strict ids only; records read through the fail-closed store
- // terminal-FIRST ordering (blocker: clear-before-terminal loses recovery in the crash gap): the
- // durable ledger terminal is committed and VERIFIED before the pairing recovery record is cleared.
- // If the terminal cannot be verified the pending record SURVIVES and the next boot re-terminals it.
- async function pairingTerminal(cmdId,status,note,result){
-  await ack(cmdId,status,note,result);
+ // terminal-FIRST ordering with a SPLIT commit/verify/send (blocker: ack-before-verify could
+ // declare an external success the durable store never committed): the durable ledger terminal is
+ // committed and re-read EXACTLY (status AND canonical result) BEFORE anything reaches the wire.
+ // If the terminal cannot be verified the pending record SURVIVES, NOTHING is sent, and the next
+ // boot re-terminals it through recovery.
+ async function pairingTerminalRaw(cmdId,status,note,result){
+  const canon=canonAckResult(result);
+  ackCommit(cmdId,status,note,canon);
   const back=ledger.get(String(cmdId));
-  if(back&&back.status===status){clearPairingPending(cmdId);audit({kind:'enroll_device',stage:'pairing_terminal_committed',id:String(cmdId||'').slice(0,40),status});return true} // fault checkpoint: terminal durable, journal cleared after
-  audit({kind:'enroll_device',stage:'pairing_terminal_unverified',id:String(cmdId||'').slice(0,40),want:status,got:back&&back.status||'missing'});
-  return false;
+  const exact=!!(back&&back.status===status&&JSON.stringify(back.result||null)===JSON.stringify(canon||null)); // FULL expected record (status+result), not status alone
+  if(!exact){audit({kind:'enroll_device',stage:'pairing_terminal_unverified',id:String(cmdId||'').slice(0,40),want:status,got:back&&back.status||'missing'});return false} // unverified terminal: NO external claim, the journal record survives
+  await ackSend(cmdId,status,note,canon); // the verified durable terminal is the ONLY thing the wire ever claims
+  clearPairingPending(cmdId);audit({kind:'enroll_device',stage:'pairing_terminal_committed',id:String(cmdId||'').slice(0,40),status});return true; // fault checkpoint: terminal durable, journal cleared after
  }
+ function pairingTerminal(...a){return trackOp(pairingTerminalRaw(...a))} // in-flight pairing terminals are DRAINED by stop()
  async function execEnroll(p){
   const{pubB64,privB64,eData}=p.enroll||{};
   if(!pubB64||!privB64){audit({kind:'enroll_device',stage:'pairing_payload_missing',id:String(p.cmdId||'').slice(0,40)});return pairingTerminal(p.cmdId,'failed','pairing payload missing')}
@@ -1153,18 +1170,28 @@ const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable s
    const j=journal();
    if(!j){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unavailable'});return}
    let jr=null;try{jr=await j.get(rid)}catch(e){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unreadable'});return} // corrupt/foreign record: preserve unknown, keep the file
-   const env=jr&&jr.envelope;
-   const schemaOk=env&&typeof env==='object'&&!Array.isArray(env)&&env.v===1&&String(env.cmdId||'')===rid
+   const env=jr&&jr.envelope,rc=jr&&jr.receipt,envObj=env&&typeof env==='object'&&!Array.isArray(env);
+   const schemaOk=!!(envObj
+    &&Object.keys(env).sort().join(',')==='cardId,challenge,cmdId,exp,fingerprint,pubB64,stagedAt,v' // EXACT envelope key set - a smuggled field never becomes evidence
+    &&env.v===1&&String(env.cmdId||'')===rid
     &&typeof env.pubB64==='string'&&env.pubB64.length>0&&typeof env.fingerprint==='string'&&fingerprint(env.pubB64)===env.fingerprint
-    &&String(env.cardId||'')===pairingCardId(rid)&&(env.challenge==null||typeof env.challenge==='string')
-    &&(jr.receipt==null||(jr.receipt&&typeof jr.receipt==='object'&&!Array.isArray(jr.receipt)&&+jr.receipt.approvedAt>0));
+    &&String(env.cardId||'')===pairingCardId(rid)
+    &&(env.challenge==null||(typeof env.challenge==='string'&&ENROLL_CHALLENGE_RE.test(env.challenge))) // the A1 episode challenge must match its strict wire shape
+    &&Number.isInteger(env.exp)&&env.exp>0&&Number.isInteger(env.stagedAt)&&env.stagedAt>0&&env.stagedAt<=env.exp // integral, final, ordered
+    &&(rc==null||(rc&&typeof rc==='object'&&!Array.isArray(rc)
+     &&Object.keys(rc).sort().join(',')==='approvedAt' // EXACT receipt shape
+     &&Number.isInteger(rc.approvedAt)&&rc.approvedAt>0&&rc.approvedAt>=env.stagedAt))); // integral, final, never before staging - malformed approval evidence never becomes success
    if(!schemaOk){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal schema'});return} // a record that is not EXACTLY ours never drives a terminal
    let durable=false;try{durable=await j.confirm(rid)===true}catch{durable=false} // reopen cannot remember a failed dir sync: a receipt without a FRESH fsync is not approval evidence
    if(!durable){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'durability unconfirmed'});return}
    const approvedAt=jr.receipt?+jr.receipt.approvedAt:0;
-   // disk identity: ABSENT (no file) is evidence; EXISTING but not loaded (ACL, priv/pub mismatch,
-   // corrupt) is UNVERIFIABLE - loadDevice already judged at boot, its verdict is reused, never a raw read
-   if(fs.existsSync(devFile())&&!devKey){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'device key invalid or unverifiable'});return}
+   // disk identity: VERIFIED ABSENT (strict ENOENT on stat) is evidence; EXISTING but not loaded
+   // (ACL, priv/pub mismatch, corrupt) and INACCESSIBLE (EACCES/EPERM - existsSync would lie 'false')
+   // are both UNVERIFIABLE: preserve unknown. loadDevice judged the key at boot; the probe only
+   // distinguishes ENOENT from present, never reads the key itself.
+   let probe;try{fs.statSync(devFile());probe='present'}catch(e){probe=e&&e.code==='ENOENT'?'absent':'unknown'}
+   if(probe==='unknown'){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'device path inaccessible - absence unverified'});return}
+   if(probe==='present'&&!devKey){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'device key invalid or unverifiable ('+devLoadState+')'});return}
    const diskPub=devKey?devPubB64:null; // the VERIFIED loaded keypair only
    const fpMatch=!!(diskPub&&diskPub===env.pubB64); // schema already proved fingerprint(env.pubB64)
    let term=null;
@@ -1216,9 +1243,12 @@ const{createFileOutbox}=require('./durable-store.js'); // the REVIEWED durable s
   tunnelStop=t.stop;
  }
  if(cmdKey)resolveFolders().then(()=>{if(folders.length)loop()});
- return {stop:async()=>{stop=true;clearInterval(heartbeat);if(tunnelStop)tunnelStop();if(srvStop)srvStop();
+ return {stop:async()=>{stop=true;clearInterval(heartbeat);
+  for(const t of [...agentTimers])clearTimeout(t);agentTimers.clear(); // NO stale timer fires an effect/ack after stop - a parked card's durable journal record is what survives, and boot recovery terminals it
+  if(tunnelStop)tunnelStop();if(srvStop)srvStop();
+  while(pendingOps.size)await Promise.allSettled([...pendingOps]); // in-flight card decisions / pairing terminals / enroll effects finish BEFORE the journal lease closes - a LOOP, because a drained op can chain the next one (approval -> enroll exec -> pairing terminal); a caller MUST await this before starting another agent on the same profile
   await Promise.allSettled([...pendingRecovery]); // in-flight recovery finishes BEFORE the journal lease closes
   if(journalStore){try{journalStore.close()}catch{}journalStore=null;journalTried=false} // an in-process restart re-acquires cleanly (a same-PID live lock would refuse)
- }};
+ },__debug:()=>({timers:agentTimers.size,ops:pendingOps.size,recovery:pendingRecovery.size,parked:pendingApprovals.size,journalOpen:!!journalStore})};
 }
 module.exports=startAgent;

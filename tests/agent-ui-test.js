@@ -16,7 +16,7 @@ const srv=http.createServer((q,r)=>{const u=new URL(q.url,'http://x');
  if(u.pathname==='/file/upload'){let n=0;q.on('data',d=>n+=d.length);q.on('end',()=>{UPLOADS.push({name:u.searchParams.get('name'),bytes:n,key:q.headers['x-gw-key']});r.writeHead(200,{'content-type':'application/json'});r.end('{"file_id":"f-'+UPLOADS.length+'"}')});return}
  r.statusCode=404;r.end()});
 const pushCmd=m=>{if(global.cmdRes)global.cmdRes.write('data: '+JSON.stringify(m)+'\n\n')};
-const EX=()=>Date.now()+300000;
+const EX=()=>Date.now()+240000; // inside the 300s pre-approval window with margin - a ts/exp generated a millisecond apart must never straddle the boundary (the intermittent bad_sig race)
 const waitAck=async(id,status)=>{for(let i=0;i<50;i++){const a=ACK.find(x=>x.id===id&&x.status===status);if(a)return a;await sleep(200)}const dump=fs.existsSync(cfg+'/glasswidgets/agent-audit.log')?fs.readFileSync(cfg+'/glasswidgets/agent-audit.log','utf8').split('\n').filter(l=>l.includes(id)).join('\n'):'no-log';throw new Error('no ack '+id+' '+status+' in '+JSON.stringify(ACK.slice(-6))+' AUDIT: '+dump)};
 let env,cfg,port;
 const launch=async()=>{

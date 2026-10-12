@@ -42,9 +42,9 @@ const check=(body,label)=>{
 
 // 6) matches array (find_files shape) via the FULL ack path: shrink marks entry loss explicitly
 {
- const aStart=src.indexOf('async function ack(id,status,note,result){');assert(aStart>=0,'ack found');
- let d=0,i=src.indexOf('{',aStart);for(;i<src.length;i++){if(src[i]==='{')d++;else if(src[i]==='}'){d--;if(!d)break}}
- globalThis.__ackSrc=src.slice(aStart,i+1);
+ // the ack path is a commit/verify/send CLUSTER (canon -> durable commit -> wire send): extract all four
+ const grab=sig=>{const st=src.indexOf(sig);assert(st>=0,sig+' found');let dd=0,ii=src.indexOf('{',st);for(;ii<src.length;ii++){if(src[ii]==='{')dd++;else if(src[ii]==='}'){dd--;if(!dd)break}}return src.slice(st,ii+1)};
+ globalThis.__ackSrc=['function canonAckResult(result){','function ackCommit(id,status,note,canon){','async function ackSend(id,status,note,canon){','async function ack(id,status,note,result){'].map(grab).join('\n');
 }
 const mkAck=(onSend)=>{let sent=null;const audits=[];
  const {capResult,RESULT_CAP}=require('../src/lib/ledger.js');
