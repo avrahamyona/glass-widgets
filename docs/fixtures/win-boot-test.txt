@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 7 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - הקוד מעניק R+W בכוונת least-privilege, FullControl נדרש רק לתיקייה)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 8 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - R+W בכוונת least-privilege, FullControl רק לתיקייה; תיקון v8: verify-sig.js נכתב עם String.fromCharCode(10) במקום שורת-חדשה גולמית ששברה את ה-JS)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -89,8 +89,7 @@ try{
   if(-not ($code403 -and $h.ok -eq $true -and $h.deviceId -eq $dev1 -and $h.sig)){throw 'health gate wrong'}
   # verify the health signature CRYPTOGRAPHICALLY against the minted pubkey (deviceId+LF+nonce)
   $verifyFile=Join-Path $base 'verify-sig.js'
-  Set-Content -Path $verifyFile -Encoding ASCII -Value "const c=require('crypto');const[pub,dev,nonce,sig]=process.argv.slice(2);const ok=c.verify(null,Buffer.from(dev+'
-'+nonce,'utf8'),c.createPublicKey({key:Buffer.from(pub,'base64'),format:'der',type:'spki'}),Buffer.from(sig,'hex'));process.exit(ok?0:1)"
+  Set-Content -Path $verifyFile -Encoding ASCII -Value "const c=require('crypto');const[pub,dev,nonce,sig]=process.argv.slice(2);const ok=c.verify(null,Buffer.from(dev+String.fromCharCode(10)+nonce,'utf8'),c.createPublicKey({key:Buffer.from(pub,'base64'),format:'der',type:'spki'}),Buffer.from(sig,'hex'));process.exit(ok?0:1)"
   $devJson=(Get-Content $devFile -Raw | ConvertFrom-Json -EA Stop)
   & node $verifyFile $devJson.pub $dev1 'boottest1234' $h.sig
   if($LASTEXITCODE -ne 0){throw 'health signature did NOT verify against the minted key'}
