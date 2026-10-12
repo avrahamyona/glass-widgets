@@ -171,7 +171,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
   }
   const envelope=await buildCommandEnvelope(env,{id:cmdId,kind,device:device==null?undefined:String(device),data,ttlMs}); // single-device: no override (preEnroll = v1, no device field yet)
   let ok=false;try{ok=await outbox.put(cmdId,{envelope,receipt:null,at:now()})===true}catch{ok=false}
-  if(!ok)return {error:'outbox_commit_failed',id:cmdId};
+  if(!ok)return {error:'outbox_commit_failed',id:cmdId,detail:(typeof outbox.lastError==='function'&&outbox.lastError())||undefined}; // underlying fs cause, when the store knows it
   let back=null;try{back=await outbox.get(String(cmdId))}catch{back=null}
   if(!back||JSON.stringify(back.envelope)!==JSON.stringify(envelope))return {error:'outbox_verify_failed',id:cmdId}; // the EXACT serialized envelope, not just the sig
   return {id:cmdId,reused:false};
@@ -180,7 +180,7 @@ function createSenderClient({deviceUrl,controlUrl,replyKey,cmdKey,signPrivate,de
  // send loads the stored record by id and validates its schema BEFORE the wire. Direct transport
  // is SECRETLESS: X-GW-Key (public) + the signed envelope - the reply key is not even in scope here.
  async function send(prep){
-  if(prep&&prep.error)return {id:prep.id,status:'unknown',reason:prep.error,trusted:false};
+  if(prep&&prep.error)return {id:prep.id,status:'unknown',reason:prep.error,trusted:false,detail:prep.detail};
   const id=String(prep&&prep.id||'');
   let rec=null;try{rec=await outbox.get(id)}catch(e){return {id,status:'unknown',reason:'outbox_read_failed',trusted:false};}
   if(!rec||!envelopeSchemaOk(rec.envelope,device))return {id,status:'unknown',reason:'no_valid_durable_envelope',trusted:false};

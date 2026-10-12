@@ -94,6 +94,13 @@ const realOpen=fs.openSync;
  await patched(fs,'openSync',(p,f,m)=>{if(p===dir&&f==='r')throw Object.assign(new Error('x'),{code:'EIO'});return realOpen(p,f,m)},async()=>{
   assert((await b4.confirm('cmd-2'))===false,'confirm false while dir fsync fails');
  });
+ // WIN32 DIR-FSYNC LIMITATION POLICY: EPERM/EACCES (newer Node dir-open) and EINVAL/EBADF/ENOTSUP
+ // (older fsync) all take the NTFS-journal note path on win32 ONLY; any other code, and ANY code
+ // off-win32, fails closed.
+ {const{_dirFsyncUnsupportedOnWin:unsup}=require('../src/lib/durable-store.js');
+  for(const c of['EPERM','EACCES','EINVAL','EBADF','ENOTSUP'])assert(unsup(true,{code:c})===true,'win32 dir-fsync code '+c+' takes the note path');
+  assert(unsup(true,{code:'EIO'})===false,'EIO is a REAL dir-fsync failure even on win32 - fail closed');
+  assert(unsup(false,{code:'EPERM'})===false,'EPERM off-win32 fails closed');}
  // POSIX READ CHECKS: a record with widened mode fails closed on read
  if(process.platform!=='win32'){
   fs.chmodSync(path.join(dir,'cmd-6.json'),0o644);
