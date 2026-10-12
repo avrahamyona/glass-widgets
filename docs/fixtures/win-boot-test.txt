@@ -1,4 +1,4 @@
-﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 9 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - R+W בכוונת least-privilege, FullControl רק לתיקייה; תיקון v8: verify-sig.js עם String.fromCharCode(10); תיקון v9: PASS 7 מייחס משני הזרמים (stdout/stderr) + דיאגnostיקה מלאה בכשל)
+﻿# בדיקת Boot עצמאית - "החיים שלי השרתי" (שלד השרת על Windows) - גרסה 10 (SHA נעוץ b78d70e ללא שינוי, SID מדויק+dir, אימות חתימת health, שוויון keypair, ייחוס PASS7; תיקון v7: דרישת ה-rights לקובץ הותאמה לחוזה הקוד - R+W בכוונת least-privilege, FullControl רק לתיקייה; תיקון v8: verify-sig.js עם String.fromCharCode(10); תיקון v9: PASS 7 מייחס משני הזרמים; תיקון v10: החוזה האמיתי = exit לא-אפס + אין listener + הזהות לא שוכתבה (SyntaxError גולמי של b78d70e מקובל) + ProgressPreference מושתק)
 # =================================================================
 #
 # הרצה (דרך אחת מדויקת):
@@ -22,7 +22,7 @@
 #
 # גם אם משהו נכשל - הכל נשמר ב-boot-test-log.txt. שלח אותו כמו שהוא.
 # =================================================================
-$ErrorActionPreference='Stop'
+$ErrorActionPreference='Stop'`n$ProgressPreference='SilentlyContinue' # no progress CLIXML in redirected child streams
 $scriptDir=$PSScriptRoot; if(-not $scriptDir){$scriptDir=(Get-Location).Path}
 $logPath=Join-Path $scriptDir 'boot-test-log.txt'
 try{Start-Transcript -Path $logPath -Force | Out-Null}catch{}
@@ -113,12 +113,18 @@ try{
   # fail-loud attributed to the IDENTITY check: nonzero exit AND no listener AND the refusal names
   # the identity failure (corrupt JSON -> SyntaxError from the device load; pair mismatch ->
   # 'refusing to boot'). A generic crash elsewhere does NOT pass.
-  $attributed=($errTxt -match 'refusing to boot') -or ($errTxt -match 'SyntaxError') -or ($outTxt -match 'refusing to boot') -or ($outTxt -match 'SyntaxError') # node stream choice (stdout vs stderr) is build/platform dependent - accept either, the ATTRIBUTION is what matters
-  $noUp=($outTxt -notmatch 'server up') -and ($errTxt -notmatch 'server up')
-  if($exit3 -ne 0 -and $noUp -and $attributed){Say ('PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$exit3+')')}
+  # the REAL contract: nonzero exit AND no listener AND the corrupt identity NOT rewritten.
+  # Stream text is only attribution evidence (the ACL helper's powershell children can pollute
+  # stderr with CLIXML progress records, so exact stream matching is not the contract); the pinned
+  # b78d70e raw SyntaxError and the wip clean 'refusing to boot' are BOTH acceptable refusals.
+  $attributed=($errTxt -match 'refusing to boot') -or ($errTxt -match 'SyntaxError') -or ($outTxt -match 'refusing to boot') -or ($outTxt -match 'SyntaxError')
+  $listener=$false;try{$listener=[bool](Get-NetTCPConnection -LocalPort 47711 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)}catch{}
+  $devAfter=(Get-Content $devFile -Raw -ErrorAction SilentlyContinue)
+  $notRewritten=($devAfter -match 'corrupt') # the identity must stay EXACTLY as corrupted - a silent re-mint is the failure this test hunts
+  if($exit3 -ne 0 -and (-not $listener) -and $notRewritten -and $attributed){Say ('PASS 7: corrupt identity -> boot refused (fail-loud, exit '+$exit3+', identity not rewritten)')}
   else{$errLen=0;$outLen=0;if($errTxt){$errLen=$errTxt.Length};if($outTxt){$outLen=$outTxt.Length}
    $errHead='';$outHead='';if($errTxt){$errHead=$errTxt.Substring(0,[Math]::Min(160,$errLen))};if($outTxt){$outHead=$outTxt.Substring(0,[Math]::Min(160,$outLen))}
-   throw ('corrupt identity boot not refused: exit='+$exit3+' attributed='+$attributed+' errBytes='+$errLen+' outBytes='+$outLen+' errHead=['+$errHead+'] outHead=['+$outHead+']')}
+   throw ('corrupt identity boot not refused: exit='+$exit3+' listener='+$listener+' notRewritten='+$notRewritten+' attributed='+$attributed+' errBytes='+$errLen+' outBytes='+$outLen+' errHead=['+$errHead+'] outHead=['+$outHead+']')}
   Say 'DONE - all checks passed'
 }catch{
   Say ('FAIL: '+$_.Exception.Message)
