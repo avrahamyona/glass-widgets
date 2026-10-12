@@ -1,11 +1,12 @@
-// Local computer-actions agent. Consumes the /glasswidgets/cmd SSE stream (receiver key) and runs
+// Local computer-actions agent. Consumes commands from TWO intakes: the /glasswidgets/cmd SSE stream
+// (worker fallback) and the embedded localhost server behind the tunnel (own-server leg), and runs
 // allowlisted actions: find_files, get_file (upload via /file/upload), index, sys_info, screenshot,
 // delete_file (Downloads folder only, files only), open_path, run_command, media_control, clipboard_read, web_task, ui_automation (screen clicks, card-gated), screenshot (read-only capture).
 // Safety: a resolved-folder allowlist gates file reads, delete_file is pinned to the real Downloads
 // folder, and every mutating/executing command lands in userData/agent-audit.log (JSON lines).
 const fs=require('fs'),path=require('path'),os=require('os'),crypto=require('crypto');
 const {screen}=require('electron');
-const {execFile,exec}=require('child_process');
+const {execFile,exec,execFileSync}=require('child_process');
 
 const CAPS={maxDepth:10,maxScan:60000,contentBytes:2*1024*1024,uploadBytes:20*1024*1024,resultLen:3500,noteLen:500,cmdTimeoutMs:300000};
 const SKIP_DIRS=new Set(['node_modules','.git','AppData','$Recycle.Bin','System Volume Information','.cache','.npm','.vscode','.config','Windows','Program Files','Program Files (x86)','ProgramData','$WinREAgent','Recovery','PerfLogs','.Trash']);
@@ -25,8 +26,8 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  module.exports.cmdKey=cmdKey;
  const SIGN_PUB_BAKED='__GW_SIGN_PUB__'; // CI replaces the placeholder from the GW_SIGN_PUB secret (base64 DER spki of the worker's Ed25519 PUBLIC key); dormant when not injected. Asymmetric on purpose: nothing secret ships inside the public EXE, the signing private key exists only on the worker.
  const signPubB64=process.env.GLASSWIDGETS_AGENT_SIGN_PUB||cfg.signPub||(SIGN_PUB_BAKED.slice(0,5)==='__GW_'?'':SIGN_PUB_BAKED);
- let signPub=null;
- try{if(signPubB64)signPub=crypto.createPublicKey({key:Buffer.from(String(signPubB64).trim(),'base64'),format:'der',type:'spki'})}catch{}
+ let signPub=null,signPubFp='';
+ try{if(signPubB64){signPub=crypto.createPublicKey({key:Buffer.from(String(signPubB64).trim(),'base64'),format:'der',type:'spki'});signPubFp=crypto.createHash('sha256').update(signPub.export({format:'der',type:'spki'})).digest('hex').slice(0,16)}}catch{}
 
  let folders=[];
  async function resolveFolders(){
@@ -118,16 +119,25 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  // only verifies. Strict field formats, freshness AND an explicit expires_at (checked at receipt and
  // again before the auto-run timer fires). ANY anomaly -> ordinary blocking card (fail-closed).
  const SKEW_MS=60000; // small clock-skew allowance; ts further in the future is rejected
- function validPreapproval(m,payload){
+ function validPreapproval(m,payload,device){
+  // reason-coded refusal audit: the intermittent bad_sig needs fingerprints (which gate failed,
+  // ts/exp/now), never a bare false. Same fail-closed behavior, just attributable.
+  const no=(reason,extra)=>{audit({kind:'server',stage:'pre_sig_fail',reason,id:String(m&&m.id||'').slice(0,40),...(extra||{})});return false};
   try{
-   if(!signPub||!seenOk||!m||m.ts==null||m.exp==null)return false;
-   const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return false; // strict hex - never feed arbitrary bytes to verify
+   if(!signPub)return no('no_signpub');
+   if(!seenOk)return no('seen_store_broken');
+   if(!m||m.ts==null||m.exp==null)return no('missing_fields');
+   const sig=String(m.sig||'');if(!/^[0-9a-f]{128}$/.test(sig))return no('sig_shape');
    const ts=+m.ts,exp=+m.exp,now=Date.now();
-   if(!Number.isFinite(ts)||!Number.isFinite(exp))return false;
-   if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return false; // not from the future, not stale
-   if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return false; // a sane, live validity window
-   return crypto.verify(null,Buffer.from([String(m.id),String(m.kind),String(ts),String(exp),payload].join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
-  }catch{return false}
+   if(!Number.isFinite(ts)||!Number.isFinite(exp))return no('ts_exp_nan');
+   if(ts>now+SKEW_MS||ts<now-PRE_TTL_MS)return no('ts_window',{ts,now});
+   if(exp<=ts||exp-ts>PRE_TTL_MS||exp<=now)return no('exp_window',{ts,exp,now});
+   // v2 envelopes bind the TARGET DEVICE into the signature (device\nid\nkind...); v1 (stage A, single device) has no device field
+   const fields=device!=null?[String(device),String(m.id),String(m.kind),String(ts),String(exp),payload]:[String(m.id),String(m.kind),String(ts),String(exp),payload];
+   const ok=crypto.verify(null,Buffer.from(fields.join('\n'),'utf8'),signPub,Buffer.from(sig,'hex'));
+   if(!ok)return no('verify_false',{kind:String(m.kind||'').slice(0,30),payloadLen:String(payload||'').length});
+   return true;
+  }catch(e){return no('thrown',{err:String(e&&e.message||e).slice(0,80)})}
  }
  // replay guard: signed command ids are remembered (persisted) with their decision until their exp,
  // so the same signed message cannot re-run after a burst, reconnect or app restart. The store is
@@ -158,13 +168,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   return false;
  }
  function execPending(p){
+  // execution-time transport authority, one gate for EVERY branch (auto-run, approval tap,
+  // media session grant): the effect dies if either the signed exp or the transport expiry passed
+  const expA=[+p.exp,+p.texp].filter(x=>Number.isFinite(x)&&x>0);
+  if(expA.length&&Date.now()>=Math.min(...expA)){audit({kind:p.kind||'run_command',stage:'transport_expired',id:String(p.cmdId||'').slice(0,40),command:p.command,action:p.action});ack(p.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני הביצוע');return}
+  if(ledger.transition(p.cmdId,'running')!==true){audit({kind:p.kind||'run_command',stage:'running_gate_fail',id:String(p.cmdId||'').slice(0,40)});ack(p.cmdId,'failed','ledger transition failed - effect blocked');return} // no durable running mark -> NO effect
   if(p.kind==='media_control'){mediaApproved=true;execMedia(p.cmdId,p.action);return}
   if(p.kind==='web_task'){execWebTask(p.cmdId,p.task);return}
   if(p.kind==='ui_automation'){execUi(p.cmdId,p.task.steps);return}
  if(p.kind==='island_control'){execIsland(p.cmdId,p.task.action);return}
+  if(p.kind==='enroll_device'){trackOp(execEnroll(p));return}
   execRun(p.cmdId,p.command);
  }
- function runCommand(id,command,msg){
+ function runCommand(id,command,msg,intake){
   const cmd=String(command||'').trim();
   if(!cmd)return ack(id,'failed','missing command');
   if(cmd.length>1000)return ack(id,'failed','command too long');
@@ -176,35 +192,40 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(msg&&validPreapproval(msg,cmd)){
    if(!markSeen(id,'pending',+msg.exp)){audit({kind:'run_command',stage:'seen_persist_failed',command:cmd})} // no durable replay guard -> blocking card below
    else{
-    const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+    const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
      if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',command:p.command});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
      markSeen(p.cmdId,'executed');audit({kind:p.kind,stage:'preapproved',command:p.command});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-    timer.unref&&timer.unref();
-    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:+msg.exp});
+        const cardExp=[+msg.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+msg.exp); // the card's private expiry is min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,pre:true,exp:cardExp});
     audit({kind:'run_command',stage:'preapprove_card',command:cmd});
     broadcastCard({id:cardId,title:'⚡ מבצע פקודה שאישרת',expiresAt:+msg.exp,body:'השרת מבקש להריץ לפי ההוראה המפורשת שלך:\n'+cmd+'\n\nהפקודה רצה אוטומטית בעוד '+(AUTO_RUN_MS/1000)+' שניות - הקש בטל כדי לעצור.',buttons:[{id:'deny',label:'בטל',style:'danger'}]});
     return;
    }
   }
   if(msg&&msg.sig)audit({kind:'run_command',stage:'bad_sig',command:cmd});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'run_command',stage:'expired',command:p.command});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'run_command',command:cmd,timer,texp:intake&&+intake.exp||0});
   audit({kind:'run_command',stage:'requested',command:cmd});
   broadcastCard({id:cardId,title:'⚠️ אישור הרצת פקודה במחשב',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש להריץ:\n'+cmd+'\n\nבלי אישור - הפקודה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
- async function handleCardAction(p){
+ async function handleCardActionRaw(p){
   const cardId=String(p&&p.card_id||''),pend=pendingApprovals.get(cardId);
   if(!pend)return {ok:false,reason:'expired'};
-  pendingApprovals.delete(cardId);clearTimeout(pend.timer);
+  pendingApprovals.delete(cardId);clearLater(pend.timer);
   if(p.button_id==='approve'){
-   audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action});
+   if(pend.texp&&Date.now()>=pend.texp){audit({kind:pend.kind||'run_command',stage:'transport_expired',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});settleCard(cardId,'expired');if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');else ack(pend.cmdId,'failed','expired - תוקף סמכות התעבורה פג לפני האישור');return {ok:true}} // transport authority is enforced at EXECUTION time, not just intake
+   pend.approvedAt=Date.now();pend.cardId=cardId; // the human-tap instant + card identity ride the terminal as pairing evidence
+   if(pend.kind==='enroll_device'&&!await approvePairingPending(pend.cmdId,pend.approvedAt)){audit({kind:'enroll_device',stage:'pairing_journal_unavailable',id:String(pend.cmdId||'').slice(0,40)});settleCard(cardId,'denied');pairingTerminal(pend.cmdId,'failed','pairing evidence store unavailable - לא נרשמה ראיית אישור');return {ok:true}} // no durable approval evidence -> NO effect
+   audit({kind:pend.kind||'run_command',stage:'approved',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
    settleCard(cardId,'approved');execPending(pend);return {ok:true}}
   if(pend.pre)markSeen(pend.cmdId,'cancelled');
-  audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action});
+  audit({kind:pend.kind||'run_command',stage:pend.pre?'cancelled':'denied',command:pend.command,action:pend.action,fingerprint:pend.fp||undefined});
   settleCard(cardId,pend.pre?'cancelled':'denied');
-  ack(pend.cmdId,'failed',pend.pre?'cancelled - המשתמש ביטל מהאי':'denied - המשתמש דחה מהאי');return {ok:true}}
+  const dNote=pend.pre?'cancelled - המשתמש ביטל מהאי':(pend.kind==='enroll_device'?'denied - המשתמש דחה את הצימוד מהאי':'denied - המשתמש דחה מהאי');
+  if(pend.kind==='enroll_device')pairingTerminal(pend.cmdId,'failed',dNote);else ack(pend.cmdId,'failed',dNote);
+  return {ok:true}}
+ async function handleCardAction(p){return trackOp(handleCardActionRaw(p))} // every card decision is a DRAINED op: stop() waits out approval/deny/ACK effects before the journal closes
  module.exports.handleCardAction=handleCardAction;
 
  // media_control: play/pause/toggle/next/prev via the Windows media bridge (SMTC). An island approval
@@ -218,17 +239,16 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   audit({kind:'media_control',stage:'executed',action:a,ok:!!(r&&r.ok),error:r&&r.error||undefined});
   return r&&r.ok?ack(id,'done',a):ack(id,'failed',String(r&&r.error||'media bridge unavailable').slice(0,200));
  }
- function mediaControl(id,action){
+ function mediaControl(id,action,intake){
   const a=String(action||'').trim().toLowerCase();
   if(!MEDIA_ACTIONS.includes(a))return ack(id,'failed','bad action');
-  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execMedia(id,a)}
+  if(mediaApproved){audit({kind:'media_control',stage:'requested',action:a,via:'session-grant'});return execPending({cmdId:id,kind:'media_control',action:a,texp:intake&&+intake.exp||0})} // session grant is NOT a gate bypass: the same durable running transition decides, and the shared expiry gate gets the transport authority
   if(pendingApprovals.size>=5)return ack(id,'failed','too many pending approvals');
   if(!broadcastCard)return ack(id,'failed','no UI for approvals');
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'media_control',stage:'expired',action:p.action});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'media_control',action:a,timer,texp:intake&&+intake.exp||0});
   audit({kind:'media_control',stage:'requested',action:a});
   broadcastCard({id:cardId,title:'🎵 אישור שליטה במדיה',expiresAt:Date.now()+APPROVAL_TTL,body:'השרת מבקש שליטה בניגון במחשב (פעולה: '+a+'). אישור מתיר שליטה במדיה עד הפעלה מחדש של האפליקציה. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -385,7 +405,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    return (i+1)+'. '+d});
   return lines.join('\n');
  }
- async function webTask(id,task){
+ async function webTask(id,task,intake){
   const url=String(task&&task.url||'').trim();
   if(!webUrlOk(url))return ack(id,'failed','url refused - https only, no private/local targets');
   const rawSteps=Array.isArray(task.steps)?task.steps:[];
@@ -414,20 +434,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre',url:p.task&&p.task.url});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'web_task',stage:'preapproved',url:p.task&&p.task.url});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:+task.exp});
+      const cardExp=[+task.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+task.exp); // min(signed exp, transport authority) - the auto-run timer and the shared execPending gate both honor it
+   pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,pre:true,exp:cardExp});
    audit({kind:'web_task',stage:'preapprove_card',url:url.slice(0,200),steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע משימת אתר שאישרת',expiresAt:+task.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(task.sig)audit({kind:'web_task',stage:'bad_sig',url:url.slice(0,200)});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'web_task',stage:'expired',url:p.task&&p.task.url});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'web_task',task:{url,steps},timer,texp:intake&&+intake.exp||0});
   audit({kind:'web_task',stage:'requested',url:url.slice(0,200),steps:steps.length});
   broadcastCard({id:cardId,title:'🌐 אישור משימת אתר ברקע',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -524,7 +543,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(ok===steps.length&&!out.deadline)return ack(id,'done','ui: '+ok+'/'+steps.length+' inputs injected',out);
   return ack(id,'failed','ui: stopped ('+ok+'/'+steps.length+' injected'+(out.deadline?', task deadline':'')+') - injection is not target success, verify by screenshot',out);
  }
- function uiAutomation(id,m){
+ function uiAutomation(id,m,intake){
   const rawSteps=Array.isArray(m.steps)?m.steps:[];
   if(!uiStepsOk(rawSteps)){audit({kind:'ui_automation',stage:'failed',error:'bad plan',steps:rawSteps.length});return ack(id,'failed','bad ui plan - unknown action, out-of-screen coords or >20 steps')}
   const steps=rawSteps,plan=uiPlan(steps),label=String(m.label||'').slice(0,200);
@@ -541,20 +560,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'ui_automation',stage:'preapproved',steps:p.task.steps.length});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:+m.exp});
+      const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+   pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,pre:true,exp:cardExp});
    audit({kind:'ui_automation',stage:'preapprove_card',steps:steps.length});
    broadcastCard({id:cardId,title:'⚡ מבצע לחיצות שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(m.sig)audit({kind:'ui_automation',stage:'bad_sig'});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'ui_automation',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'ui_automation',task:{steps},timer,texp:intake&&+intake.exp||0});
   audit({kind:'ui_automation',stage:'requested',steps:steps.length});
   broadcastCard({id:cardId,title:'🖱️ אישור לחיצות על המסך',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -568,7 +586,7 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(r&&r.ok)audit({kind:'island_control',stage:'executed',action});else audit({kind:'island_control',stage:'failed',action,error:(r&&r.error)||'unknown'});
   ack(id,r&&r.ok?'done':'failed',r&&r.ok?'done (renderer confirmed '+(action==='close'?'closed':action)+')':String((r&&r.error)||'unknown'));
  }
- function islandControl(id,m){
+ function islandControl(id,m,intake){
   const action=String(m.action||'').toLowerCase();
   if(!ISLAND_ACTIONS.includes(action)){audit({kind:'island_control',stage:'failed',error:'bad action'});return ack(id,'failed','unknown island action (open/close)')}
   // pre-approval payload the worker signs for island_control: the action string
@@ -582,20 +600,19 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   if(!broadcastCard){if(preOk)markSeen(id,'refused');return ack(id,'failed','no UI for approvals')}
   const cardId='local-approve-'+String(id).replace(/[^\w-]/g,'').slice(0,60);
   if(preOk){
-   const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
     if(p.exp&&Date.now()>=p.exp){markSeen(p.cmdId,'expired');settleCard(cardId,'expired');audit({kind:p.kind,stage:'expired_pre'});ack(p.cmdId,'failed','expired - החתימה פגה לפני הביצוע');return}
     markSeen(p.cmdId,'executed');audit({kind:'island_control',stage:'preapproved',action:p.task.action});settleCard(cardId,'executed');execPending(p)},AUTO_RUN_MS);
-   timer.unref&&timer.unref();
-   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:+m.exp});
+      const cardExp=[+m.exp,intake&&+intake.exp].filter(x=>Number.isFinite(x)&&x>0).reduce((a,b)=>Math.min(a,b),+m.exp); // min(signed exp, transport authority)
+   pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,pre:true,exp:cardExp});
    audit({kind:'island_control',stage:'preapprove_card',action});
    broadcastCard({id:cardId,title:'⚡ מבצע פעולת אי שאישרת',expiresAt:+m.exp,body,buttons:[{id:'deny',label:'בטל',style:'danger'}]});
    return;
   }
   if(m.sig)audit({kind:'island_control',stage:'bad_sig'});
-  const timer=setTimeout(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
    audit({kind:'island_control',stage:'expired'});settleCard(cardId,'expired');ack(p.cmdId,'failed','expired - לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
-  timer.unref&&timer.unref();
-  pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer});
+    pendingApprovals.set(cardId,{cmdId:id,kind:'island_control',task:{action},timer,texp:intake&&+intake.exp||0});
   audit({kind:'island_control',stage:'requested',action});
   broadcastCard({id:cardId,title:'🏝️ אישור פעולה על האי',expiresAt:Date.now()+APPROVAL_TTL,body,buttons:[{id:'approve',label:'אשר',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
  }
@@ -661,17 +678,55 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }
   return JSON.stringify(body);
  }
- async function ack(id,status,note,result){
+ function canonAckResult(result){
+  // ONE canonical result for BOTH the durable record and the wire: matches-trim (entry loss
+  // always marked) bounded to RESULT_CAP bytes, stdout/stderr shrink with metadata preserved,
+  // capResult as the backstop. A cached replay therefore serves EXACTLY what the original ack
+  // carried - no dual fidelity.
+  let canon;
+  if(result!==undefined){
+   let r,ser=true;try{r=JSON.parse(JSON.stringify(result))}catch{ser=false} // cycles / BigInt / throwing toJSON never crash the ack path
+   if(!ser)r={unserializable:true};
+   else if(r===null||typeof r!=='object')r={value:r}; // null and primitives get a stable object shape
+   if(Array.isArray(r.matches)){const m=[...r.matches],fullCount=m.length; // trim WITH the loss metadata counted in, so the final object still fits the cap
+    let sj=JSON.stringify({...r,matches:m,truncated:true,matches_full:fullCount});
+    while(m.length&&Buffer.byteLength(sj)>RESULT_CAP){m.pop();sj=JSON.stringify({...r,matches:m,truncated:true,matches_full:fullCount})}
+    r={...r,matches:m};if(m.length<fullCount){r.truncated=true;r.matches_full=fullCount}}
+   if(typeof r.stdout==='string'||typeof r.stderr==='string'){ // stdout/stderr shrink, metadata preserved
+    if(r.stdout_full==null)r.stdout_full=String(r.stdout||'').length;
+    if(r.stderr_full==null)r.stderr_full=String(r.stderr||'').length;
+    let sj=JSON.stringify(r);
+    while(Buffer.byteLength(sj)>RESULT_CAP&&((r.stdout||'').length||(r.stderr||'').length)){
+     if(String(r.stdout||'').length>=String(r.stderr||'').length)r.stdout=r.stdout.slice(0,Math.floor(r.stdout.length*0.7));
+     else r.stderr=r.stderr.slice(0,Math.floor(r.stderr.length*0.7));
+     r.truncated=true;sj=JSON.stringify(r)}
+   }
+   canon=capResult(r); // backstop for any other oversize shape
+  }
+  return canon;
+ }
+ function ackCommit(id,status,note,canon){ // durable terminal FIRST - a terminal that cannot persist is AUDITED (evidence for reconciliation), never silently dropped
+  if(!ledger.has(id))return true; // unknown id: nothing to commit (the read-back verify below still fails closed)
+  try{if(ledger.put(id,{status,note,result:canon})!==true){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status});return false}}catch(e){audit({kind:'ack',stage:'ledger_fail',id:String(id||''),status});return false}
+  return true;
+ }
+ async function ackSend(id,status,note,canon){
   const body={key:cmdKey,id:String(id||''),status,note:String(note||'').slice(0,CAPS.noteLen)};
-  if(result!==undefined){let s=JSON.stringify(result);if(s.length>CAPS.resultLen&&Array.isArray(result.matches)){const m=[...result.matches];const fullCount=m.length;while(m.length&&s.length>CAPS.resultLen){m.pop();s=JSON.stringify({matches:m})}result={matches:m};if(m.length<fullCount){result.truncated=true;result.matches_full=fullCount}}body.result=result} // entry loss is always marked
+  if(canon!==undefined)body.result=canon;
   const wire=fitAckBody(body);
-  if(wire==null)return; // fitAckBody already audited envelope_fail - the fetch must not happen
+  if(wire==null)return false; // fitAckBody already audited envelope_fail - the fetch must not happen
   try{const r=await fetch(ackUrl,{method:'POST',headers:{'content-type':'application/json'},body:wire,signal:AbortSignal.timeout(15000)});
    const respText=await r.text().catch(()=> '');
-   if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return} // a rejected ack is EVIDENCE, never a silent drop
+   if(!r.ok){audit({kind:'ack',stage:'http_error',id:String(id||''),status,http:r.status,body:String(respText).slice(0,200)});return false} // a rejected ack is EVIDENCE, never a silent drop
    let landed=null;try{landed=JSON.parse(respText).updated}catch{}
    if(landed!==1)audit({kind:'ack',stage:'ack_unconfirmed',id:String(id||''),status,http:r.status,updated:landed}); // 2xx without a row transition is not proof of landing
-  }catch(e){audit({kind:'ack',stage:'send_failed',id:String(id||''),status,error:String(e&&e.message||e).slice(0,200)})}
+   return true;
+  }catch(e){audit({kind:'ack',stage:'send_failed',id:String(id||''),status,error:String(e&&e.message||e).slice(0,200)});return false}
+ }
+ async function ack(id,status,note,result){
+  const canon=canonAckResult(result);
+  ackCommit(id,status,note,canon);
+  await ackSend(id,status,note,canon);
  }
 
  async function walk(dir,depth,terms,hits,state){
@@ -785,8 +840,43 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
   }catch(e){await ack(id,'failed','index error')}
  }
 
- async function handle(m){
+ const SSE_UNSIGNED_WINDOW_MS=10*60*1000; // unsigned SSE commands carry no signed expiry: their dedup window is bounded, never "at-most-once forever"
+ const PARKED_KINDS=new Set(['run_command','web_task','media_control','ui_automation','island_control','enroll_device']); // effect starts at approval (execPending), not at dispatch - enroll's approval is the PAIRING card
+ async function handle(m,intake){
   if(!m||typeof m!=='object'||!m.id)return;
+  const id=String(m.id);
+  // ONE command-id ledger across BOTH transports (SSE + tunnel): the tunnel intake already
+  // committed 'accepted' (intake.committed); the SSE leg commits HERE. Whatever the channel, an
+  // id runs AT MOST ONCE: a live record blocks dispatch (incl. after a restart, where
+  // crashed records reload as unknown), a terminal record replays its CACHED result
+  // (idempotent re-ack, never re-executed), an unknown record is never auto-retried.
+  if(!(intake&&intake.committed)){
+   // transport authority window: signed exp (m.exp) AND the worker's private transport expiry
+   // (expires_at - SSE envelope metadata, never a sender field) bound the effect. An unsigned
+   // command without either gets a BOUNDED dedup window (not an at-most-once-forever claim);
+   // a fallback resend of the same command keeps the SAME id inside that window.
+   const prev=ledger.get(id); // duplicate resolution FIRST - a replay (expired or not) never rewrites a live record and never contradicts the original outcome
+   if(prev){
+    audit({kind:String(m.kind||'').slice(0,40),stage:'cross_transport_duplicate',id:id.slice(0,40),status:prev.status});
+    if(prev.status==='done'||prev.status==='failed')ack(id,prev.status,prev.note||'cached result',prev.result||undefined); // cached terminal result - the effect NEVER re-runs; accepted/running/unknown stay silent (no ack race)
+    return;
+   }
+   const wins=[+m.exp,+m.expires_at].filter(x=>Number.isFinite(x)&&x>0);
+   const winEnd=wins.length?Math.min(...wins):Date.now()+SSE_UNSIGNED_WINDOW_MS;
+   if(winEnd<=Date.now()){audit({kind:String(m.kind||'').slice(0,40),stage:'transport_expired',id:id.slice(0,40)});try{ledger.put(id,{status:'failed',note:'transport expired before effect',exp:Date.now()})}catch{}return ack(id,'failed','expired - תוקף התעבורה פג לפני הביצוע')} // authority expired BEFORE any effect - only a NEW intake gets the refusal record
+   intake={...(intake||{}),exp:winEnd}; // execution-time expiry for parked cards, same as the tunnel leg
+   if(!ledger.ok()){audit({kind:String(m.kind||'').slice(0,40),stage:'ledger_down',id:id.slice(0,40)});return ack(id,'failed','ledger unavailable')}
+   const putR=ledger.put(id,{status:'accepted',exp:winEnd}); // the dedup tombstone lives exactly as long as the command's authority window
+   if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:id.slice(0,40)});return ack(id,'failed','ledger full - retry later')}
+   if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:id.slice(0,40)});return ack(id,'failed','ledger commit failed')}
+  }
+  // running gate: an immediate effect NEVER starts unless the running transition is durable.
+  // transition returns false on a down store / missing record / final record - no permit, no effect.
+  if(!PARKED_KINDS.has(m.kind)&&ledger.transition(id,'running')!==true){
+   audit({kind:'server',stage:'running_gate_fail',id:id.slice(0,40)});
+   try{ledger.put(id,{status:'failed',note:'running gate failed'})}catch{}
+   return ack(id,'failed','ledger transition failed - effect blocked');
+  }
   // central duplicate-id guard: a reused id (any card-parking kind, signed or not) is refused before
   // dispatch, so it can never clobber a parked approval whose original timer would run the replacement
   if((m.kind==='run_command'||m.kind==='web_task'||m.kind==='media_control'||m.kind==='ui_automation'||m.kind==='island_control')&&checkDup(m.id,m.kind,{}))return;
@@ -794,17 +884,18 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    if(m.kind==='find_files')return findFiles(m.id,m.query,m.limit,m.folder);
    if(m.kind==='delete_file')return deleteFile(m.id,m.path);
    if(m.kind==='open_path')return openPathCmd(m.id,m.path);
-   if(m.kind==='run_command')return runCommand(m.id,m.command,m);
+   if(m.kind==='run_command')return runCommand(m.id,m.command,m,intake);
    if(m.kind==='update_app')return updateAppCmd(m.id);
-   if(m.kind==='media_control')return mediaControl(m.id,m.action);
+   if(m.kind==='media_control')return mediaControl(m.id,m.action,intake);
    if(m.kind==='clipboard_read')return clipboardRead(m.id);
-   if(m.kind==='web_task')return webTask(m.id,m);
-   if(m.kind==='ui_automation')return uiAutomation(m.id,m);
-   if(m.kind==='island_control')return islandControl(m.id,m);
+   if(m.kind==='web_task')return webTask(m.id,m,intake);
+   if(m.kind==='ui_automation')return uiAutomation(m.id,m,intake);
+   if(m.kind==='island_control')return islandControl(m.id,m,intake);
    if(m.kind==='screenshot')return screenshotCmd(m.id);
    if(m.kind==='index')return buildIndex(m.id);
    if(m.kind==='sys_info')return sysInfo(m.id,m.topic);
    if(m.kind==='get_file')return getFile(m.id,m.path);
+   if(m.kind==='enroll_device')return enrollDeviceCmd(m,intake);
    return ack(m.id,'failed','unknown kind');
   })();
   let tOut=null;
@@ -813,6 +904,12 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
  }
 
  let stop=false;
+ const pendingOps=new Set(); // in-flight approval/pairing async effects (card decisions, pairing terminals, enroll execution) - stop() drains them BEFORE the journal lease closes
+ const trackOp=p=>{try{pendingOps.add(p);p.finally(()=>pendingOps.delete(p))}catch{};return p};
+ const agentTimers=new Set(); // every parked approval/pairing timer - stop() cancels ALL so no stale timer fires an effect or an ack after stop
+ const later=(fn,ms)=>{const t=setTimeout(()=>{agentTimers.delete(t);fn()},ms);agentTimers.add(t);t.unref&&t.unref();return t};
+ const clearLater=t=>{if(t==null)return;agentTimers.delete(t);clearTimeout(t)};
+ const pendingRecovery=new Set(); // in-flight boot-recovery ops - stop() drains them before the journal lease closes
  async function loop(){let backoff=1000;
   while(!stop){
    let idleT=null;const ctl=new AbortController();
@@ -831,7 +928,327 @@ function startAgent({app,rd,wr,chatKey,broadcastCard,broadcastSettle,updateApp,m
    }catch(e){clearTimeout(idleT);if(stop)break;await new Promise(r=>setTimeout(r,backoff));backoff=Math.min(backoff*2,15000)}
   }
  }
+ const KNOWN_KINDS=new Set(['find_files','delete_file','open_path','run_command','update_app','media_control','clipboard_read','web_task','ui_automation','island_control','screenshot','index','sys_info','get_file','enroll_device']);
+ // own-server leg (stage 1): the same command intake, served locally and reached through the tunnel.
+ // the worker SSE loop keeps running as fallback until cutover; checkDup dedups a command that
+ // somehow arrives on both channels, and every terminal state still acks over the existing leg.
+ // ONE transactional ledger per tunnel command (intake -> accepted -> terminal): replay guard AND
+ // task-result polling from the same durable record, so no crash window can strand a command
+ // between two files. Corrupt/unwritable = tunnel intake AND /task both closed (503).
+ const{createLedger,RESULT_TTL_MS,RESULT_CAP,capResult}=require('./ledger');
+const{createFileOutbox}=require('./durable-store.js'); // the shared durable store, packed with the app (src/**) - the pairing journal lives here, no weaker local copy
+ const{fingerprint}=require('./fingerprint'); // pairing fingerprint: the PC-side local source the user compares against the sender's approval request
+ const ledger=createLedger(path.join(app.getPath('userData'),'agent-tunnel-ledger.json'));
+ // signed READ auth for /task and /info: the baked command key is PUBLIC (it ships in the EXE) and
+ // must never gate private results. Reads carry X-GW-Read-Ts/Nonce/Sig - Ed25519 with the worker
+ // key over method\npath\nquery\nts\nnonce (request-bound), ts within 60s, nonce replay-cached
+ // in memory until ts+120s (read-only, so an in-memory horizon is sufficient; documented).
+ const STRICT_ENVELOPES=process.env.GLASSWIDGETS_STRICT_ENVELOPES==='1'; // v2 device-bound envelopes mandatory (set before tunnel-first multi-device)
+ // the PRODUCTION read verifier lives in the shared Electron-free module (tests run the same
+ // code): target-device binding + the narrow bootstrap exception (one pending enroll command's
+ // /task read only, TTL-bound, replay-guarded there).
+ const{createReadAuth}=require('./read-auth');
+ const verifyReadAuth=signPub?createReadAuth({senderPubKey:signPub,getDeviceId:()=>devId,getPendingEnroll:()=>pendingEnrollRead}):(()=>false);
+ const srvCfg={enabled:true,port:47631,...((cfg.localServer&&typeof cfg.localServer==='object')?cfg.localServer:{})};
+ if(process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED!==undefined)srvCfg.enabled=process.env.GLASSWIDGETS_LOCAL_SERVER_ENABLED==='1';
+ if(process.env.GLASSWIDGETS_LOCAL_SERVER_PORT)srvCfg.port=+process.env.GLASSWIDGETS_LOCAL_SERVER_PORT||srvCfg.port;
+ let srvStop=null;
+ if(cmdKey&&srvCfg.enabled)resolveFolders().then(async()=>{
+  if(stop||!folders.length)return; // stop() during folder resolution must not bring the listener up
+  const{startLocalServer}=require('./localserver');
+  if(devId&&devPubB64)audit({kind:'device',stage:'identity',device:devId,fingerprint:fingerprint(devPubB64)}); // boot-time local fingerprint source (pairing comparison), not only at enroll time
+  const r=await startLocalServer({port:srvCfg.port,token:cmdKey,version:app.getVersion(),caps:'approve,update,media,clip,web,sig,ui,shot,island',
+   getDevice:()=>devKey&&devId?{deviceId:devId,deviceSign:(t)=>deviceSign(t)}:null,
+   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
+   getInfo:()=>({envelopeVersions:['v1','v2'],strict:!!STRICT_ENVELOPES,...(devId?{deviceId:devId,pubkey:devPubB64,fingerprint:fingerprint(devPubB64)}:{})}), // the LOCAL fingerprint the user compares against the sender's approval request
+   verifyReadAuth,log:(lvl,o)=>audit({lvl,...o}),
+   onCommand:(m)=>{
+    // TUNNEL INTAKE AUTHORITY: the baked cmd key is public (extractable from the downloadable EXE)
+    // and proves nothing about the sender. Every tunnel command must arrive as a signed envelope
+    // {id,kind,ts,exp,sig,data} - Ed25519 over id\nkind\nts\nexp\nJSON.stringify(data), signed by the
+    // worker's private key (never in the EXE). Unsigned/stale/expired -> 403, audited, never handled.
+    // The signature proves sender authority at INTAKE ONLY: downstream the command runs with ordinary
+    // unsigned semantics - approval cards for sensitive kinds exactly as before.
+    if(!KNOWN_KINDS.has(m.kind))return {accepted:false,status:400,reason:'unknown_kind'};
+    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
+    // reserved fields: signed data must never smuggle identity/envelope fields past the intake
+    for(const k of RESERVED)if(k in data){audit({kind:'server',stage:'reserved_field',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});return {accepted:false,status:400,reason:'reserved_field'}}
+    // v2 device binding: when the envelope carries a device field, the signature must cover it
+    // AND it must name THIS enrolled device - the same worker-signed envelope can never be
+    // collected at another device. v1 (no device field) stays accepted in stage A (single
+    // device); the worker starts sending device-bound envelopes before tunnel-first multi-device.
+    if(m.device!=null){
+     if(!devId||String(m.device)!==String(devId)){audit({kind:'server',stage:'wrong_device',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'wrong_device'}}
+     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data),String(m.device))){
+      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
+      return {accepted:false,status:403,reason:'unsigned'}}
+    }else{
+     // v1 (no device field) is a BOOTSTRAP/single-device path only. With strict envelopes on
+     // (required before tunnel-first multi-device), an enrolled device refuses v1 outright -
+     // never a strip-device fallback.
+     if(STRICT_ENVELOPES&&devId){audit({kind:'server',stage:'device_required',id:String(m.id||'').slice(0,40)});return {accepted:false,status:403,reason:'device_required'}}
+     if(!validPreapproval({id:m.id,kind:m.kind,ts:m.ts,exp:m.exp,sig:m.sig},JSON.stringify(data))){
+      audit({kind:'server',stage:'unsigned_cmd',id:String(m.id||'').slice(0,40),cmd:String(m.kind||'').slice(0,40)});
+      return {accepted:false,status:403,reason:'unsigned'}}}
+    if(!ledger.ok())return {accepted:false,status:503,reason:'ledger'};
+    if(ledger.has(m.id)){const prev=ledger.get(m.id);audit({kind:'server',stage:'duplicate',id:String(m.id).slice(0,40),cmd:String(m.kind).slice(0,40),outcome:prev&&prev.status});return {accepted:false,status:409,reason:'duplicate',outcome:prev?{status:prev.status,note:prev.note}:null}} // a replayed envelope gets a stable 409 carrying the cached durable outcome as an UNSIGNED informative HINT (this response is not device-signed - it is never proof of a terminal; the sender reconciles via a device-signed channel or a human decision, never an automatic new episode or popup)
+    // durable commit BEFORE any effect: the accepted record IS the dispatch permit. If it cannot
+    // be committed, nothing runs and the sender may retry the same envelope (it was not consumed).
+    const putR=ledger.put(m.id,{status:'accepted',exp:+m.exp});
+    if(putR==='full'){audit({kind:'server',stage:'ledger_full',id:String(m.id).slice(0,40)});return {accepted:false,status:429,reason:'ledger_full'}} // live window saturated - retry later; NO live tombstone was evicted
+    if(putR!==true){audit({kind:'server',stage:'ledger_fail',id:String(m.id).slice(0,40)});return {accepted:false,status:503,reason:'ledger'}}
+    handle({...data,id:String(m.id),kind:m.kind},{tunnel:true,exp:+m.exp,committed:true}); // authenticated identity LAST; transport authority travels as an INTERNAL intake parameter, never a sender-controlled field
+    return {accepted:true};
+   }});
+  if(stop){if(r.started)r.stop();return} // stop() raced the listen() call - tear it back down
+  if(r.started){srvStop=r.stop;startTunnelLeg(r.port)}else audit({kind:'server',stage:'not_started',reason:String(r.reason||'')});
+ });
+
+ // path B: quick tunnel + authenticated discovery publish on the worker + heartbeat.
+ // the worker record is a POINTER ONLY (url + timestamp); commands keep flowing over SSE until
+ // the sender switches, and a stale record (no heartbeat) means the sender falls back to SSE.
+ const tunnelCfg={enabled:true,...((cfg.tunnel&&typeof cfg.tunnel==='object')?cfg.tunnel:{})};
+ if(process.env.GLASSWIDGETS_TUNNEL_ENABLED!==undefined)tunnelCfg.enabled=process.env.GLASSWIDGETS_TUNNEL_ENABLED==='1';
+ const discoveryUrl=base.replace(/\/chat$/,'/agent/tunnel');
+ // per-device credential: the keypair is GENERATED ON THIS PC (enroll_device kind, worker-signed
+ // only); the private key never leaves the machine - only the public key is acked back for
+ // enrollment. The baked cmd key is public and never proves device identity.
+ const devDir=()=>path.join(app.getPath('userData'),'device');
+ const devFile=()=>path.join(devDir(),'device.json');
+ const{aclDump,currentSid,aclOwnerOnly,aclHarden}=require('./acl-win'); // the shared harden+verify module (Electron-free) - same code for agent and standalone server
+ const{RESERVED}=require('./command-contract'); // shared reserved-field list (superset of the old inline guard)
+ const{CHALLENGE_RE:ENROLL_CHALLENGE_RE,signChallenge:signEnrollChallenge}=require('./enroll-challenge'); // A1 challenge binding
+
+ let devKey=null,devId='',devPubB64='';
+ let devLoadState='absent'; // the LAST loadDevice verdict: ok|absent|acl|mismatch|corrupt|unreadable - recovery distinguishes VERIFIED absence (strict ENOENT) from an unverifiable/inaccessible key
+ function loadDevice(){
+  devKey=null;devId='';devPubB64='';
+  try{
+   if(process.platform==='win32'&&(!aclOwnerOnly(devDir())||!aclOwnerOnly(devFile()))){devLoadState='acl';audit({kind:'enroll_device',stage:'acl_fail'});return} // a readable-by-others private key (dir OR file) fails closed
+   let raw;try{raw=fs.readFileSync(devFile(),'utf8')}catch(e){devLoadState=e&&e.code==='ENOENT'?'absent':'unreadable';return} // STRICT absence: ENOENT only - EACCES/EPERM/EISDIR stay 'unreadable', never 'absent'
+   let j,priv,pub;
+   try{j=JSON.parse(raw);priv=crypto.createPrivateKey({key:Buffer.from(String(j.priv),'base64'),format:'der',type:'pkcs8'});pub=crypto.createPublicKey(priv).export({format:'der',type:'spki'}).toString('base64')}
+   catch{devLoadState='corrupt';return}
+   if(pub!==String(j.pub)){devLoadState='mismatch';audit({kind:'enroll_device',stage:'device_mismatch'});return} // the stored pub must DERIVE from the private key - a tampered file fails closed
+   devKey=priv;devPubB64=pub;devId=crypto.createHash('sha256').update(pub).digest('hex').slice(0,16);devLoadState='ok';
+  }catch{devKey=null;devId='';devPubB64='';devLoadState='corrupt'}
+ }
+ // harden the private DIRECTORY first (verified), then write to a UNIQUE tmp (a pre-planted tmp can
+ // never smuggle ACEs in), harden it by SID, verify the effective ACL, and rename atomically.
+ // Any failure = no key on disk and the enroll fails.
+ function persistDevice(pubB64,privB64){
+  const dir=devDir(),f=devFile(),tmp=path.join(dir,'device-'+process.pid+'-'+Date.now()+'.tmp');
+  try{
+   fs.mkdirSync(dir,{recursive:true});
+   if(process.platform==='win32'&&!aclHarden(dir,true)){audit({kind:'enroll_device',stage:'persist_fail',err:'dir acl'});return false}
+   fs.writeFileSync(tmp,JSON.stringify({pub:pubB64,priv:privB64}),{mode:0o600,flag:'wx'}); // exclusive create - a pre-existing path is never rewritten
+   if(process.platform==='win32'&&!aclHarden(tmp,false)){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:'file acl'});return false}
+   fs.renameSync(tmp,f);
+   return true;
+  }catch(e){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:String(e&&e.message||e).slice(0,120)});return false}
+ }
+ loadDevice();
+ const deviceSign=text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex');
+ async function enrollDeviceCmd(m,intake){
+  // worker-signed ONLY: the tunnel intake marker arrives as an INTERNAL parameter (never a sender
+  // field), the flat SSE path needs a sig over the empty payload. This operation founds the device
+  // identity, so it never parks a user card and never runs unsigned. STAGE 1 HAS NO ROTATION: an
+  // existing identity is RETURNED, never rewritten, and any extra fields (incl. a tampered
+  // 'rotate') are IGNORED - so no replay or payload tampering can ever change the keys. Explicit
+  // rotation/revocation is a stage-2 design (stable identity + dedicated signed flow).
+  const tun=!!(intake&&intake.tunnel===true);
+  // the SSE path nests the payload under m.data; the local-server intake SPREADS it to top-level
+  // fields. Read both - dropping the challenge would silently skip the episode proof. Field
+  // PRESENCE is preserved via own-property: a wrong-typed challenge (123, null) reaches the
+  // explicit bad_challenge refusal instead of collapsing to {} (parity across both intakes).
+  const eData=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:(Object.prototype.hasOwnProperty.call(m,'challenge')?{challenge:m.challenge}:{});
+  if('challenge' in eData&&(typeof eData.challenge!=='string'||!ENROLL_CHALLENGE_RE.test(eData.challenge))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // malformed OR wrong-typed: refused explicitly, never silently ignored (no String() coercion past the shape check)
+  const ePayload=Object.keys(eData).length?JSON.stringify(eData):'';
+  if(!tun&&!(validPreapproval(m,ePayload)||(m.device!=null&&validPreapproval(m,ePayload,m.device)))){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
+  if(devKey&&devId){pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000};audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)})}
+  // PAIRING GATE (release gate): founding the device identity requires an on-PC human approval.
+  // The candidate keypair is minted IN MEMORY ONLY (never persisted before approval); the parked
+  // card binds THIS command id, THIS challenge episode, THIS candidate pubkey/fingerprint and its
+  // expiry. Cancel/expiry/restart all produce a DURABLE TERMINAL without persisting any key.
+  if(!broadcastCard){audit({kind:'enroll_device',stage:'pairing_no_ui',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','pairing requires the on-PC UI')}
+  if(pendingApprovals.size>=5)return ack(m.id,'failed','too many pending approvals');
+  const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
+  const pubB64=publicKey.export({format:'der',type:'spki'}).toString('base64');
+  const privB64=privateKey.export({format:'der',type:'pkcs8'}).toString('base64');
+  const fp=fingerprint(pubB64); // LOCAL, computed from the in-memory candidate - the trusted display the owner compares
+  const cardId=pairingCardId(m.id);
+  const texp=intake&&+intake.exp||0;
+  if(!await writePairingPending({cmdId:String(m.id),cardId,fingerprint:fp,pubB64,challenge:'challenge' in eData?String(eData.challenge):null,exp:texp||Date.now()+APPROVAL_TTL}))return ack(m.id,'failed','pairing storage unavailable'); // fail closed BEFORE the card exists
+  const timer=later(()=>{const p=pendingApprovals.get(cardId);if(!p)return;pendingApprovals.delete(cardId);
+   audit({kind:'enroll_device',stage:'pairing_expired',id:String(p.cmdId).slice(0,40),fingerprint:p.fp});settleCard(cardId,'expired');pairingTerminal(p.cmdId,'failed','expired - הצימוד לא אושר תוך כ-2 דקות')},APPROVAL_TTL);
+    pendingApprovals.set(cardId,{cmdId:String(m.id),kind:'enroll_device',timer,texp,fp,enroll:{pubB64,privB64,eData}});
+  audit({kind:'enroll_device',stage:'pairing_requested',id:String(m.id).slice(0,40),fingerprint:fp});
+  broadcastCard({id:cardId,title:'🔗 אישור צימוד טלפון',expiresAt:Date.now()+APPROVAL_TTL,body:'התקבלה בקשת צימוד חתומה למחשב הזה.\n\nטביעת המכשיר החדשה: '+fp+'\n\nאשר רק אם יזמת צימוד מהטלפון עכשיו. אחרי האישור תוצג בטלפון אותה טביעת - אם הן שונות, דחה ונתק. בלי אישור - הבקשה תידחה אוטומטית בעוד כ-2 דקות.',buttons:[{id:'approve',label:'אשר צימוד',style:'primary'},{id:'deny',label:'דחה',style:'danger'}]});
+ }
+ const chProofFor=eData=>{ // A1 challenge binding: prove key possession for THIS enrollment episode
+  const ch=eData&&'challenge' in eData?String(eData.challenge):null;
+  return ch?{challengeSig:signEnrollChallenge(deviceSign,ch,devPubB64,devId)}:{}};
+ // pairing-pending durability: one record in userData (NO key material) so a restart between park
+ // and decision becomes a durable terminal the sender can reconcile, not a silently lost enroll.
+ const journalDir=()=>path.join(app.getPath('userData'),'pairing-pending');
+ // the pairing journal lives in the shared durable store (src/lib/durable-store.js: fail-closed
+ // sync/privacy/short-write, immutable envelope + one-way receipt). No local re-implementation.
+ let journalStore=null,journalTried=false;
+ const journal=()=>{
+  if(journalStore||journalTried)return journalStore;
+  journalTried=true;
+  try{journalStore=createFileOutbox(journalDir())}catch(e){journalStore=null;audit({kind:'enroll_device',stage:'pairing_journal_unavailable',err:String(e&&e.message||e).slice(0,120)})}
+  return journalStore;
+ };
+ // deterministic, collision-proof card id per episode (sha256 of the EXACT strict cmdId) - never a
+ // stripped/truncated raw id, always inside the 80-char settle boundary.
+ const pairingCardId=cmdId=>'local-approve-'+crypto.createHash('sha256').update(String(cmdId),'utf8').digest('hex').slice(0,32);
+ // envelope = the staged candidate (immutable); receipt = null while parked, {approvedAt} after the
+ // human tap (one-way). Written BEFORE the card is published. FAIL CLOSED: no durable journal record
+ // -> no card, terminal failure instead.
+ const writePairingPending=async r=>{const j=journal();if(!j)return false;
+  try{return (await j.put(String(r.cmdId),{envelope:{v:1,cmdId:String(r.cmdId),cardId:String(r.cardId||''),fingerprint:String(r.fingerprint||''),pubB64:String(r.pubB64||''),challenge:r.challenge?String(r.challenge):null,exp:+r.exp||0,stagedAt:Date.now()},receipt:null}))===true}
+  catch(e){audit({kind:'enroll_device',stage:'pairing_persist_failed',id:String(r&&r.cmdId||'').slice(0,40),err:String(e&&e.message||e).slice(0,120)});return false}};
+ const approvePairingPending=async(cmdId,approvedAt)=>{ // receipt null->set: the approval evidence is durable BEFORE any key persist - no evidence, no effect
+  const j=journal();if(!j)return false;
+  try{const cur=await j.get(String(cmdId));if(!cur||!cur.envelope)return false;
+   return (await j.put(String(cmdId),{envelope:cur.envelope,receipt:{approvedAt:+approvedAt}}))===true}
+  catch(e){audit({kind:'enroll_device',stage:'pairing_approve_persist_failed',id:String(cmdId||'').slice(0,40)});return false}};
+ const clearPairingPending=cmdId=>{try{fs.unlinkSync(path.join(journalDir(),String(cmdId)+'.json'))}catch{}}; // removal runs ONLY after the durable ledger terminal verifies; a crash-leftover re-enters boot recovery and clears against the existing terminal
+ const readPairingPendings=()=>{try{return fs.readdirSync(journalDir()).filter(f=>/^[\w-]{1,80}\.json$/.test(f)).map(f=>f.slice(0,-5))}catch{return[]}}; // EXACT strict ids only; records read through the fail-closed store
+ // terminal-FIRST ordering with a SPLIT commit/verify/send (blocker: ack-before-verify could
+ // declare an external success the durable store never committed): the durable ledger terminal is
+ // committed and re-read EXACTLY (status AND canonical result) BEFORE anything reaches the wire.
+ // If the terminal cannot be verified the pending record SURVIVES, NOTHING is sent, and the next
+ // boot re-terminals it through recovery.
+ async function pairingTerminalRaw(cmdId,status,note,result){
+  const canon=canonAckResult(result);
+  ackCommit(cmdId,status,note,canon);
+  const back=ledger.get(String(cmdId));
+  const exact=!!(back&&back.status===status&&JSON.stringify(back.result||null)===JSON.stringify(canon||null)); // FULL expected record (status+result), not status alone
+  if(!exact){audit({kind:'enroll_device',stage:'pairing_terminal_unverified',id:String(cmdId||'').slice(0,40),want:status,got:back&&back.status||'missing'});return false} // unverified terminal: NO external claim, the journal record survives
+  await ackSend(cmdId,status,note,canon); // the verified durable terminal is the ONLY thing the wire ever claims
+  clearPairingPending(cmdId);audit({kind:'enroll_device',stage:'pairing_terminal_committed',id:String(cmdId||'').slice(0,40),status});return true; // fault checkpoint: terminal durable, journal cleared after
+ }
+ function pairingTerminal(...a){return trackOp(pairingTerminalRaw(...a))} // in-flight pairing terminals are DRAINED by stop()
+ async function execEnroll(p){
+  const{pubB64,privB64,eData}=p.enroll||{};
+  if(!pubB64||!privB64){audit({kind:'enroll_device',stage:'pairing_payload_missing',id:String(p.cmdId||'').slice(0,40)});return pairingTerminal(p.cmdId,'failed','pairing payload missing')}
+  if(devKey&&devId){ // enrolled while the card was parked
+   if(devPubB64!==pubB64){ // a DIFFERENT key won the race: the fingerprint the owner approved on screen is NOT the live identity. NEVER claim success on another key - terminal failure + audit, explicit fresh approval required for the actual live fingerprint.
+    audit({kind:'enroll_device',stage:'pairing_superseded',id:String(p.cmdId||'').slice(0,40),shown:p.fp||null,actual:fingerprint(devPubB64)});
+    return pairingTerminal(p.cmdId,'failed','superseded - מפתח אחר צומד בזמן שהאישור המתין; יש להתחיל צימוד חדש ולאשר את הטביעת הנוכחית');
+   }
+   pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000};
+   audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});
+   return pairingTerminal(p.cmdId,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)});
+  }
+  audit({kind:'enroll_device',stage:'pairing_persist_begin',id:String(p.cmdId||'').slice(0,40),fingerprint:p.fp}); // fault checkpoint: BEFORE the effect
+  if(!persistDevice(pubB64,privB64))return pairingTerminal(p.cmdId,'failed','device key persist failed');
+  audit({kind:'enroll_device',stage:'pairing_persisted',id:String(p.cmdId||'').slice(0,40),fingerprint:p.fp}); // fault checkpoint: the effect LANDED (crash after here = recovery must reconcile done)
+  loadDevice();
+  if(!devKey||devPubB64!==pubB64){audit({kind:'enroll_device',stage:'persist_fail'});return pairingTerminal(p.cmdId,'failed','device key persist failed')}
+  pendingEnrollRead={id:String(p.cmdId),device:devId,until:Date.now()+120000}; // the preEnroll sender fetches THIS command's terminal under '-' until it learns the id
+  audit({kind:'enroll_device',stage:'enrolled',device:devId,fingerprint:fingerprint(pubB64)});
+  if(currentTunnelUrl)publishTunnel(currentTunnelUrl); // identity upgraded: republish the live pointer signed
+  // the SAME approval reaches the owner registry adapter through this terminal: the episode-bound
+  // challenge proof + pairing evidence (approvedAt captured at the human tap, not at execution) is
+  // exactly what the adapter consumes for registration
+  return pairingTerminal(p.cmdId,'done','enrolled',{deviceId:devId,pubkey:pubB64,...chProofFor(eData),pairing:{fingerprint:p.fp,approvedAt:+p.approvedAt||Date.now(),cardId:String(p.cardId||'')||null}}); // PUBLIC key only travels
+ }
+ let pendingEnrollRead=null; // {id,device,until}: the ONE bootstrap /task fetch allowed under '-' (set on EVERY accepted enroll_device - fresh mint AND already-enrolled, so a post-restart re-enroll still lets the preEnroll sender fetch its result)
+ // restart recovery over the pairing journal. The journal ALONE never proves no-effect: each parked
+ // record is cross-read against the ACTUAL persisted identity on disk, and the reload-FINAL 'unknown'
+ // is reconciled ONLY with exact evidence:
+ //  staged (no approval receipt) + candidate key NOT on disk   -> failed (no approval, no effect)
+ //  approved + the CANDIDATE key persisted (fp match)          -> done 'enrolled' (approval+persist landed; only the terminal was lost) with a FRESH challenge proof
+ //  approved + NO key on disk                                  -> failed 'persist did not complete' (precise; never a success claim)
+ //  approved + a DIFFERENT key on disk                         -> failed 'superseded' (never success on another key)
+ //  anything unreadable or impossible (staged but persisted)   -> PRESERVE unknown, keep the record, audit
+ for(const rid of readPairingPendings()){
+  const pr=(async()=>{
+   const j=journal();
+   if(!j){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unavailable'});return}
+   let jr=null;try{jr=await j.get(rid)}catch(e){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal unreadable'});return} // corrupt/foreign record: preserve unknown, keep the file
+   const env=jr&&jr.envelope,rc=jr&&jr.receipt,envObj=env&&typeof env==='object'&&!Array.isArray(env);
+   const schemaOk=!!(envObj
+    &&Object.keys(env).sort().join(',')==='cardId,challenge,cmdId,exp,fingerprint,pubB64,stagedAt,v' // EXACT envelope key set - a smuggled field never becomes evidence
+    &&env.v===1&&String(env.cmdId||'')===rid
+    &&typeof env.pubB64==='string'&&env.pubB64.length>0&&typeof env.fingerprint==='string'&&fingerprint(env.pubB64)===env.fingerprint
+    &&String(env.cardId||'')===pairingCardId(rid)
+    &&(env.challenge==null||(typeof env.challenge==='string'&&ENROLL_CHALLENGE_RE.test(env.challenge))) // the A1 episode challenge must match its strict wire shape
+    &&Number.isInteger(env.exp)&&env.exp>0&&Number.isInteger(env.stagedAt)&&env.stagedAt>0&&env.stagedAt<=env.exp // integral, final, ordered
+    &&(rc==null||(rc&&typeof rc==='object'&&!Array.isArray(rc)
+     &&Object.keys(rc).sort().join(',')==='approvedAt' // EXACT receipt shape
+     &&Number.isInteger(rc.approvedAt)&&rc.approvedAt>0&&rc.approvedAt>=env.stagedAt))); // integral, final, never before staging - malformed approval evidence never becomes success
+   if(!schemaOk){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'journal schema'});return} // a record that is not EXACTLY ours never drives a terminal
+   let durable=false;try{durable=await j.confirm(rid)===true}catch{durable=false} // reopen cannot remember a failed dir sync: a receipt without a FRESH fsync is not approval evidence
+   if(!durable){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'durability unconfirmed'});return}
+   const approvedAt=jr.receipt?+jr.receipt.approvedAt:0;
+   // disk identity: VERIFIED ABSENT (strict ENOENT on stat) is evidence; EXISTING but not loaded
+   // (ACL, priv/pub mismatch, corrupt) and INACCESSIBLE (EACCES/EPERM - existsSync would lie 'false')
+   // are both UNVERIFIABLE: preserve unknown. loadDevice judged the key at boot; the probe only
+   // distinguishes ENOENT from present, never reads the key itself.
+   let probe;try{fs.statSync(devFile());probe='present'}catch(e){probe=e&&e.code==='ENOENT'?'absent':'unknown'}
+   if(probe==='unknown'){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'device path inaccessible - absence unverified'});return}
+   if(probe==='present'&&!devKey){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'device key invalid or unverifiable ('+devLoadState+')'});return}
+   const diskPub=devKey?devPubB64:null; // the VERIFIED loaded keypair only
+   const fpMatch=!!(diskPub&&diskPub===env.pubB64); // schema already proved fingerprint(env.pubB64)
+   let term=null;
+   if(!approvedAt){
+    if(fpMatch){audit({kind:'enroll_device',stage:'pairing_recovery_ambiguous',id:rid.slice(0,40),reason:'staged journal but candidate key persisted'});return} // impossible order - never claim
+    term={status:'failed',note:'cancelled - האפליקציה הופעלה מחדש לפני שהצימוד אושר'}; // exact: no approval receipt, no key from THIS episode
+   }else if(fpMatch){ // approval + persist BOTH landed; only the terminal was lost to the crash
+    term={status:'done',note:'enrolled',result:{deviceId:devId,pubkey:diskPub,...chProofFor(env.challenge?{challenge:String(env.challenge)}:{}),pairing:{fingerprint:env.fingerprint,cardId:String(env.cardId||''),approvedAt}}};
+   }else if(!diskPub){ // approval landed, persist did not (crash in the gap)
+    term={status:'failed',note:'approved but the key persist did not complete - האישור נרשם אך המפתח לא נשמר'};
+   }else{ // approval landed but a DIFFERENT key is on disk
+    term={status:'failed',note:'superseded - מפתח אחר צומד בזמן שהאישור המתין; יש להתחיל צימוד חדש ולאשר את הטביעת הנוכחית'};
+   }
+   audit({kind:'enroll_device',stage:'pairing_restart_cancel',id:rid.slice(0,40),fingerprint:env.fingerprint||undefined,approved:!!approvedAt,terminal:term.status});
+   const rec=ledger.get(rid);
+   if(rec&&rec.status==='unknown'&&rec.result==null)ledger.reconcileUnknown(rid,term); // narrow: FINAL unknown with NO recorded result, and ONLY under this journal+disk evidence - never a generic unknown rewrite
+   const back=ledger.get(rid);
+   const exact=!!(back&&back.status===term.status&&JSON.stringify(back.result||null)===JSON.stringify(term.result||null)); // FULL expected record (status+result), not status alone
+   if(!exact){audit({kind:'enroll_device',stage:'pairing_recovery_unverified',id:rid.slice(0,40),want:term.status,got:back&&back.status||'missing'});return} // the durable store did not commit the computed terminal - NEVER declare it on the wire
+   await ack(rid,term.status,term.note,term.result); // external ack only AFTER the exact durable terminal is verified
+   clearPairingPending(rid);pendingEnrollRead={id:rid,device:devId,until:Date.now()+120000}; // the sender can still fetch THIS terminal under '-'
+  })().catch(e=>audit({kind:'enroll_device',stage:'pairing_recovery_error',id:rid.slice(0,40),err:String(e&&e.message||e).slice(0,120)}));
+  pendingRecovery.add(pr);pr.finally(()=>pendingRecovery.delete(pr));
+ }
+ let tunnelStop=null,heartbeat=null;
+ let currentTunnelUrl='';
+ async function publishTunnel(url){
+  if(!devKey||!devId){audit({kind:'tunnel',stage:'no_device_key'});return} // never publish under the public baked key
+  const ts=Date.now();
+  try{const r=await fetch(discoveryUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({deviceId:devId,url,v:app.getVersion(),ts,sig:deviceSign(devId+'\n'+url+'\n'+ts)}),signal:AbortSignal.timeout(15000)});
+   if(!r.ok)audit({kind:'tunnel',stage:'publish_fail',status:r.status});
+  }catch(e){audit({kind:'tunnel',stage:'publish_error',err:String(e&&e.message||e).slice(0,120)})}
+ }
+ async function startTunnelLeg(port){
+  if(!tunnelCfg.enabled)return;
+  const{ensureCloudflared,startTunnel}=require('./tunnel');
+  const exe=await ensureCloudflared(path.join(app.getPath('userData'),'bin'),{log:(stage,obj)=>audit({kind:'tunnel',stage,...obj})});
+  if(stop)return; // stop() raced the download - never bring the tunnel up afterwards
+  if(!exe){audit({kind:'tunnel',stage:'no_binary'});return}
+  const t=startTunnel({exePath:exe,port,isStopped:()=>stop,log:(stage,obj)=>audit({kind:'tunnel',stage,...obj}),
+   onDown:()=>{currentTunnelUrl='';clearInterval(heartbeat);heartbeat=null;audit({kind:'tunnel',stage:'down'});publishTunnel('')}, // best-effort clear NOW (network/D1 permitting); the 90s stale window remains the guaranteed fallback
+   onUrl:(url)=>{
+    currentTunnelUrl=url;
+    audit({kind:'tunnel',stage:'published',url});
+    publishTunnel(url);
+    clearInterval(heartbeat);
+    heartbeat=setInterval(()=>publishTunnel(url),45000);heartbeat.unref&&heartbeat.unref();
+   }});
+  tunnelStop=t.stop;
+ }
  if(cmdKey)resolveFolders().then(()=>{if(folders.length)loop()});
- return {stop:()=>{stop=true}};
+ return {stop:async()=>{stop=true;clearInterval(heartbeat);
+  for(const t of [...agentTimers])clearTimeout(t);agentTimers.clear(); // NO stale timer fires an effect/ack after stop - a parked card's durable journal record is what survives, and boot recovery terminals it
+  if(tunnelStop)tunnelStop();if(srvStop)srvStop();
+  while(pendingOps.size)await Promise.allSettled([...pendingOps]); // in-flight card decisions / pairing terminals / enroll effects finish BEFORE the journal lease closes - a LOOP, because a drained op can chain the next one (approval -> enroll exec -> pairing terminal); a caller MUST await this before starting another agent on the same profile
+  await Promise.allSettled([...pendingRecovery]); // in-flight recovery finishes BEFORE the journal lease closes
+  if(journalStore){try{journalStore.close()}catch{}journalStore=null;journalTried=false} // an in-process restart re-acquires cleanly (a same-PID live lock would refuse)
+ },__debug:()=>({timers:agentTimers.size,ops:pendingOps.size,recovery:pendingRecovery.size,parked:pendingApprovals.size,journalOpen:!!journalStore})};
 }
 module.exports=startAgent;

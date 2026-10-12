@@ -1,0 +1,52 @@
+﻿# בדיקת הרגל המקומית של האפליקציה המותקנת (החיים שלי המחשבי) - גרסה 1
+# ================================================================
+# בודקת שהשרת המקומי המוטבע באפליקציה *המותקנת* חי על המחשב האמיתי:
+#   1. תהליך האפליקציה רץ
+#   2. פורט 47631 מאזין על localhost
+#   3. /health בלי מפתח -> 403 (השער עובד)
+#   4. /cmd בלי מפתח -> 403
+#   5. sanity: פורט סמכותי סגור באמת
+# לא נוגע בכלום, קריאה בלבד.
+#
+# הרצה:
+#   1. ודא שהאפליקציה "החיים שלי המחשבי" פתוחה ורצה
+#   2. שמור את הקובץ בשם app-leg-test.ps1 על שולחן העבודה
+#   3. פתח PowerShell והדבק:
+#      powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\Desktop\app-leg-test.ps1"
+#   4. החלון נשאר פתוח עד Enter. שלח בחזרה את כל הפלט + app-leg-log.txt
+#
+# פלט צפוי:
+#   PASS 1: app process running (...)
+#   PASS 2: local leg listening on 127.0.0.1:47631
+#   PASS 3: /health without key -> 403 (gate works)
+#   PASS 4: /cmd without key -> 403 (gate works)
+#   PASS 5: control port really closed (sanity)
+#   DONE - all checks passed
+# ================================================================
+$ErrorActionPreference='Stop'
+$scriptDir=$PSScriptRoot; if(-not $scriptDir){$scriptDir=(Get-Location).Path}
+try{Start-Transcript -Path (Join-Path $scriptDir 'app-leg-log.txt') -Force | Out-Null}catch{}
+function Say($m){Write-Host $m}
+function Probe($path,$method){
+  try{ $r=Invoke-WebRequest -Uri ('http://127.0.0.1:47631'+$path) -Method $method -UseBasicParsing -TimeoutSec 5; return [int]$r.StatusCode }
+  catch{ if($_.Exception.Response){return [int]$_.Exception.Response.StatusCode}; return -1 }
+}
+try{
+  $proc=Get-Process -Name 'GlassWidgets' -ErrorAction SilentlyContinue
+  if(-not $proc){ $proc=Get-Process | Where-Object {$_.MainWindowTitle -like '*החיים שלי*'} | Select-Object -First 1 }
+  if($proc){Say ('PASS 1: app process running ('+$proc.ProcessName+')')}else{throw 'app process not found - open the app first'}
+  $listen=Get-NetTCPConnection -LocalPort 47631 -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1'}
+  if($listen){Say 'PASS 2: local leg listening on 127.0.0.1:47631'}else{throw 'port 47631 not listening'}
+  if((Probe '/health' 'GET') -eq 403){Say 'PASS 3: /health without key -> 403 (gate works)'}else{throw ('/health without key did not 403')}
+  if((Probe '/cmd' 'POST') -eq 403){Say 'PASS 4: /cmd without key -> 403 (gate works)'}else{throw ('/cmd without key did not 403')}
+  $closed=$false
+  try{Invoke-WebRequest -Uri 'http://127.0.0.1:47632/health' -UseBasicParsing -TimeoutSec 3 | Out-Null}catch{$closed=$true}
+  if($closed){Say 'PASS 5: control port really closed (sanity)'}else{throw 'control port unexpectedly open'}
+  Say 'DONE - all checks passed'
+}catch{
+  Say ('FAIL: '+$_.Exception.Message)
+  Say 'send this whole output back + app-leg-log.txt'
+}finally{
+  try{Stop-Transcript | Out-Null}catch{}
+  Read-Host 'Press Enter to close'
+}
