@@ -1,17 +1,24 @@
-﻿# win-enroll-acceptance.txt - Windows acceptance harness for the enroll precheck + watchdog
-# removal. Runs on the user's PC (real Windows PowerShell 5.1) ONLY when the reviewed
-# packed build is installed and ops has injected the reviewed hashes. NOT for general use.
+﻿# win-enroll-acceptance.txt - Windows acceptance harness for the enroll precheck on the
+# user's PC (real Windows PowerShell 5.1). Use only after a packed build reviewed outside
+# this file is installed and its hashes have been injected; authorization for running it
+# is established outside this file. NOT for general use.
 # It extracts the EXACT shipped C# and helper block from win-enroll-precheck.txt (single
-# source of truth - no copies) and exercises them end-to-end against real processes:
+# source - no copies) and exercises them end-to-end against real processes:
 #   - a locally compiled test-double exe (Add-Type, no downloads) for timeout, descendant,
 #     fault-injection (create/assign/resume/query), parser and closure scenarios
 #   - the real installed app, launched ONLY after the injected pins verify exactly
-#   - the shipped watchdog-removal fixture against absent/present task states
+# Task Scheduler: this harness performs NO scheduler mutations - no create, delete,
+# replace, or /f anywhere. A read-only query reports whether GlassWidgets-Watchdog
+# exists; removing it is a separate owner step (win-watchdog-remove.txt) run by the
+# owner outside this harness, never from here.
 # Every run is tracked with an UNKNOWN placeholder before invocation; the staging dir is
 # removed only when closure is proven for ALL runs, and preserved otherwise. Job closure
 # (kernel-verified job emptiness) is the containment proof - a process-name query is only
 # a supporting signal, never proof of child absence.
-param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='',[string]$PrecheckPath='',[string]$RemovalPath='')
+# Every precheck invocation is gated: run assessment (launcher ok, started, no timeout,
+# proven job closure, exit 0, no surviving descendants) and an UNTRUNCATED capture come
+# BEFORE any stdout text is read; timeout, nonzero exit, or partial output is never a PASS.
+param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='',[string]$PrecheckPath='')
 $ErrorActionPreference='Continue'
 $ProgressPreference='SilentlyContinue'
 function Say($m){ Write-Host $m }
@@ -32,7 +39,6 @@ $appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
 $appHome=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets'
 $psExe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if(-not $PrecheckPath){ $PrecheckPath=Join-Path $PSScriptRoot 'win-enroll-precheck.txt' }
-if(-not $RemovalPath){ $RemovalPath=Join-Path $PSScriptRoot 'win-watchdog-remove.txt' }
 $doubleExe=Join-Path $stage 'gw-double.exe'
 $outDir=Join-Path $stage 'caps'; New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $script:runs=@()
@@ -207,19 +213,33 @@ function Invoke-Precheck {
   param([hashtable]$Params)
   $argList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PrecheckPath)
   foreach($k in $Params.Keys){ $argList+=('-'+$k); $argList+=([string]$Params[$k]) }
-  $r=Run-Tracked { Invoke-BoundedProcess -ExePath $psExe -Arguments $argList -OutDir $outDir -TimeoutMs 60000 }
-  if($r.timedOut){ Say '  UNVERIFIED: precheck invocation hit the 60s outer timeout' }
-  return [string]$r.stdout
+  Run-Tracked { Invoke-BoundedProcess -ExePath $psExe -Arguments $argList -OutDir $outDir -TimeoutMs 60000 }
+}
+function Assert-RunUsable($r,[string]$label){
+  # '' only when the run may be judged by its stdout: launcher ok, started, no timeout,
+  # proven job closure, exit 0, no surviving descendants, and the capture is NOT
+  # truncated. Every other state is an explicit rejection - partial, timed-out, or
+  # nonzero-exit text is never evidence, and never a PASS.
+  $ra=Get-RunAssessment -Run $r -Label $label
+  if($ra){ return $ra }
+  if($r.overCap){ return ($label+' capture exceeded the 64KB cap - truncated output is never evidence; rejected') }
+  return ''
 }
 $wrongHash='0000000000000000000000000000000000000000000000000000000000000000'
 Scenario 'precheck-refuses-wrong-pins' {
   if(-not $compiledAll -or -not (Test-Path $appExe)){ return 'SKIP' }
-  $o=Invoke-Precheck @{AsarSha256=$wrongHash;ExeSha256=$wrongHash;ExpectedVersion='0.4.64'}
+  $r=Invoke-Precheck @{AsarSha256=$wrongHash;ExeSha256=$wrongHash;ExpectedVersion='0.4.64'}
+  $g=Assert-RunUsable $r 'precheck (wrong pins)'
+  if($g){ Say ('  '+$g); return $false }
+  $o=[string]$r.stdout
   (($o -match 'VERDICT: UNKNOWN') -and ($o -notmatch 'RUNTIME_EVIDENCE_OK'))
 }
 Scenario 'precheck-refuses-missing-params' {
   if(-not $compiledAll -or -not (Test-Path $appExe)){ return 'SKIP' }
-  $o=Invoke-Precheck @{}
+  $r=Invoke-Precheck @{}
+  $g=Assert-RunUsable $r 'precheck (missing params)'
+  if($g){ Say ('  '+$g); return $false }
+  $o=[string]$r.stdout
   (($o -match 'VERDICT: UNKNOWN') -and ($o -notmatch 'RUNTIME_EVIDENCE_OK'))
 }
 Scenario 'real-app-bad-nonce-exits-nonzero' {
@@ -237,7 +257,10 @@ Scenario 'precheck-runtime-evidence-with-reviewed-pins' {
   $gate=Test-RealAppPins
   if($gate -eq 'pins not injected'){ return 'SKIP' }
   if($gate){ Say ('  gate: '+$gate); return $false }
-  $o=Invoke-Precheck @{AsarSha256=$AsarSha256;ExeSha256=$ExeSha256;ExpectedVersion=$ExpectedVersion}
+  $r=Invoke-Precheck @{AsarSha256=$AsarSha256;ExeSha256=$ExeSha256;ExpectedVersion=$ExpectedVersion}
+  $g=Assert-RunUsable $r 'precheck (reviewed pins)'
+  if($g){ Say ('  '+$g); return $false }
+  $o=[string]$r.stdout
   Say $o
   ($o -match 'VERDICT: RUNTIME_EVIDENCE_OK')
 }
@@ -247,9 +270,11 @@ Scenario 'env-scrub-e2e-parent-var-set' {
   if($gate -eq 'pins not injected'){ return 'SKIP' }
   if($gate){ Say ('  gate: '+$gate); return $false }
   $env:ELECTRON_RUN_AS_NODE='1'
-  $o=Invoke-Precheck @{AsarSha256=$AsarSha256;ExeSha256=$ExeSha256;ExpectedVersion=$ExpectedVersion}
+  $r=Invoke-Precheck @{AsarSha256=$AsarSha256;ExeSha256=$ExeSha256;ExpectedVersion=$ExpectedVersion}
   Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-  ($o -match 'VERDICT: RUNTIME_EVIDENCE_OK')
+  $g=Assert-RunUsable $r 'precheck (env scrub)'
+  if($g){ Say ('  '+$g); return $false }
+  ([string]$r.stdout -match 'VERDICT: RUNTIME_EVIDENCE_OK')
 }
 Scenario 'installer-shortcut-renamed-old-absent' {
   if(-not (Test-Path $appExe)){ return 'SKIP' }
@@ -257,15 +282,22 @@ Scenario 'installer-shortcut-renamed-old-absent' {
   $sm=Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
   $desk=[Environment]::GetFolderPath('Desktop')
   $ok=$true
-  foreach($c in @((Join-Path $sm 'GlassWidgets\GlassWidgets.lnk'),(Join-Path $desk 'GlassWidgets.lnk'))){
+  # the OLD name must be absent everywhere it could appear: the Start Menu folder, the
+  # Start Menu ROOT, and the Desktop
+  foreach($c in @((Join-Path $sm 'GlassWidgets\GlassWidgets.lnk'),(Join-Path $sm 'GlassWidgets.lnk'),(Join-Path $desk 'GlassWidgets.lnk'))){
     if(Test-Path -LiteralPath $c){ Say ('  UNVERIFIED: old shortcut still present: '+$c); $ok=$false }
   }
-  $newFound=@()
-  foreach($c in @((Join-Path $sm ('GlassWidgets\'+$newName+'.lnk')),(Join-Path $sm ($newName+'.lnk')),(Join-Path $desk ($newName+'.lnk')))){
-    if(Test-Path -LiteralPath $c){ $newFound+=$c }
+  # the RENAMED shortcut is required in BOTH the Start Menu (folder or root) AND the
+  # Desktop, and every found one must target the installed exe exactly
+  $smNew=@()
+  foreach($c in @((Join-Path $sm ('GlassWidgets\'+$newName+'.lnk')),(Join-Path $sm ($newName+'.lnk')))){
+    if(Test-Path -LiteralPath $c){ $smNew+=$c }
   }
-  if($newFound.Count -eq 0){ Say '  UNVERIFIED: no renamed shortcut found in Start Menu or Desktop'; $ok=$false }
-  foreach($c in $newFound){
+  $deskNew=Join-Path $desk ($newName+'.lnk')
+  if($smNew.Count -eq 0){ Say '  UNVERIFIED: no renamed shortcut in the Start Menu (folder or root)'; $ok=$false }
+  if(-not (Test-Path -LiteralPath $deskNew)){ Say '  UNVERIFIED: no renamed shortcut on the Desktop'; $ok=$false }
+  foreach($c in (@($smNew)+@($deskNew))){
+    if(-not (Test-Path -LiteralPath $c)){ continue }
     try{
       $sh=(New-Object -ComObject WScript.Shell).CreateShortcut($c)
       if([string]$sh.TargetPath -ine $appExe){ Say ('  UNVERIFIED: shortcut target is not the installed exe: '+$c+' -> '+[string]$sh.TargetPath); $ok=$false }
@@ -275,41 +307,24 @@ Scenario 'installer-shortcut-renamed-old-absent' {
   $ok
 }
 
-# --- watchdog removal fixture: absent / present-delete / idempotent / access-denied ---
-function Invoke-Removal {
-  $argList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$RemovalPath)
-  $r=Run-Tracked { Invoke-BoundedProcess -ExePath $psExe -Arguments $argList -OutDir $outDir -TimeoutMs 60000 }
-  if($r.timedOut){ Say '  UNVERIFIED: removal invocation hit the 60s outer timeout' }
-  return [string]$r.stdout
-}
+# --- Task Scheduler: READ-ONLY state only. This harness performs NO scheduler
+# mutations anywhere - no create, no delete, no replace, no /f, no SYSTEM task. A
+# dedicated task in a test namespace was considered and intentionally skipped: the PC
+# sees zero task mutations from this harness. Removing GlassWidgets-Watchdog (when the
+# owner wants it gone) is a separate owner step via win-watchdog-remove.txt, run by the
+# owner outside this harness - never invoked, created, or replaced from here.
 function Test-WdPresent {
   # tri-state: $true/$false only on definitive answers, $null on scheduler failure
   try{ $c=New-Object -ComObject 'Schedule.Service'; $c.Connect(); $null=$c.GetFolder('\').GetTask('GlassWidgets-Watchdog'); return $true }
   catch [System.Runtime.InteropServices.COMException]{ if($_.Exception.HResult -eq -2147024894){ return $false }; return $null }
   catch{ return $null }
 }
-Scenario 'watchdog-removal-first-run' {
-  if(-not $compiledAll -or -not (Test-Path $RemovalPath)){ return 'SKIP' }
-  $o=Invoke-Removal
-  (($o -match 'DONE') -and ($o -notmatch 'FAIL:'))
-}
-Scenario 'watchdog-present-delete-real' {
-  if(-not $compiledAll -or -not (Test-Path $RemovalPath)){ return 'SKIP' }
-  $null=(schtasks /create /tn 'GlassWidgets-Watchdog' /tr 'cmd.exe /c exit 0' /sc once /st 23:59 /f 2>&1 | Out-String)
-  $o=Invoke-Removal
-  $still=Test-WdPresent
-  if($still -eq $true){ $null=(schtasks /delete /tn 'GlassWidgets-Watchdog' /f 2>&1 | Out-String); Say '  dummy task survived the fixture - removed by fallback; this is a FAIL' }
-  if($null -eq $still){ Say '  UNVERIFIED: fresh scheduler query failed after delete' }
-  (($o -match 'delete call issued') -and ($o -match 'PASS 2') -and ($o -match 'DONE') -and ($still -eq $false))
-}
-Scenario 'watchdog-not-found-idempotent' {
-  if(-not $compiledAll -or -not (Test-Path $RemovalPath)){ return 'SKIP' }
-  $o=Invoke-Removal
-  (($o -match 'provably absent') -and ($o -match 'DONE') -and ($o -notmatch 'FAIL:'))
-}
-Scenario 'watchdog-access-denied' {
-  Say '  UNVERIFIED: access-denied needs an admin-created GlassWidgets-Watchdog task; manual step: as admin run schtasks /create /tn GlassWidgets-Watchdog /tr "cmd.exe /c exit 0" /sc once /st 23:59 /ru SYSTEM, then run win-watchdog-remove.txt as the user and confirm a FAIL-closed message (never treated as absent).'
-  'SKIP'
+Scenario 'watchdog-state-readonly-query' {
+  $s=Test-WdPresent
+  if($null -eq $s){ Say '  UNVERIFIED: scheduler query failed - task state unknown'; return $false }
+  if($s){ Say '  state: GlassWidgets-Watchdog PRESENT - the separate owner removal step still applies' }
+  else{ Say '  state: GlassWidgets-Watchdog absent' }
+  $true
 }
 
 Say ''
