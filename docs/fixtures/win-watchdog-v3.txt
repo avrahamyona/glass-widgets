@@ -1,0 +1,100 @@
+﻿# win-watchdog-v3.txt - run on the user's PC (regular PowerShell, no admin needed)
+# Purpose: make the 5-minute watchdog QUIET. It keeps the app alive (relaunches it when port 47631
+# is down) but now passes --background, so a relaunch goes to the tray - no window, no picker.
+# Requires the installed app to be 0.4.64 or newer (older apps ignore --background and would
+# still pop a window). The script REFUSES to change anything on an older version.
+# What it changes: ONLY the watchdog script file glasswidgets-watchdog.ps1 (the scheduled task
+# keeps pointing at it). A backup of the old script is kept. Fully reversible (undo printed at end).
+# Idempotent: safe to run twice.
+$ErrorActionPreference='Stop'
+function Say($m){ Write-Host $m }
+$appDir=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets'
+$appExe=Join-Path $appDir 'GlassWidgets.exe'
+$dataDir=Join-Path $env:LOCALAPPDATA 'GlassWidgets'
+$wd=Join-Path $dataDir 'glasswidgets-watchdog.ps1'
+$bak=$wd+'.bak-pre-background'
+$taskName='GlassWidgets-Watchdog'
+$tmp=Join-Path $env:TEMP 'gw-wd3-native.txt'
+function Run-Cmd($line){
+  $prev=$ErrorActionPreference; $ErrorActionPreference='Continue'
+  try{ & cmd.exe /c ($line+' >"'+$tmp+'" 2>&1') | Out-Null }finally{ $ErrorActionPreference=$prev }
+  $code=$LASTEXITCODE
+  $out=''; if(Test-Path $tmp){ $out=(Get-Content $tmp -Raw -ErrorAction SilentlyContinue) }
+  return @{code=$code; out=$out}
+}
+try{
+  Say '== GlassWidgets watchdog v3 (quiet background relaunch) =='
+  if(-not (Test-Path $appExe)){ throw ('installed exe not found at '+$appExe) }
+  # PASS 1: installed version must be >= 0.4.64 (fail closed if it cannot be read)
+  $vi=(Get-Item $appExe).VersionInfo
+  $verText=[string]$vi.ProductVersion; if([string]::IsNullOrWhiteSpace($verText)){ $verText=[string]$vi.FileVersion }
+  $m=[regex]::Match($verText,'^(\d+)\.(\d+)\.(\d+)')
+  if(-not $m.Success){ throw ('cannot read the installed version (got: '+$verText+') - not changing anything') }
+  $ver=[int]$m.Groups[1].Value*1000000+[int]$m.Groups[2].Value*1000+[int]$m.Groups[3].Value
+  if($ver -lt 4064){ throw ('installed app is '+$verText+' - this fix needs 0.4.64 or newer. Install the new version first, then re-run. Nothing was changed.') }
+  Say ('PASS 1: installed app version '+$verText+' supports --background')
+  # PASS 2: existing watchdog script present
+  if(-not (Test-Path $wd)){ throw ('watchdog script not found at '+$wd+' - run win-server-base first') }
+  $old=Get-Content $wd -Raw
+  if($old -match '--background'){ Say 'PASS 2: watchdog script already uses --background (nothing to rewrite)' }
+  else{
+    if(-not (Test-Path $bak)){ Copy-Item -Path $wd -Destination $bak -Force }
+    if(-not (Test-Path $bak)){ throw 'could not write the backup - not changing anything' }
+    Say ('PASS 2: backup of the old script kept at '+$bak)
+    $body=@'
+$ErrorActionPreference='SilentlyContinue'
+$exe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
+$log=Join-Path $env:LOCALAPPDATA 'GlassWidgets\watchdog.log'
+function Log($m){
+  $line=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+' '+$m
+  Add-Content -Path $log -Value $line
+  (Get-Content $log | Select-Object -Last 200) | Set-Content $log
+}
+$up=Get-NetTCPConnection -LocalPort 47631 -State Listen | Where-Object {$_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1'}
+if($up){exit 0}
+if(Test-Path $exe){
+  Log 'port 47631 down - starting app in background (tray only)'
+  Start-Process -FilePath $exe -ArgumentList '--background'
+}else{
+  Log ('exe missing at '+$exe)
+}
+'@
+    Set-Content -Path $wd -Value $body -Encoding UTF8
+    Say ('PASS 2: watchdog script rewritten at '+$wd)
+  }
+  # PASS 3: the written script must PARSE cleanly and contain --background; else restore the backup
+  $errs=$null; $tok=$null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($wd,[ref]$tok,[ref]$errs)
+  $txt=Get-Content $wd -Raw
+  if(($errs -and $errs.Count -gt 0) -or ($txt -notmatch '--background')){
+    if(Test-Path $bak){ Copy-Item -Path $bak -Destination $wd -Force }
+    throw 'new watchdog script failed validation - the old script was restored'
+  }
+  Say 'PASS 3: new watchdog script parses cleanly and passes --background'
+  # PASS 4: the scheduled task exists and still runs THIS script every 5 minutes
+  $q=Run-Cmd ('schtasks /Query /TN '+$taskName+' /XML')
+  if($q.code -ne 0 -or $q.out -notmatch [regex]::Escape('glasswidgets-watchdog.ps1')){
+    $tr='powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+$wd+'"'
+    $c=Run-Cmd ('schtasks /Create /TN '+$taskName+' /SC MINUTE /MO 5 /TR "'+$tr.Replace('"','\"')+'" /F')
+    if($c.code -ne 0){ throw ('scheduled task missing and re-create failed (exit '+$c.code+')') }
+    Say 'PASS 4: scheduled task re-created (every 5 minutes, same script)'
+  }else{
+    Say 'PASS 4: scheduled task GlassWidgets-Watchdog present and points at the watchdog script'
+  }
+  # PASS 5: run the watchdog once. If the app is up this is a no-op (exit 0, nothing opens).
+  $r=Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$wd) -NoNewWindow -Wait -PassThru
+  if($r.ExitCode -ne 0){ throw ('watchdog run exited with '+$r.ExitCode) }
+  $listen=Get-NetTCPConnection -LocalPort 47631 -State Listen -ErrorAction SilentlyContinue | Where-Object {$_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1'}
+  if($listen){ Say 'PASS 5: watchdog ran cleanly; app is listening on 47631' } else { Say 'WARN 5: port 47631 not listening yet (app may still be starting) - check again in a minute' }
+  Say ''
+  Say '--- undo (restore the previous watchdog script) ---'
+  Say ('  Copy-Item -Path "'+$bak+'" -Destination "'+$wd+'" -Force')
+  Say ''
+  Say 'DONE: the watchdog now relaunches the app quietly in the tray. Send this output back.'
+}catch{
+  Say ('FAIL: '+$_.Exception.Message)
+  Say 'Send this whole output back.'
+}finally{
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  Read-Host 'Press Enter to close'
+}
