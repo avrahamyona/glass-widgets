@@ -5,6 +5,8 @@
 # the app's evidence mode may cause Electron's own cache/log writes - zero writes is NOT claimed.
 #
 # What it does:
+#   0. Gates on the EXACT reviewed build: -AsarSha256 (sha256 of resources\app.asar from the
+#      reviewed 0.4.64 build) is REQUIRED - without it, or on any mismatch, nothing is launched.
 #   1. Runs the installed app's --gw-runtime-paths-json <nonce> mode (0.4.64+) - the SINGLE
 #      agreed way to learn the packed runtime's OWN userData root. The nonce, isPackaged, exe
 #      path and version are verified; a mismatch means the evidence is rejected.
@@ -44,18 +46,18 @@ try{
       $asar=Join-Path (Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets') 'resources\app.asar'
       $buildOk=$false
       if(-not (Test-Path $asar)){ $reasons+='packed app.asar not found at '+$asar+' - unknown build, not launched' }
+      elseif(-not $AsarSha256){ $reasons+='no -AsarSha256 pin supplied - the exact reviewed build hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
       else{
-        if($AsarSha256){
-          $h=(Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash
-          if($h -ine $AsarSha256){ $reasons+='app.asar hash '+$h+' does NOT match the pinned build '+$AsarSha256+' - unknown build, not launched' }
-          else{ Say ('build pinned: app.asar sha256 matches the reviewed build') ; $buildOk=$true }
-        }else{ $reasons+='no -AsarSha256 pin supplied - build identity rests on the marker scan only' ; $buildOk=$true }
-        if($buildOk){
+        $h=(Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash
+        if($h -ine $AsarSha256){ $reasons+='app.asar hash '+$h+' does NOT match the pinned build '+$AsarSha256+' - unknown build, not launched' }
+        else{
+          Say ('build pinned: app.asar sha256 matches the reviewed build')
+          # additional check only: the marker is supporting evidence, never the gate
           $marker='--gw-runtime-paths-json'
           $bytes=[System.IO.File]::ReadAllBytes($asar)
           $found=[System.Text.Encoding]::ASCII.GetString($bytes).IndexOf($marker) -ge 0
-          if(-not $found){ $reasons+='build marker '+$marker+' ABSENT in the packed app.asar - this build has no evidence mode, NOT launched'; $buildOk=$false }
-          else{ Say ('build marker present in app.asar: '+$marker) }
+          if(-not $found){ $reasons+='build marker '+$marker+' ABSENT in the pinned app.asar - NOT launched (inconsistent build)' }
+          else{ Say ('build marker present (supporting check): '+$marker); $buildOk=$true }
         }
       }
     if($buildOk){
