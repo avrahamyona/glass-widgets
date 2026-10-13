@@ -165,7 +165,7 @@ foreach($x in @('Add-Type','CREATE_SUSPENDED','AssignProcessToJobObject','JOB_OB
 foreach($x in @('ArgumentList','Get-CimInstance','.GetAwaiter(','RedirectStandardOutput',' -Parallel','Invoke-WithChildEnv','SetEnvironmentVariable')){
   T ('static-lacks-'+$x) (-not $bodyText.Contains($x))
 }
-foreach($x in @('assignedToJob','attrInitialized','faultInject','fault injection: after create, before assign','fault injection: simulated assign failure','SetLastError=true)] static extern uint ResumeThread')){
+foreach($x in @('assignedToJob','attrInitialized','faultInject','fault injection: after create, before assign','fault injection: simulated assign failure','fault injection: simulated resume failure','fault injection: simulated query failure','SetLastError=true)] static extern uint ResumeThread')){
   T ('static-has-'+$x) ($bodyText.Contains($x))
 }
 $tpIdx=$bodyText.IndexOf('TerminateProcess(proc, 1)'); $atjIdx=$bodyText.IndexOf('assignedToJob = true;')

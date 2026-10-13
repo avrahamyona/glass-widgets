@@ -1,7 +1,7 @@
 ﻿# win-watchdog-remove.txt - run on the user's PC (regular PowerShell, no admin needed)
 # Purpose: REMOVE the GlassWidgets-Watchdog scheduled task (the every-5-minutes relauncher).
-# Per the user's instruction: the app must NOT reopen itself every 5 minutes; opening stays in
-# his hands. This script DELETES the task and VERIFIES it is gone. It does NOT launch the app,
+# Rationale: the app must NOT reopen itself every 5 minutes; opening stays in the owner's
+# hands. A file cannot prove authorization - it is established outside this file. This script DELETES the task and VERIFIES it is gone. It does NOT launch the app,
 # does NOT re-create the task, and does NOT touch autostart (the Run key) or the app itself.
 # Verification is exact, not exit-code-based: the Task Scheduler API (Schedule.Service) is asked
 # for the task, and ONLY the precise "not found" (0x80070002) counts as absent. Access denied,

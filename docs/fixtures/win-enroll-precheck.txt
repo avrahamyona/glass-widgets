@@ -263,11 +263,11 @@ public static class GwBounded {
         return r;
       }
       assignedToJob = true;
-      uint rr = ResumeThread(thread);
-      int rrErr = (rr == 0xFFFFFFFF) ? Marshal.GetLastWin32Error() : 0;
+      uint rr = (faultInject == 3) ? 0xFFFFFFFF : ResumeThread(thread);
+      int rrErr = (rr == 0xFFFFFFFF && faultInject != 3) ? Marshal.GetLastWin32Error() : 0;
       CloseHandle(thread); thread = IntPtr.Zero;
       if (rr == 0xFFFFFFFF) {
-        r.Error = "ResumeThread failed (win32 " + rrErr.ToString() + ")";
+        r.Error = (faultInject == 3) ? "fault injection: simulated resume failure" : ("ResumeThread failed (win32 " + rrErr.ToString() + ")");
         TerminateJobObject(job, 1);
         WaitForSingleObject(proc, 5000);
         r.ClosureProven = (QueryActive(job) == 0);
@@ -283,6 +283,12 @@ public static class GwBounded {
         r.Error = "WaitForSingleObject failed (win32 " + wErr.ToString() + ")";
         TerminateJobObject(job, 1);
         WaitForSingleObject(proc, 5000);
+      }
+      if (faultInject == 4) {
+        r.Error = "fault injection: simulated query failure";
+        r.ActiveAfterExit = -1;
+        r.ClosureProven = false;
+        return r;
       }
       int active = QueryActive(job);
       r.ActiveAfterExit = active < 0 ? -1 : active;
