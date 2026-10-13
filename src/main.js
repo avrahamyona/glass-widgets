@@ -500,7 +500,8 @@ function bootLog(step){try{const f=path.join(app.getPath('userData'),'boot.log')
 process.on('uncaughtException',e=>bootLog('CRASH '+(e&&e.stack||e)));
 process.on('unhandledRejection',e=>bootLog('REJECT '+(e&&e.stack||e)));
 let showPickerRef=null,lock=app.requestSingleInstanceLock(),booted=false;
-app.on('second-instance',()=>{bootLog('second-instance');
+app.on('second-instance',(e,argv)=>{bootLog('second-instance');
+  if((argv||[]).includes('--background')){bootLog('background relaunch - running instance keeps its windows; nothing pops');return} // a watchdog relaunch must NEVER yank the user out of what they are doing
   if(mgmtWin&&!mgmtWin.isDestroyed()){mgmtWin.show();mgmtWin.focus();return} // a stray relaunch must not yank the user out of the view they are in
   if(showPickerRef)showPickerRef()});
 app.whenReady().then(()=>boot());
@@ -573,6 +574,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   const en=rd('enabled.json',null); // widgets + island always come up - after updates, after reboots, no matter what
   instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
   if(process.env.GLASSWIDGETS_NO_PICKER)openSettings(); // test hook: legacy straight-to-settings startup
+  else if(process.argv.includes('--background'))bootLog('background start - staying in the tray, no picker'); // watchdog crash-relaunch: tray-only, no window steal (user rule 2026-10-13)
   else openPicker(); // the picker opens the chosen mode's management UI; the background keeps running either way
   bootLog('done');
 }
