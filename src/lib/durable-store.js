@@ -28,12 +28,23 @@
 const fs=require('fs'),path=require('path'),os=require('os');
 const{strictId}=require('./command-contract'); // the ledger's id shape - also the filename boundary (no traversal)
 const{aclOwnerOnly,aclHarden}=require('./acl-win'); // shared SID-exact harden+verify; no-ops true off-win32
-// win32 dir-fsync limitation policy: libuv cannot open/fsync a directory handle there. The exact
-// code varies by Node version - older fsync threw EINVAL/EBADF/ENOTSUP; newer open() of a
-// directory maps ERROR_ACCESS_DENIED to EPERM (EACCES shows up under some ACL/AV setups). All are
-// the SAME platform limitation (NTFS-journal note path); any OTHER code fails closed. Exported
-// (underscore) for unit tests only.
-const dirFsyncUnsupportedOnWin=(isWin,e)=>isWin&&!!e&&(e.code==='EINVAL'||e.code==='EBADF'||e.code==='ENOTSUP'||e.code==='EPERM'||e.code==='EACCES');
+// win32 dir-fsync limitation policy: libuv cannot open/fsync a directory handle there. The
+// exact code varies by Node version. NARROWED (ops review): the codes are NOT interchangeable.
+//   EINVAL/EBADF/ENOTSUP  - older fsync-on-directory limitation (either stage): note path.
+//   EPERM/EACCES          - ONLY when raised at the OPEN stage (newer Node maps the directory
+//                           open's ERROR_ACCESS_DENIED to EPERM) AND corroborated: the same
+//                           directory is demonstrably listable right now (readdir probe) - i.e.
+//                           it is the known handle-open limitation, not a real permission loss.
+//                           The same code at the FSYNC stage, or with a failed probe, fails closed.
+//   anything else (EIO, ...) and every code off-win32: fail closed.
+// DURABILITY BOUNDARY (documented, not hidden): on the note path the rename's durability relies
+// on the NTFS journal; the directory entry is NOT fsynced by us. The record body itself IS
+// fsynced before rename. Exported (underscore) for unit tests only.
+const dirFsyncUnsupportedOnWin=(isWin,e,stage,probeOk)=>{
+ if(!isWin||!e)return false;
+ if(e.code==='EINVAL'||e.code==='EBADF'||e.code==='ENOTSUP')return true;
+ if(e.code==='EPERM'||e.code==='EACCES')return stage==='open'&&probeOk===true;
+ return false};
 function createFileOutbox(dir,opts){
  opts=opts||{};
  if(!dir)throw new Error('outbox needs a dir');
@@ -109,11 +120,12 @@ function createFileOutbox(dir,opts){
  const unverified=new Set(); // ids committed by rename whose DIRECTORY fsync failed - never confirmed without a re-sync
  let dirFsyncNoted=false,lastDirError=null; // lastDirError: the underlying dir-fsync failure, surfaced for diagnostics (never decides the gate)
  const dirFsync=()=>{
-  let dfd=null;
-  try{dfd=fs.openSync(dir,'r');fs.fsyncSync(dfd);lastDirError=null}
+  let dfd=null,stage='open';
+  try{dfd=fs.openSync(dir,'r');stage='fsync';fs.fsyncSync(dfd);lastDirError=null}
   catch(e){
    lastDirError=(e&&(e.code||e.message))||String(e);
-   if(dirFsyncUnsupportedOnWin(isWin,e)){if(!dirFsyncNoted){dirFsyncNoted=true;notes.push('dir fsync unsupported on win32 ('+e.code+'): rename durability relies on the NTFS journal')}return}
+   let probeOk=false;if(isWin&&e&&(e.code==='EPERM'||e.code==='EACCES')){try{fs.readdirSync(dir);probeOk=true}catch{probeOk=false}} // corroborating evidence: the directory is listable right now
+   if(dirFsyncUnsupportedOnWin(isWin,e,stage,probeOk)){if(!dirFsyncNoted){dirFsyncNoted=true;notes.push('dir fsync unsupported on win32 ('+e.code+', stage '+stage+'): rename durability relies on the NTFS journal')}return}
    throw e; // any real dir-fsync failure = durability unproven -> committed-but-unverified
   }finally{if(dfd!=null)try{fs.closeSync(dfd)}catch{}}
  };
