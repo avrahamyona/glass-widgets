@@ -60,8 +60,10 @@ and does not change with the rendezvous.
    server/index.js (default OFF) + tunnel-supervisor-unit suite (8 cases PASS: state write,
    rotation, down/clear, no-device no-publish, unsupported platform, fail-closed reads,
    hook-failure isolation, real boot with GW_TUNNEL=1). Full server suite green.
-1. Source: sender-client accepts a pointer from the phase-4 rendezvous (verification
-   unchanged); contract addendum: transport swaps never change authority.
+1. DONE (this change): pointer-source candidacy gating (server/lib/pointer-source.js) +
+   supervisor heartbeat (45s since-refresh - a dead PC is distinguishable from a quiet one)
+   + contract addendum (transport swap never changes authority). Sender-client itself needs
+   no change: it already takes an explicit deviceUrl and re-proves identity per pointer.
 2. Live (APPROVAL-GATED): run server+supervisor on the PC (GW_TUNNEL=1), rotation drill
    (kill cloudflared -> supervisor respawns -> state file updates -> sender re-resolves ->
    signed command e2e). THEN demote the worker to optional.

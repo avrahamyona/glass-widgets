@@ -35,7 +35,7 @@ function readTunnelState(dataDir){
 // (unsupported platform, binary unavailable) - the local server keeps running regardless.
 // Rec record: {url,deviceId,since,down}. down:true with url:'' means "no live tunnel - the
 // last pointer is dead" (the app's best-effort clear + the contract's 90s stale window).
-async function startTunnelSupervisor({dataDir,port,log,getDevice,onPointer,fetchImpl,spawnImpl,platform,initialRetryMs,maxRetryMs,isStopped}){
+async function startTunnelSupervisor({dataDir,port,log,getDevice,onPointer,fetchImpl,spawnImpl,platform,initialRetryMs,maxRetryMs,isStopped,heartbeatMs=45000}){
  const say=(stage,obj)=>{try{if(log)log(stage,obj)}catch{}};
  const file=path.join(dataDir,STATE_FILE);
  const publish=(url)=>{
@@ -48,10 +48,15 @@ async function startTunnelSupervisor({dataDir,port,log,getDevice,onPointer,fetch
  };
  const exe=await ensureCloudflared(path.join(dataDir,'bin'),{fetchImpl,log:(s,o)=>say(s,o),platform});
  if(!exe){say('not_started',{reason:'no_binary'});return{started:false,reason:'no_binary',file}}
+ // heartbeat parity with the contract's 90s stale window: while an episode is live, refresh
+ // `since` every heartbeatMs (the URL is unchanged - only the freshness proof advances), so a
+ // dead PC is distinguishable from a quiet one. Cleared on down AND on stop, before the clear.
+ let hb=null;
+ const stopHb=()=>{if(hb){clearInterval(hb);hb=null}};
  const t=startTunnel({exePath:exe,port,log:(s,o)=>say(s,o),spawnImpl,initialRetryMs,maxRetryMs,isStopped,
-  onUrl:u=>publish(u),
-  onDown:()=>publish('')});
- return{started:true,file,stop:()=>t.stop()};
+  onUrl:u=>{publish(u);stopHb();hb=setInterval(()=>publish(u),heartbeatMs);if(hb.unref)hb.unref()},
+  onDown:()=>{stopHb();publish('')}});
+ return{started:true,file,stop:()=>{stopHb();t.stop()}};
 }
 
 module.exports={startTunnelSupervisor,readTunnelState,STATE_FILE,writeStateAtomic};

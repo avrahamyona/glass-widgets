@@ -68,3 +68,13 @@ known id returns the cached terminal result (done/failed), stays silent for acce
 unknown, and never rewrites a live record. Only a NEW expired intake gets the refusal record.
 Ack results are shape-safe: null/primitives wrap to {value}, cycles/functions serialize to
 {unserializable:true}; the canonical path can never throw before the ledger write.
+
+### Transport swap: state-file pointer (standalone-server / Efi pattern)
+The tunnel pointer may arrive from a tunnel-state record ({url,deviceId,since,down} -
+server/lib/tunnel-supervisor.js) relayed through any rendezvous, instead of the worker
+discovery record. Candidacy gating (server/lib/pointer-source.js): down/empty closes, device
+mismatch closes, exact trycloudflare host only, `since` older than the 90s stale window (or
+far-future) closes. The supervisor refreshes `since` every 45s while an episode is live, so
+a dead PC is distinguishable from a quiet one. NOTHING else changes: the pointer stays public
+and untrusted, the /health nonce proof against the enrolled device key still gates every
+payload, and all envelope/read/replay rules apply verbatim on either transport.

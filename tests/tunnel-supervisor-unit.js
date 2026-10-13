@@ -100,6 +100,22 @@ async function main(){
   if(process.platform!=='win32')assert(out.includes('tunnel not started: no_binary'),'non-Windows boot reports tunnel off: '+out);
   await new Promise(res=>{cp.once('exit',res);cp.kill('SIGTERM');setTimeout(res,3000).unref()})}
 
+ // 9) heartbeat: since advances while the episode is live (URL unchanged); heartbeat stops on down
+ {const dir=mkDir();seedBoth(dir);const spawns=[];
+  const r=await startTunnelSupervisor({dataDir:dir,port:47631,platform:'win32',spawnImpl:mkSpawn(spawns),initialRetryMs:5,maxRetryMs:10,heartbeatMs:10,
+   getDevice:()=>({deviceId:'a1b2c3d4e5f60718'})});
+  emitUrl(spawns[0],'https://words-here-abc123.trycloudflare.com');await sleep(20);
+  const a=readTunnelState(dir);
+  await sleep(35); // several heartbeat ticks
+  const b=readTunnelState(dir);
+  assert(b.url===a.url&&Date.parse(b.since)>Date.parse(a.since),'heartbeat refreshes since, url unchanged');
+  spawns[0].emit('exit',1);await sleep(15);
+  const c=readTunnelState(dir);
+  assert(c.down===true,'down recorded');
+  const cSince=c.since;await sleep(35);
+  assert(readTunnelState(dir).since===cSince,'no heartbeat writes after down');
+  r.stop();await sleep(10)}
+
  console.log('TUNNEL-SUPERVISOR-UNIT: PASS');
 }
 main().catch(e=>{console.error('FAIL',e);process.exit(1)});
