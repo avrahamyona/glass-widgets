@@ -51,11 +51,11 @@ try{
   }
   # PASS 2: verify AFTER the delete with a FRESH query - only the exact not-found proves it
   if(Test-WdTaskPresent){ throw 'task still present after the delete call - removal failed, nothing assumed' }
-  Say 'PASS 2: verified - the task no longer exists (exact not-found on a fresh query)'
-  Say '      nothing will relaunch the app every 5 minutes anymore.'
+  Say 'PASS 2: verified - the GlassWidgets-Watchdog task no longer exists (exact not-found on a fresh query)'
+  Say '      scope note: this proves THAT NAMED TASK is gone; it does not prove no other timer exists.'
   Say ''
   Say 'NOT touched (on purpose): the app itself, its data, and the login autostart (Run key).'
-  Say 'Opening the app is now fully in your hands - nothing relaunches it on a timer.'
+  Say 'Opening the app is now in your hands as far as the named watchdog task is concerned.'
   Say ''
   Say '--- undo (only if you ever want the auto-relaunch back) ---'
   Say '  re-run win-server-base, which re-creates the script and the task.'

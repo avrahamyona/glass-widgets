@@ -1,111 +1,102 @@
-﻿# win-enroll-precheck.txt - run on the user's PC BEFORE any enroll send (regular PowerShell)
-# CHANGES NO APP STATE: the app's identity and settings are untouched and no key material is
-# printed. It DOES write a Desktop transcript (enroll-precheck-log.txt) and temporary probe
-# files under %TEMP% (cleaned up at the end).
-# Why: the installed 0.4.63 (8288dce) collapses a missing / corrupt / ACL-unverifiable device key
-# into "no key", and a new enroll can then REPLACE device.json. No-rotation is only guaranteed
-# for a healthy, successfully loaded identity. This tells us which case this PC is in:
-#   VERDICT ABSENT   - no identity yet: an enroll will mint a new one (expected for first time)
-#   VERDICT HEALTHY  - valid identity (parses, public key derives from private key, owner-only ACL):
-#                      an enroll returns the existing identity, nothing is rewritten
-#   VERDICT UNHEALTHY / UNREADABLE - a file is there but not provably healthy: an enroll could
-#                      REPLACE it. DO NOT send an enroll; send this output back instead.
+﻿# win-enroll-precheck.txt - run on the user's PC (regular PowerShell, no admin needed)
+# DIAGNOSTIC ONLY. This script gathers evidence and findings; it draws NO enroll conclusions,
+# issues NO permits, and changes NO app identity or settings. It writes a Desktop transcript
+# (enroll-precheck-log.txt) and a unique GUID temp staging dir (removed at the end). Launching
+# the app's evidence mode may cause Electron's own cache/log writes - zero writes is NOT claimed.
+#
+# What it does:
+#   1. Runs the installed app's --gw-runtime-paths-json <nonce> mode (0.4.64+) - the SINGLE
+#      agreed way to learn the packed runtime's OWN userData root. The nonce, isPackaged, exe
+#      path and version are verified; a mismatch means the evidence is rejected.
+#   2. Reports FILE_FINDING for device.json at the returned root: healthy / absent / unhealthy /
+#      unreadable / not_checked. On an older app without the mode, or on any evidence failure,
+#      VERDICT stays UNKNOWN and the file is NOT checked against any guessed root.
+# ACL comparison mirrors the app's shared evaluator (src/lib/acl-check.js) exactly.
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 function Say($m){ Write-Host $m }
 $d=[Environment]::GetFolderPath('Desktop')
 try{ Start-Transcript -Path (Join-Path $d 'enroll-precheck-log.txt') -Force | Out-Null }catch{}
 $appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
-# the userData root is NOT assumed from package.json. Artifact presence only LOCATES A CANDIDATE
-# root - it does NOT prove the packed runtime's current app.getPath('userData') (leftovers from an
-# older install can linger). This script is therefore DIAGNOSTIC-ONLY: no verdict here is a permit
-# to enroll/mint. The runtime-proof step (see the printed note) is still required.
-$devDir=$null
 $stage=Join-Path $env:TEMP ('gw-precheck-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 $probe=Join-Path $stage 'probe.js'
 $probeOut=Join-Path $stage 'out.txt'
-$verdict='UNKNOWN'; $reasons=@()
+$cap=Join-Path $stage 'rt.json'
+$verdict='UNKNOWN'; $finding='not_checked'; $reasons=@(); $devId=''
 try{
-  Say '== GlassWidgets enroll precheck =='
-  if(Test-Path $appExe){
-    $vi=(Get-Item $appExe).VersionInfo
-    Say ('app version: '+$vi.ProductVersion)
-  }else{ $reasons+='installed exe not found at '+$appExe }
-  # 0. LOCATE the candidate root(s) by runtime artifacts (never a guessed name). Artifacts locate
-  # a candidate - they do NOT prove the runtime's current userData. Zero or multiple candidates
-  # => UNKNOWN. Even a single candidate keeps every verdict diagnostic-only (see ABSENT note).
-  $artifactNames=@('config.json','agent-audit.log','device','pairing-pending','GPUCache','Local Storage','Session Storage','Cookies','outbox')
-  $candidates=@()
-  $cands=@(Get-ChildItem -LiteralPath $env:APPDATA -Directory -ErrorAction SilentlyContinue | Where-Object {$_.Name -like '*glasswidget*'})
-  foreach($c in $cands){
-    foreach($a in $artifactNames){ if(Test-Path -LiteralPath (Join-Path $c.FullName $a)){ $candidates+=$c.FullName; break } }
-  }
-  if($candidates.Count -gt 1){
-    $verdict='UNKNOWN'; $reasons+='more than one candidate userData root with app artifacts exists ('+($candidates -join ', ')+') - the real identity root is ambiguous'
-    Say ''; Say ('VERDICT: '+$verdict)
-    foreach($r in $reasons){ Say ('  - '+$r) }
-    Say ''; Say 'meaning: DO NOT send an enroll - the identity root is unproven. Send this output back.'
-    throw 'STOP-AFTER-VERDICT'
-  }
-  if($candidates.Count -eq 0){
-    $verdict='UNKNOWN'; $reasons+='no userData root with app artifacts found under %APPDATA% matching *glasswidget* - the runtime identity root is unproven (app may never have run, or uses another name)'
-    Say ''; Say ('VERDICT: '+$verdict)
-    foreach($r in $reasons){ Say ('  - '+$r) }
-    Say ''; Say 'meaning: DO NOT send an enroll - the identity root is unproven. Send this output back.'
-    throw 'STOP-AFTER-VERDICT'
-  }
-  $devDir=Join-Path $candidates[0] 'device'
-  $devFile=Join-Path $devDir 'device.json'
-  Say ('candidate userData root (located by artifacts - NOT runtime-proven): '+$candidates[0])
-    # 1. strict presence: only "not found" counts as absent; any other failure is UNREADABLE
-  $present=$false; $unreadable=$false
-  try{ $null=Get-Item -LiteralPath $devFile -Force -ErrorAction Stop; $present=$true }
-  catch [System.Management.Automation.ItemNotFoundException]{ $present=$false }
-  catch [System.IO.DirectoryNotFoundException]{ $present=$false }
-  catch [System.IO.FileNotFoundException]{ $present=$false }
-  catch{ $unreadable=$true; $reasons+='cannot inspect device.json: '+$_.Exception.GetType().Name }
-  if($unreadable){ $verdict='UNREADABLE' }
-  elseif(-not $present){
-    $verdict='ABSENT'
-    if(Test-Path $devDir){ $reasons+='device directory exists but device.json does not' }
-  }else{
-    # 2. ACL owner-only on the file AND the directory (exact current-user SID)
-    $mySid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    # EXACT parity with the app's shared evaluator (src/lib/acl-check.js evalAclDump), checked on
-    # the same Get-Acl projection the app uses (sid/rights/allow/inherited + owner + protected):
-    #   DACL protected, OWNER SID == current user, EXACTLY ONE ACE, ACE SID == current user,
-    #   Allow only, IsInherited === false, rights an integer in [0, 2032127] (FULL_CONTROL mask).
-    #   Numeric bounds, not string tests - a hardened file holds (R,W), a dir FullControl, BOTH pass.
-    function Test-OwnerOnly($p,$isDir){
-      try{
-        $item=Get-Item -LiteralPath $p -Force
-        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){ return 'path is a reparse point/symlink: '+$p }
-        $a=Get-Acl -LiteralPath $p
-        if($a.AreAccessRulesProtected -ne $true){ return 'DACL not protected (inheritance on): '+$p }
-        $own=$null; try{ $own=([System.Security.Principal.NTAccount]$a.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $own=[string]$a.Owner }
-        if($own -ne $mySid){ return 'owner SID is not the current user on '+$p+': '+$own }
-        $rules=@($a.Access)
-        if($rules.Count -ne 1){ return 'ACE count '+$rules.Count+' on '+$p+' (expected exactly 1)' }
-        $r=$rules[0]
-        $sid=$null; try{ $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $sid=[string]$r.IdentityReference }
-        if($sid -ne $mySid){ return 'ACE SID is not the current user on '+$p+': '+$sid }
-        if($r.AccessControlType -ne 'Allow'){ return 'ACE is not Allow on '+$p }
-        if([bool]$r.IsInherited -ne $false){ return 'ACE is inherited on '+$p }
-        $rights=[int64]$r.FileSystemRights
-        if($rights -lt 0 -or $rights -gt 2032127){ return 'rights out of bounds on '+$p+': '+$rights }
-        return ''
-      }catch{ return 'ACL evaluation failed on '+$p+': '+$_.Exception.Message }
-    }
-    $aclF=Test-OwnerOnly $devFile $false
-    $aclD=Test-OwnerOnly $devDir $true
-    if($aclF){ $reasons+=('file ACL: '+$aclF) }
-    if($aclD){ $reasons+=('dir ACL: '+$aclD) }
-    # 3. content health, checked with the app's OWN runtime (same node as the app, no downloads)
-    $contentOk=$false
-    if(-not (Test-Path $appExe)){ $reasons+='cannot check key content: app exe missing' }
+  Say '== GlassWidgets enroll precheck (diagnostic only) =='
+  if(-not (Test-Path $appExe)){ throw ('installed exe not found at '+$appExe) }
+  $vi=(Get-Item $appExe).VersionInfo
+  $verText=[string]$vi.ProductVersion; if([string]::IsNullOrWhiteSpace($verText)){ $verText=[string]$vi.FileVersion }
+  Say ('app version: '+$verText)
+  $m=[regex]::Match($verText,'^(\d+)\.(\d+)\.(\d+)')
+  if(-not $m.Success){ $reasons+='cannot parse the installed version - evidence mode unavailable' }
+  else{
+    $verN=[int]$m.Groups[1].Value*1000000+[int]$m.Groups[2].Value*1000+[int]$m.Groups[3].Value
+    if($verN -lt 4064){ $reasons+='installed '+$verText+' has no runtime-evidence mode (needs 0.4.64+) - the userData root cannot be proven' }
     else{
-      $js=@'
+      # 1. runtime evidence: the packed app answers for itself, nonce-bound
+      $nonce=[guid]::NewGuid().ToString('N')
+      $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
+      try{ & cmd.exe /c ('"'+$appExe+'" --gw-runtime-paths-json '+$nonce+' >"'+$cap+'" 2>&1') | Out-Null }finally{ $ErrorActionPreference=$prevEap }
+      $raw=''; if(Test-Path $cap){ $raw=(Get-Content $cap -Raw).Trim() }
+      $jline=($raw -split "`r?`n" | Where-Object {$_.TrimStart().StartsWith('{')} | Select-Object -First 1)
+      if(-not $jline){ $reasons+='the app did not return a runtime-paths JSON line (mode missing or blocked)' }
+      else{
+        $rt=$null; try{ $rt=$jline | ConvertFrom-Json -EA Stop }catch{ $reasons+='runtime-paths JSON did not parse' }
+        if($rt){
+          if($rt.v -ne 1){ $reasons+='runtime-paths schema is not v1' }
+          elseif([string]$rt.nonce -ne $nonce){ $reasons+='nonce mismatch - the capture is not from this run (stale or foreign)' }
+          elseif($rt.isPackaged -ne $true){ $reasons+='isPackaged is not true - this is not the packed installed runtime' }
+          elseif([string]$rt.exe -ine $appExe){ $reasons+='the answering exe ('+[string]$rt.exe+') is not the installed exe ('+$appExe+')' }
+          elseif([string]::IsNullOrWhiteSpace([string]$rt.userData)){ $reasons+='runtime returned an empty userData' }
+          else{
+            $verdict='RUNTIME_EVIDENCE_OK'
+            Say ('runtime userData (answered by the app itself): '+[string]$rt.userData)
+            $devDir=Join-Path ([string]$rt.userData) 'device'
+            $devFile=Join-Path $devDir 'device.json'
+            # 2a. strict presence: only "not found" is absence; any other failure is unreadable
+            $present=$false; $unreadable=$false
+            try{ $null=Get-Item -LiteralPath $devFile -Force -ErrorAction Stop; $present=$true }
+            catch [System.Management.Automation.ItemNotFoundException]{ $present=$false }
+            catch [System.IO.DirectoryNotFoundException]{ $present=$false }
+            catch [System.IO.FileNotFoundException]{ $present=$false }
+            catch{ $unreadable=$true; $reasons+='cannot inspect device.json: '+$_.Exception.GetType().Name }
+            if($unreadable){ $finding='unreadable' }
+            elseif(-not $present){ $finding='absent'; if(Test-Path $devDir){ $reasons+='device directory exists but device.json does not' } }
+            else{
+              # 2b. ACL parity with src/lib/acl-check.js (evalAclDump): protected DACL, OWNER SID ==
+              # current user, EXACTLY ONE ACE (sid == current user, Allow, IsInherited === false,
+              # rights an integer in [0, 2032127]). Numeric, never string tests.
+              $mySid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+              function Test-OwnerOnly($p,$isDir){
+                try{
+                  $item=Get-Item -LiteralPath $p -Force
+                  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){ return 'path is a reparse point/symlink: '+$p }
+                  $a=Get-Acl -LiteralPath $p
+                  if($a.AreAccessRulesProtected -ne $true){ return 'DACL not protected (inheritance on): '+$p }
+                  $own=$null; try{ $own=([System.Security.Principal.NTAccount]$a.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $own=[string]$a.Owner }
+                  if($own -ne $mySid){ return 'owner SID is not the current user on '+$p+': '+$own }
+                  $rules=@($a.Access)
+                  if($rules.Count -ne 1){ return 'ACE count '+$rules.Count+' on '+$p+' (expected exactly 1)' }
+                  $r=$rules[0]
+                  $sid=$null; try{ $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $sid=[string]$r.IdentityReference }
+                  if($sid -ne $mySid){ return 'ACE SID is not the current user on '+$p+': '+$sid }
+                  if($r.AccessControlType -ne 'Allow'){ return 'ACE is not Allow on '+$p }
+                  if([bool]$r.IsInherited -ne $false){ return 'ACE is inherited on '+$p }
+                  $rights=[int64]$r.FileSystemRights
+                  if($rights -lt 0 -or $rights -gt 2032127){ return 'rights out of bounds on '+$p+': '+$rights }
+                  return ''
+                }catch{ return 'ACL evaluation failed on '+$p+': '+$_.Exception.Message }
+              }
+              $aclF=Test-OwnerOnly $devFile $false
+              $aclD=Test-OwnerOnly $devDir $true
+              if($aclF){ $reasons+=('file ACL: '+$aclF) }
+              if($aclD){ $reasons+=('dir ACL: '+$aclD) }
+              # 2c. content health via the app's OWN runtime (same node as the app, no downloads)
+              $contentOk=$false
+              $js=@'
 const fs=require('fs'),crypto=require('crypto');
 try{
   const j=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
@@ -115,35 +106,32 @@ try{
   else{console.log('OK '+crypto.createHash('sha256').update(pub).digest('hex').slice(0,16));}
 }catch(e){console.log('CORRUPT');}
 '@
-      Set-Content -Path $probe -Value $js -Encoding ASCII
-      if(Test-Path $probeOut){ Remove-Item $probeOut -Force }
-      $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
-      try{
-        & cmd.exe /c ('set ELECTRON_RUN_AS_NODE=1&& "'+$appExe+'" "'+$probe+'" "'+$devFile+'" >"'+$probeOut+'" 2>&1') | Out-Null
-      }finally{ $ErrorActionPreference=$prevEap }
-      $res=''; if(Test-Path $probeOut){ $res=(Get-Content $probeOut -Raw).Trim() }
-      if($res -match '^OK ([0-9a-f]{16})$'){ $contentOk=$true; $devId=$Matches[1] }
-      elseif($res -eq 'MISMATCH'){ $reasons+='stored public key does NOT derive from the private key' }
-      elseif($res -eq 'CORRUPT'){ $reasons+='device.json is not valid (unparseable / missing fields / bad key)' }
-      else{ $reasons+='could not run the content probe (got: '+$res+')' }
+              Set-Content -Path $probe -Value $js -Encoding ASCII
+              $prevEap2=$ErrorActionPreference; $ErrorActionPreference='Continue'
+              try{ & cmd.exe /c ('set ELECTRON_RUN_AS_NODE=1&& "'+$appExe+'" "'+$probe+'" "'+$devFile+'" >"'+$probeOut+'" 2>&1') | Out-Null }finally{ $ErrorActionPreference=$prevEap2 }
+              $res=''; if(Test-Path $probeOut){ $res=(Get-Content $probeOut -Raw).Trim() }
+              if($res -match '^OK ([0-9a-f]{16})$'){ $contentOk=$true; $devId=$Matches[1] }
+              elseif($res -eq 'MISMATCH'){ $reasons+='stored public key does NOT derive from the private key' }
+              elseif($res -eq 'CORRUPT'){ $reasons+='device.json is not valid (unparseable / missing fields / bad key)' }
+              else{ $reasons+='could not run the content probe (got: '+$res+')' }
+              if($contentOk -and -not $aclF -and -not $aclD){ $finding='healthy' }
+              else{ $finding='unhealthy' }
+            }
+          }
+        }
+      }
     }
-    if($contentOk -and -not $aclF -and -not $aclD){ $verdict='HEALTHY' }
-    else{ $verdict='UNHEALTHY' }
   }
   Say ''
   Say ('VERDICT: '+$verdict)
-  if($verdict -eq 'HEALTHY'){ Say ('deviceId (derived): '+$devId); Say 'finding: a healthy identity file exists at the CANDIDATE root. Diagnostic only - no enroll implication is drawn from this script.' }
-  if($verdict -eq 'ABSENT'){ Say 'finding: no identity file at the CANDIDATE root. Diagnostic only - artifacts do not prove the runtime root, so this says nothing about whether an identity exists elsewhere. NOT a mint permit.' }
-  if($verdict -eq 'UNHEALTHY' -or $verdict -eq 'UNREADABLE'){ Say 'finding: a file exists but is not provably healthy at the CANDIDATE root. Diagnostic only - report this; any enroll decision stays with the reviewed runtime-proof process.' }
+  Say ('FILE_FINDING: '+$finding)
+  if($devId){ Say ('deviceId (derived): '+$devId) }
   foreach($r in $reasons){ Say ('  - '+$r) }
   Say ''
-  Say 'NOTE: DIAGNOSTIC-ONLY - no verdict here permits an enroll. The runtime-proof step (packed-asar introspection, pending ops agreement) must confirm the root first.'
-  Say 'This script changed no app state. Send this output back (and enroll-precheck-log.txt from the Desktop).'
+  Say 'Diagnostic only - no verdict or finding here is an enroll decision. Send this output back (and enroll-precheck-log.txt from the Desktop).'
 }catch{
-  if($_.Exception.Message -ne 'STOP-AFTER-VERDICT'){
-    Say ('FAIL: '+$_.Exception.Message)
-    Say 'Send this whole output back.'
-  }
+  Say ('FAIL: '+$_.Exception.Message)
+  Say 'Send this whole output back.'
 }finally{
   if($stage -and (Test-Path -LiteralPath $stage)){ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
   try{ Stop-Transcript | Out-Null }catch{}

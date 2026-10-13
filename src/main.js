@@ -1,4 +1,17 @@
 const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session,desktopCapturer}=require('electron');
+// --gw-runtime-paths-json <nonce>: runtime-evidence mode (the SINGLE ops-agreed way to learn
+// the packed runtime's own identity/paths). Prints ONE JSON line and exits BEFORE any other
+// import, boot step, single-instance lock, updater, agent, window, or config write. This must
+// run as the real packed executable - ELECTRON_RUN_AS_NODE is a plain Node identity, not the
+// Electron app. Electron itself may still write its own caches/logs on launch: zero writes is
+// NOT claimed. The caller nonce must be echoed back exactly so a stale/wrong capture is useless.
+if(process.argv.includes('--gw-runtime-paths-json')){
+ const _i=process.argv.indexOf('--gw-runtime-paths-json');
+ const _nonce=String(process.argv[_i+1]||'');
+ if(!/^[\w-]{8,64}$/.test(_nonce)){process.stderr.write('gw-runtime-paths-json: bad nonce\n');process.exit(2)}
+ process.stdout.write(JSON.stringify({v:1,nonce:_nonce,ts:Date.now(),name:app.getName(),version:app.getVersion(),isPackaged:app.isPackaged,exe:app.getPath('exe'),appPath:app.getAppPath(),appData:app.getPath('appData'),userData:app.getPath('userData')})+'\n');
+ app.exit(0);
+}
 const {spawn}=require('child_process'),http=require('http'),crypto=require('crypto');
 const {parseAirPods}=require('./lib/airpods'),net=require('./lib/net'),themeLib=require('./lib/theme');
 const path=require('path'),fs=require('fs'),os=require('os');
