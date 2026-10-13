@@ -132,7 +132,7 @@ public static class GwBounded {
   [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcess(string appName, StringBuilder cmdLine, IntPtr procAttrs, IntPtr threadAttrs, bool inheritHandles, uint flags, IntPtr env, string curDir, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr proc, uint exitCode);
-  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
   [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SECURITY_ATTRIBUTES sa, uint disp, uint flags, IntPtr tmpl);
@@ -274,12 +274,13 @@ public static class GwBounded {
         return r;
       }
       uint w = WaitForSingleObject(proc, (uint)timeoutMs);
+      int wErr = (w != 0 && w != WAIT_TIMEOUT) ? Marshal.GetLastWin32Error() : 0;
       if (w == WAIT_TIMEOUT) {
         r.TimedOut = true;
         TerminateJobObject(job, 1);
         WaitForSingleObject(proc, 5000);
       } else if (w != 0) {
-        r.Error = Err("WaitForSingleObject");
+        r.Error = "WaitForSingleObject failed (win32 " + wErr.ToString() + ")";
         TerminateJobObject(job, 1);
         WaitForSingleObject(proc, 5000);
       }
