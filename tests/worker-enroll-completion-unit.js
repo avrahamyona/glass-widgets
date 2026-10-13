@@ -5,12 +5,12 @@
 const assert=require('assert'),crypto=require('crypto');
 const{deviceIdFromPub}=require('../src/lib/enroll-challenge.js');
 const{fingerprint:fpFn}=require('../src/lib/fingerprint.js');
-const{verifyEnrollTerminal,verifyOwnerApproval,recordIssuedEpisode,recordApproval,confirmRegistration}=require('../worker/enroll-completion.js');
+const{verifyEnrollTerminal,verifyOwnerApproval,recordIssuedEpisode,recordApproval,confirmRegistration,issueEpisodeThen}=require('../worker/enroll-completion.js');
 class FakeStmt{constructor(db,sql,args){this.db=db;this.sql=sql;this.args=args}
  async first(){const d=this.db,s=this.sql,a=this.args;const r=d.ep.get(a[0]);
   if(s.startsWith('SELECT challenge,issued_at,user_instruction_ref FROM enroll_episodes'))return r?{challenge:r.challenge,issued_at:r.issued_at,user_instruction_ref:r.uir}:null;
   if(s.startsWith('SELECT challenge,issued_at,status FROM enroll_episodes'))return r?{challenge:r.challenge,issued_at:r.issued_at,status:r.status}:null;
-  if(s.startsWith('SELECT term_pubkey,approval_ref FROM enroll_episodes'))return r?{term_pubkey:r.term_pubkey,approval_ref:r.approval_ref}:null;
+  if(s.startsWith('SELECT term_device_id,term_pubkey,term_approved_at,approval_channel,approval_ref,approval_fingerprint,approved_at FROM enroll_episodes'))return r?{term_device_id:r.term_device_id,term_pubkey:r.term_pubkey,term_approved_at:r.term_approved_at,approval_channel:r.approval_channel,approval_ref:r.approval_ref,approval_fingerprint:r.approval_fingerprint,approved_at:r.approved_at}:null;
   if(s.startsWith('SELECT status,term_device_id,term_pubkey FROM enroll_episodes'))return r?{status:r.status,term_device_id:r.term_device_id,term_pubkey:r.term_pubkey}:null;
   if(s.startsWith('SELECT pubkey FROM devices')){const pk=d.devices.get(a[0]);return pk?{pubkey:pk.pubkey}:null}
   throw new Error('unexpected first: '+s)}
@@ -41,7 +41,7 @@ function terminal(dev,cmdId,challenge,approvedAt,over={}){ // the PC done-termin
  const t={deviceId:dev.deviceId,pubkey:dev.pubkey,challengeSig:sign(dev.priv,[challenge,dev.pubkey,dev.deviceId].join('\n')),
   pairing:{fingerprint:fpFn(dev.pubkey),approvedAt,cardId:cardId(cmdId)}};
  return{...t,...over}}
-const approval=(cmdId,fp,over={})=>({channel:'whatsapp',ref:'wamid.HBgMOTcyNTQ5OTE3MzcyFQIAEhgUM0FF',cmdId,fingerprint:fp,approvedAt:Date.now(),...over});
+const approval=(cmdId,fp,over={})=>({channel:'whatsapp',ref:'wamid.HBgMOTcyNTQ5OTE3MzcyFQIAEhgUM0FFMzAwQTBGMEQ4QjVEODk4NUMA==',cmdId,fingerprint:fp,approvedAt:Date.now(),...over});
 (async()=>{
  const now=Date.now();
  // 1. full two-chain path
@@ -127,5 +127,38 @@ const approval=(cmdId,fp,over={})=>({channel:'whatsapp',ref:'wamid.HBgMOTcyNTQ5O
   assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
   const r=await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey),{ref:'not a ref'}));
   assert(r.ok===false&&r.reason==='owner_bad_approval_ref','spacey ref refused')}
+ // 13. OPS GAP 1: replay with SAME ref but changed fingerprint/cmd-evidence refused
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-13',ch='nonce-MMMM-13';
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  const ap=approval(cmd,fpFn(dev.pubkey),{approvedAt:now-4000});
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),ap)).ok);
+  const dev2=mintDevice();
+  const r=await recordApproval(db,cmd,terminal(dev2,cmd,ch,now-5000),{...ap,fingerprint:fpFn(dev2.pubkey)}); // same ref, different key/fingerprint
+  assert(r.ok===false&&r.reason==='episode_not_issued','changed-evidence replay refused');
+  const r2=await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),{...ap,approvedAt:now-3000}); // same ref, different approval TIME
+  assert(r2.ok===false&&r2.reason==='episode_not_issued','changed-time replay refused')}
+ // 14. OPS GAP 2+3: wamid '=' padding accepted; __proto__ channel refused
+ {const v=await verifyOwnerApproval({cmdId:'cmd-x',fingerprint:fpFn(mintDevice().pubkey),approval:{channel:'whatsapp',ref:'wamid.ABCDEFGHIJ==',cmdId:'cmd-x',fingerprint:'00',approvedAt:1},now});
+  assert(v.ok===false&&v.reason==='approval_fingerprint_mismatch','mismatched approval fingerprint refused');
+  const fp=fpFn(mintDevice().pubkey);
+  const ok=await verifyOwnerApproval({cmdId:'cmd-x',fingerprint:fp,approval:{channel:'whatsapp',ref:'wamid.ABCDEFGHIJ==',cmdId:'cmd-x',fingerprint:fp,approvedAt:Date.now()},issuedAt:Date.now()-1000,now:Date.now()});
+  assert(ok.ok===true,'padded wamid accepted');
+  const proto=await verifyOwnerApproval({cmdId:'cmd-x',fingerprint:fp,approval:{channel:'__proto__',ref:'wamid.ABCDEFGHIJ==',cmdId:'cmd-x',fingerprint:fp,approvedAt:Date.now()},issuedAt:Date.now()-1000,now:Date.now()});
+  assert(proto.ok===false&&proto.reason==='approval_channel_not_allowed','__proto__ channel refused');
+  const ctor=await verifyOwnerApproval({cmdId:'cmd-x',fingerprint:fp,approval:{channel:'constructor',ref:'wamid.ABCDEFGHIJ==',cmdId:'cmd-x',fingerprint:fp,approvedAt:Date.now()},issuedAt:Date.now()-1000,now:Date.now()});
+  assert(ctor.ok===false&&ctor.reason==='approval_channel_not_allowed','constructor channel refused')}
+ // 15. OPS GAP 4: approval at/before issuance refused
+ {const fp=fpFn(mintDevice().pubkey),ts=now-60000;
+  const r=await verifyOwnerApproval({cmdId:'cmd-y',fingerprint:fp,approval:{channel:'whatsapp',ref:'wamid.ABCDEFGHIJ==',cmdId:'cmd-y',fingerprint:fp,approvedAt:ts},issuedAt:ts,now});
+  assert(r.ok===false&&r.reason==='approval_precedes_episode','approval at issuance refused');
+  const r2=await verifyOwnerApproval({cmdId:'cmd-y',fingerprint:fp,approval:{channel:'whatsapp',ref:'wamid.ABCDEFGHIJ==',cmdId:'cmd-y',fingerprint:fp,approvedAt:ts-1000},issuedAt:ts,now});
+  assert(r2.ok===false&&r2.reason==='approval_precedes_episode','approval before issuance refused')}
+ // 16. OPS GAP 5: issueEpisodeThen - episode failure means NO delivery; success delivers AFTER
+ {const calls=[];const dbBad={prepare:()=>({bind:()=>({run:async()=>{throw new Error('DB down')},first:async()=>null})})};
+  const r=await issueEpisodeThen(dbBad,{cmdId:'cmd-16',challenge:'nonce-NNNN-16',issuedAt:now,userInstructionRef:'r'},async()=>{calls.push('deliver')});
+  assert(r.ok===false&&r.delivered===false&&calls.length===0,'episode failure: never delivered');
+  const db=new FakeDB();
+  const r2=await issueEpisodeThen(db,{cmdId:'cmd-16',challenge:'nonce-NNNN-16',issuedAt:now,userInstructionRef:'r'},async()=>{calls.push('deliver');assert(db.ep.has('cmd-16'),'episode durable BEFORE delivery');return 'sent'});
+  assert(r2.ok===true&&r2.delivered===true&&r2.result==='sent'&&calls.length===1,'delivery strictly after durable episode')}
  console.log('WORKER-ENROLL-COMPLETION-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});

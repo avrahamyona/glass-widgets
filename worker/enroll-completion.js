@@ -38,14 +38,18 @@
 //      status issued->approved in ONE conditional UPDATE (replay-safe).
 //   5. confirmRegistration(cmdId, maxDevices): status must be 'approved'; atomic capped
 //      INSERT; conditional flip to 'confirmed'. Failures keep the row for reconciliation.
+// The send route wires step 1 through issueEpisodeThen(DB, episode, deliver) so the episode is
+// durable BEFORE notify/delivery - a command can never execute without its recoverable episode.
 //
 // DUAL-MODE: plain functions, no Buffer/node requires (live Worker is ESM, no node-compat).
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const CMD_ID_RE = /^[\w-]{1,80}$/; // strict ledger id shape (same as the PC's journal ids)
 const APPROVAL_WINDOW_MS = 180000; // PC pairing-card TTL (120s) + 60s execution/clock slack
 const SKEW_MS = 30000;
-const OWNER_APPROVAL_CHANNELS = { whatsapp: 1 }; // closed allowlist - the original user channel
-const APPROVAL_REF_RE = /^[\w.:@-]{10,200}$/; // e.g. a WhatsApp wamid - printable, bounded, no spaces
+const OWNER_APPROVAL_CHANNELS = new Set(['whatsapp']); // closed allowlist (Set.has - no prototype tricks)
+// Grounded per-channel original-message reference formats (NOT fixture-invented): real WhatsApp
+// wamids are 'wamid.' + a base64url-ish token that commonly ends with '=' padding.
+const APPROVAL_REF_RES = { whatsapp: /^wamid\.[A-Za-z0-9_-]{10,160}={0,2}$/ };
 const subtle = () => (globalThis.crypto && globalThis.crypto.subtle) || require('crypto').webcrypto.subtle;
 const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
 const b64Bytes = s => Uint8Array.from(atob(String(s)), c => c.charCodeAt(0));
@@ -110,18 +114,19 @@ async function recordIssuedEpisode(DB, { cmdId, challenge, issuedAt, userInstruc
 // CHAIN B (binding only): the owner approval record the caller INDEPENDENTLY recovered from
 // the original channel. This module never fetches it and never treats its mere presence as
 // proof - it binds exact identifiers. Returns the bound evidence or a refusal.
-async function verifyOwnerApproval({ cmdId, fingerprint, approval, now }) {
+async function verifyOwnerApproval({ cmdId, fingerprint, approval, issuedAt, now }) {
   const no = reason => ({ ok: false, reason });
   if (typeof cmdId !== 'string' || !CMD_ID_RE.test(cmdId)) return no('bad_cmd_id');
   if (typeof fingerprint !== 'string' || !/^[0-9a-f]{4}(-[0-9a-f]{4}){3}$/.test(fingerprint)) return no('bad_fingerprint');
   const a = approval && typeof approval === 'object' && !Array.isArray(approval) ? approval : null;
   if (!a) return no('missing_owner_approval'); // NO approval record - NO authority
   if (Object.keys(a).sort().join(',') !== 'approvedAt,channel,cmdId,fingerprint,ref') return no('approval_shape');
-  if (typeof a.channel !== 'string' || !OWNER_APPROVAL_CHANNELS[a.channel]) return no('approval_channel_not_allowed');
-  if (typeof a.ref !== 'string' || !APPROVAL_REF_RE.test(a.ref)) return no('bad_approval_ref'); // the original message id (e.g. wamid)
+  if (typeof a.channel !== 'string' || !OWNER_APPROVAL_CHANNELS.has(a.channel)) return no('approval_channel_not_allowed');
+  if (typeof a.ref !== 'string' || !APPROVAL_REF_RES[a.channel].test(a.ref)) return no('bad_approval_ref'); // the ORIGINAL message id, per-channel grounded format
   if (a.cmdId !== cmdId) return no('approval_cmd_mismatch'); // the approval names THIS episode
   if (a.fingerprint !== fingerprint) return no('approval_fingerprint_mismatch'); // the owner approved THIS exact key fingerprint
   if (typeof a.approvedAt !== 'number' || !Number.isInteger(a.approvedAt) || a.approvedAt <= 0) return no('bad_approval_time');
+  if (Number.isFinite(issuedAt) && a.approvedAt <= issuedAt) return no('approval_precedes_episode'); // the owner cannot approve an episode before it was ISSUED (and its fingerprint shown)
   if (Number.isFinite(now) && a.approvedAt > now + SKEW_MS) return no('approval_in_future');
   return { ok: true, evidence: { channel: a.channel, ref: a.ref, approvedAt: a.approvedAt } };
 }
@@ -135,16 +140,23 @@ async function recordApproval(DB, cmdId, terminalResult, approval, now) {
   const ep = await DB.prepare('SELECT challenge,issued_at,status FROM enroll_episodes WHERE cmd_id=?').bind(String(cmdId || '')).first();
   if (!ep) return { ok: false, reason: 'no_issued_episode' }; // the challenge MUST come from a worker-issued record
   if (ep.status !== 'issued') {
-    if (ep.status === 'approved' || ep.status === 'confirmed') { // idempotent replay: same evidence?
-      const cur = await DB.prepare('SELECT term_pubkey,approval_ref FROM enroll_episodes WHERE cmd_id=?').bind(String(cmdId)).first();
+    if (ep.status === 'approved' || ep.status === 'confirmed') { // idempotent replay ONLY on FULL exact evidence
+      const cur = await DB.prepare('SELECT term_device_id,term_pubkey,term_approved_at,approval_channel,approval_ref,approval_fingerprint,approved_at FROM enroll_episodes WHERE cmd_id=?').bind(String(cmdId)).first();
       const t = await verifyEnrollTerminal({ cmdId: String(cmdId), cmdTs: +ep.issued_at, challenge: ep.challenge, result: terminalResult, now });
-      if (t.ok && cur && cur.term_pubkey === t.device.pubkey && cur.approval_ref === (approval && approval.ref)) return { ok: true, already: true, device: t.device };
+      if (!t.ok) return { ok: false, reason: 'terminal_' + t.reason }; // a replay must still pass the pure verifier
+      const o = await verifyOwnerApproval({ cmdId: String(cmdId), fingerprint: t.device.fingerprint, approval, issuedAt: +ep.issued_at, now });
+      if (!o.ok) return { ok: false, reason: 'owner_' + o.reason }; // AND the owner-binding verifier - no skipping on replay
+      const same = !!(cur
+        && cur.term_device_id === t.device.deviceId && cur.term_pubkey === t.device.pubkey && +cur.term_approved_at === t.device.approvedAt
+        && cur.approval_channel === o.evidence.channel && cur.approval_ref === o.evidence.ref
+        && cur.approval_fingerprint === t.device.fingerprint && +cur.approved_at === o.evidence.approvedAt); // EVERY stored field exact
+      if (same) return { ok: true, already: true, device: t.device };
     }
     return { ok: false, reason: 'episode_not_issued' };
   }
   const t = await verifyEnrollTerminal({ cmdId: String(cmdId), cmdTs: +ep.issued_at, challenge: ep.challenge, result: terminalResult, now });
   if (!t.ok) return { ok: false, reason: 'terminal_' + t.reason };
-  const o = await verifyOwnerApproval({ cmdId: String(cmdId), fingerprint: t.device.fingerprint, approval, now });
+  const o = await verifyOwnerApproval({ cmdId: String(cmdId), fingerprint: t.device.fingerprint, approval, issuedAt: +ep.issued_at, now });
   if (!o.ok) return { ok: false, reason: 'owner_' + o.reason };
   const r = await DB.prepare("UPDATE enroll_episodes SET status='approved',term_device_id=?,term_pubkey=?,term_approved_at=?,approval_channel=?,approval_ref=?,approval_fingerprint=?,approved_at=? WHERE cmd_id=? AND status='issued'")
     .bind(t.device.deviceId, t.device.pubkey, t.device.approvedAt, o.evidence.channel, o.evidence.ref, t.device.fingerprint, o.evidence.approvedAt, String(cmdId)).run();
@@ -185,4 +197,15 @@ async function confirmRegistration(DB, cmdId, maxDevices) {
   return { ok: true, deviceId: p.term_device_id };
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { verifyEnrollTerminal, verifyOwnerApproval, recordIssuedEpisode, recordApproval, confirmRegistration, CHALLENGE_RE, APPROVAL_WINDOW_MS };
+// SEND/RECORD ATOMICITY (ops gap 5): the send route MUST make the episode durable BEFORE any
+// notify/delivery. This wrapper enforces the order mechanically: deliver() is invoked ONLY
+// after recordIssuedEpisode succeeds; an episode failure aborts the send undelivered (the
+// route maps that to a 5xx, never a delivered command without its recoverable episode).
+async function issueEpisodeThen(DB, episode, deliver) {
+  const r = await recordIssuedEpisode(DB, episode);
+  if (!r.ok) return { ok: false, reason: 'episode_' + r.reason, delivered: false };
+  const result = await deliver(); // hub notify / SSE delivery happens strictly AFTER the durable episode
+  return { ok: true, delivered: true, result };
+}
+
+if (typeof module !== 'undefined' && module.exports) module.exports = { verifyEnrollTerminal, verifyOwnerApproval, recordIssuedEpisode, recordApproval, confirmRegistration, issueEpisodeThen, CHALLENGE_RE, APPROVAL_WINDOW_MS };
