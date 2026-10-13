@@ -1,0 +1,50 @@
+﻿# win-watchdog-remove.txt - run on the user's PC (regular PowerShell, no admin needed)
+# Purpose: REMOVE the GlassWidgets-Watchdog scheduled task (the every-5-minutes relauncher).
+# Per the user's instruction: the app must NOT reopen itself every 5 minutes; opening stays in
+# his hands. This script DELETES the task and verifies it is gone. It does NOT launch the app,
+# does NOT re-create the task, and does NOT touch autostart (the Run key) or the app itself.
+# Fully reversible: the undo command (re-creating the task exactly as win-server-base did) is
+# printed at the end. Idempotent: if the task is already gone, that is a PASS.
+$ErrorActionPreference='Stop'
+function Say($m){ Write-Host $m }
+$taskName='GlassWidgets-Watchdog'
+$tmp=Join-Path $env:TEMP 'gw-wdr-native.txt'
+function Run-Cmd($line){
+  $prev=$ErrorActionPreference; $ErrorActionPreference='Continue'
+  try{ & cmd.exe /c ($line+' >"'+$tmp+'" 2>&1') | Out-Null }finally{ $ErrorActionPreference=$prev }
+  $code=$LASTEXITCODE
+  $out=''; if(Test-Path $tmp){ $out=(Get-Content $tmp -Raw -ErrorAction SilentlyContinue) }
+  return @{code=$code; out=$out}
+}
+try{
+  Say '== GlassWidgets watchdog removal =='
+  # PASS 1: delete the scheduled task (idempotent - "not found" is already the goal)
+  $q=Run-Cmd ('schtasks /Query /TN '+$taskName)
+  if($q.code -ne 0){
+    Say 'PASS 1: scheduled task GlassWidgets-Watchdog is already absent - nothing to delete'
+  }else{
+    $dl=Run-Cmd ('schtasks /Delete /TN '+$taskName+' /F')
+    if($dl.code -ne 0){ throw ('schtasks /Delete failed (exit '+$dl.code+'): '+$dl.out.Trim()) }
+    Say 'PASS 1: scheduled task GlassWidgets-Watchdog deleted'
+  }
+  # PASS 2: verify it is REALLY gone (a fresh query must fail)
+  $q2=Run-Cmd ('schtasks /Query /TN '+$taskName)
+  if($q2.code -eq 0){ throw ('task still present after delete - schtasks says: '+$q2.out.Trim()) }
+  Say 'PASS 2: verified - the task no longer exists; nothing will relaunch the app every 5 minutes'
+  # NOTE: the old watchdog script file (if any) is left in place - with no task referencing it
+  # it is inert. Scope of this fixture is the task removal only, per review.
+  Say 'NOTE: the inert watchdog script file (if present) was left untouched - nothing references it.'
+  Say 'NOT touched (on purpose): the app itself, its data, and the login autostart (Run key).'
+  Say 'Opening the app is now fully in your hands - nothing relaunches it on a timer.'
+  Say ''
+  Say '--- undo (only if you ever want the auto-relaunch back) ---'
+  Say '  re-run win-server-base, which re-creates the script and the task.'
+  Say ''
+  Say 'DONE: watchdog removed. Send this output back.'
+}catch{
+  Say ('FAIL: '+$_.Exception.Message)
+  Say 'Send this whole output back.'
+}finally{
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  Read-Host 'Press Enter to close'
+}
