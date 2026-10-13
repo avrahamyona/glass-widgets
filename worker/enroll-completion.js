@@ -38,8 +38,8 @@
 //      status issued->approved in ONE conditional UPDATE (replay-safe).
 //   5. confirmRegistration(cmdId, maxDevices): status must be 'approved'; atomic capped
 //      INSERT; conditional flip to 'confirmed'. Failures keep the row for reconciliation.
-// The send route wires step 1 through issueEpisodeThen(DB, episode, deliver) so the episode is
-// durable BEFORE notify/delivery - a command can never execute without its recoverable episode.
+// Step 1 in the live route is one D1 batch (cmd row + episode row) BEFORE notify; see the patch
+// referenced at issueEpisodeThen below. issueEpisodeThen is the ordering-only helper.
 //
 // DUAL-MODE: plain functions, no Buffer/node requires (live Worker is ESM, no node-compat).
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -197,10 +197,15 @@ async function confirmRegistration(DB, cmdId, maxDevices) {
   return { ok: true, deviceId: p.term_device_id };
 }
 
-// SEND/RECORD ATOMICITY (ops gap 5): the send route MUST make the episode durable BEFORE any
-// notify/delivery. This wrapper enforces the order mechanically: deliver() is invoked ONLY
-// after recordIssuedEpisode succeeds; an episode failure aborts the send undelivered (the
-// route maps that to a 5xx, never a delivered command without its recoverable episode).
+// SEND/RECORD ORDERING (ops gap 5). HONEST SCOPE: this helper is NOT a transaction. It only
+// enforces ORDER for callers that hold a plain D1 handle: deliver() runs strictly AFTER the
+// episode row is stored, and an episode failure aborts the send undelivered. The ATOMIC
+// cmd+episode write (one D1 batch, same signed `now`, before notify) lives in the live send route
+// - see worker-atomic-issuance.patch, simulated against the real worker code. If a send response
+// is lost, recovery is the authenticated challenge lookup on /glasswidgets/cmd/status?challenge=
+// (returns id + issued_at), never a blind retry. Exactly-once is NOT claimed across crashes:
+// the one-time challenge (UNIQUE) and the conditional status transitions make a repeated
+// completion/issuance fail closed or return 'already', not execute twice.
 async function issueEpisodeThen(DB, episode, deliver) {
   const r = await recordIssuedEpisode(DB, episode);
   if (!r.ok) return { ok: false, reason: 'episode_' + r.reason, delivered: false };
