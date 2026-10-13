@@ -1,12 +1,14 @@
-﻿# win-enroll-precheck.txt - run on the user's PC (regular PowerShell, no admin needed)
+# win-enroll-precheck.txt - run on the user's PC (regular PowerShell, no admin needed)
 # DIAGNOSTIC ONLY. This script gathers evidence and findings; it draws NO enroll conclusions,
 # issues NO permits, and changes NO app identity or settings. It writes a Desktop transcript
 # (enroll-precheck-log.txt) and a unique GUID temp staging dir (removed at the end). Launching
 # the app's evidence mode may cause Electron's own cache/log writes - zero writes is NOT claimed.
 #
 # What it does:
-#   0. Gates on the EXACT reviewed build: -AsarSha256 (sha256 of resources\app.asar from the
-#      reviewed 0.4.64 build) is REQUIRED - without it, or on any mismatch, nothing is launched.
+#   0. Gates on the EXACT reviewed build: -AsarSha256 (sha256 of resources\app.asar) AND
+#      -ExpectedVersion (the reviewed package.json version string) are BOTH REQUIRED - without
+#      either, or on any mismatch, nothing is launched. Launch is timeout-bounded, exit-code
+#      checked, env-scrubbed, and accepts exactly one valid JSON record.
 #   1. Runs the installed app's --gw-runtime-paths-json <nonce> mode (0.4.64+) - the SINGLE
 #      agreed way to learn the packed runtime's OWN userData root. The nonce, isPackaged, exe
 #      path and version are verified; a mismatch means the evidence is rejected.
@@ -14,7 +16,7 @@
 #      unreadable / not_checked. On an older app without the mode, or on any evidence failure,
 #      VERDICT stays UNKNOWN and the file is NOT checked against any guessed root.
 # ACL comparison mirrors the app's shared evaluator (src/lib/acl-check.js) exactly.
-param([string]$AsarSha256='') # optional pin: sha256 of resources\app.asar from the REVIEWED 0.4.64 build
+param([string]$AsarSha256='',[string]$ExpectedVersion='') # BOTH required: sha256 of the reviewed build's resources\app.asar + the reviewed package.json version string
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 function Say($m){ Write-Host $m }
@@ -47,6 +49,7 @@ try{
       $buildOk=$false
       if(-not (Test-Path $asar)){ $reasons+='packed app.asar not found at '+$asar+' - unknown build, not launched' }
       elseif(-not $AsarSha256){ $reasons+='no -AsarSha256 pin supplied - the exact reviewed build hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
+      elseif(-not $ExpectedVersion){ $reasons+='no -ExpectedVersion supplied - the reviewed package version string is REQUIRED before any launch; UNKNOWN, nothing was run' }
       else{
         $h=(Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash
         if($h -ine $AsarSha256){ $reasons+='app.asar hash '+$h+' does NOT match the pinned build '+$AsarSha256+' - unknown build, not launched' }
@@ -61,22 +64,35 @@ try{
         }
       }
     if($buildOk){
-      # 1. runtime evidence: the packed app answers for itself, nonce-bound
+      # 1. runtime evidence: the packed app answers for itself, nonce-bound. Launch hygiene:
+      # ELECTRON_RUN_AS_NODE is explicitly scrubbed from the child env (an inherited value would
+      # turn the evidence launch into a plain Node), bounded 20s timeout, exit code checked.
       $nonce=[guid]::NewGuid().ToString('N')
-      $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
-      try{ & cmd.exe /c ('"'+$appExe+'" --gw-runtime-paths-json '+$nonce+' >"'+$cap+'" 2>&1') | Out-Null }finally{ $ErrorActionPreference=$prevEap }
+      $capErr=Join-Path $stage 'rt-err.txt'
+      $proc=$null; $exitOk=$false
+      try{
+        $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
+        try{
+          $proc=Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c','set "ELECTRON_RUN_AS_NODE="& "'+$appExe+'" --gw-runtime-paths-json '+$nonce+' >"'+$cap+'" 2>"'+$capErr+'"') -WindowStyle Hidden -PassThru
+        }finally{ $ErrorActionPreference=$prevEap }
+        if(-not $proc.WaitForExit(20000)){ try{ $proc.Kill() }catch{}; $reasons+='evidence mode timed out after 20s - rejected' }
+        elseif($proc.ExitCode -ne 0){ $reasons+='evidence mode exited with code '+$proc.ExitCode+' - rejected' }
+        else{ $exitOk=$true }
+      }catch{ $reasons+='evidence launch failed: '+$_.Exception.Message }
+      # EXACTLY ONE valid JSON record in the whole capture (never "first matching line")
       $raw=''; if(Test-Path $cap){ $raw=(Get-Content $cap -Raw).Trim() }
-      $jline=($raw -split "`r?`n" | Where-Object {$_.TrimStart().StartsWith('{')} | Select-Object -First 1)
-      if(-not $jline){ $reasons+='the app did not return a runtime-paths JSON line (mode missing or blocked)' }
+      $jsonRecs=@()
+      foreach($ln in ($raw -split "`r?`n")){ $t=$ln.Trim(); if($t.StartsWith('{')){ $p=$null; try{ $p=$t | ConvertFrom-Json -EA Stop }catch{ $p=$null }; if($p){ $jsonRecs+=$p } } }
+      if(-not $exitOk){ }
+      elseif($jsonRecs.Count -ne 1){ $reasons+='expected exactly ONE valid JSON record in the capture, found '+$jsonRecs.Count+' - rejected' }
       else{
-        $rt=$null; try{ $rt=$jline | ConvertFrom-Json -EA Stop }catch{ $reasons+='runtime-paths JSON did not parse' }
+        $rt=$jsonRecs[0]
         if($rt){
           if($rt.v -ne 1){ $reasons+='runtime-paths schema is not v1' }
           elseif([string]$rt.nonce -ne $nonce){ $reasons+='nonce mismatch - the capture is not from this run (stale or foreign)' }
           elseif(-not ($rt.isPackaged -is [bool] -and $rt.isPackaged -eq $true)){ $reasons+='isPackaged is not strictly boolean true - this is not the packed installed runtime' }
           elseif([string]$rt.exe -ine $appExe){ $reasons+='the answering exe ('+[string]$rt.exe+') is not the installed exe ('+$appExe+')' }
-          elseif(-not [regex]::Match([string]$rt.version,'^(\d+)\.(\d+)\.(\d+)').Success){ $reasons+='runtime version is unparseable: '+[string]$rt.version }
-          elseif([regex]::Match([string]$rt.version,'^(\d+)\.(\d+)\.(\d+)').Value -cne $m.Value){ $reasons+='runtime version ('+[string]$rt.version+') does not match the installed version ('+$verText+')' }
+          elseif([string]$rt.version -cne $ExpectedVersion.Trim()){ $reasons+='runtime version ('+[string]$rt.version+') does not exactly match the reviewed package version ('+$ExpectedVersion.Trim()+')' }
           elseif(-not ($rt.ts -is [long] -or $rt.ts -is [int] -or $rt.ts -is [double])){ $reasons+='runtime ts is not numeric' }
           elseif([math]::Abs(([DateTimeOffset]::Now.ToUnixTimeMilliseconds())-[int64]$rt.ts) -gt 60000){ $reasons+='runtime ts is not fresh (over 60s from now) - stale capture rejected' }
           elseif([string]::IsNullOrWhiteSpace([string]$rt.userData) -or -not [System.IO.Path]::IsPathRooted([string]$rt.userData)){ $reasons+='runtime returned a missing or non-absolute userData' }
