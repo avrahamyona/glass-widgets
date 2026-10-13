@@ -116,6 +116,19 @@ async function main(){
   assert(readTunnelState(dir).since===cSince,'no heartbeat writes after down');
   r.stop();await sleep(10)}
 
+ // 10) mailer wiring: boot with GW_MAILER=1 but incomplete cfg.mailer -> loud skip, server still up
+ {const{spawn}=require('child_process');const dir=mkDir();
+  const{publicKey:PUB}=crypto.generateKeyPairSync('ed25519');
+  fs.writeFileSync(path.join(dir,'config.json'),JSON.stringify({token:'srv-key',senderPub:PUB.export({format:'der',type:'spki'}).toString('base64'),port:0,roots:[dir],mailer:{host:'smtp.example'}}));
+  const cp=spawn(process.execPath,['server/index.js'],{env:{...process.env,GW_SERVER_CONFIG:path.join(dir,'config.json'),GW_TUNNEL:'1',GW_MAILER:'1'},stdio:['ignore','pipe','pipe']});
+  let out='';cp.stdout.on('data',d=>out+=d);
+  for(let i=0;i<60&&!out.includes('tunnel');i++)await sleep(200);
+  assert(out.includes('server up'),'server boots with incomplete mailer config');
+  const audit=fs.readFileSync(path.join(dir,'server-audit.log'),'utf8');
+  assert(audit.includes('config_incomplete'),'incomplete mailer config logged loud');
+  assert(!audit.includes('abcdefghijklmnop'),'no credential ever in the audit log');
+  await new Promise(res=>{cp.once('exit',res);cp.kill('SIGTERM');setTimeout(res,3000).unref()})}
+
  console.log('TUNNEL-SUPERVISOR-UNIT: PASS');
 }
 main().catch(e=>{console.error('FAIL',e);process.exit(1)});

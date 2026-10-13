@@ -104,7 +104,22 @@ async function main(){
  if(process.env.GW_TUNNEL==='1'||cfg.tunnel===true){
   try{
    const{startTunnelSupervisor}=require('./lib/tunnel-supervisor');
-   const ts=await startTunnelSupervisor({dataDir,port:r.port,log:(stage,obj)=>log('info',{kind:'tunnel',stage,...obj}),getDevice:()=>({deviceId:device.id})});
+   // optional email rendezvous (docs/rendezvous-design.md B): pointer changes are mailed to the
+   // user's own mailbox. OFF unless cfg.mailer {host,user,pass,from,to} exists AND GW_MAILER=1.
+   // The app-password sits in the ACL-hardened data dir only, never in the repo, never logged.
+   let onPointer;
+   if(process.env.GW_MAILER==='1'){
+    const mc=cfg.mailer||{};
+    if(mc.host&&mc.user&&mc.pass&&mc.from&&mc.to){
+     const{sendMail}=require('./lib/pointer-mailer');
+     onPointer=async rec=>{
+      const r=await sendMail({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
+       subject:'GW-POINTER '+device.id,text:JSON.stringify(rec)});
+      log(r.ok?'info':'warn',{kind:'mailer',stage:r.ok?'sent':'send_fail',mailStage:r.stage});
+     };
+    }else log('warn',{kind:'mailer',stage:'config_incomplete'}); // GW_MAILER=1 without a full cfg.mailer: loud skip, never a partial attempt
+   }
+   const ts=await startTunnelSupervisor({dataDir,port:r.port,log:(stage,obj)=>log('info',{kind:'tunnel',stage,...obj}),getDevice:()=>({deviceId:device.id}),onPointer});
    console.log(ts.started?('tunnel supervisor up - pointer file: '+ts.file):('tunnel not started: '+ts.reason));
   }catch(e){log('warn',{kind:'tunnel',stage:'supervisor_error',err:String(e&&e.message||e).slice(0,120)})}
  }
