@@ -45,3 +45,12 @@ port 47700, ו-roots לתיקיית scratch בלבד. הפיקסצ'ר מדפיס
 - החיבור היחיד החוצה: cloudflared -> edge של Cloudflare (חינם, בלי חשבון) + ההורדות בהתחלה.
 - ה-pointer ציבורי מעצם תכנונו; כל פקודה דורשת חתימת שולח, כל קריאה read-auth חתום.
 - מפתחות החזרה חד-פעמיים ומושמדים; תיקיית ה-roots היא scratch ריקה.
+
+## תוצאה: PASS מלא (2026-10-13 21:04, בוצע ואוחזר נקי)
+שרת+מנהרה עלו על ה-PC, תרגיל rotation (taskkill) הוכיח respawn עם url חדשה תוך שניות
+(אותו device 4ce818ebbce408af), וה-e2e החתום מ-sandbox עבר: /info עם read-auth (fingerprint
+4ce8-18eb-bce4-08af עוגן מול קונסולת המשתמש), health nonce proof, read_file done+trusted,
+התוכן אומת בית-אחר-בית (nonce 84ec56a300422cbe, sha256 caff5e36...). Rollback: Ctrl+C +
+מחיקת תיקייה אחת - אומת נקי (אין cloudflared על 47700, אין gw-rehearsal). אירוע צד: ה-taskkill
+הכללי פגע גם ב-cloudflared נוסף (של האפליקציה/יתום) - מתאושש מעצמו; ה-rollback הסופי כבר
+ממוקד ב-Ctrl+C בלבד.

@@ -64,9 +64,15 @@ and does not change with the rendezvous.
    supervisor heartbeat (45s since-refresh - a dead PC is distinguishable from a quiet one)
    + contract addendum (transport swap never changes authority). Sender-client itself needs
    no change: it already takes an explicit deviceUrl and re-proves identity per pointer.
-2. Live (APPROVAL-GATED): run server+supervisor on the PC (GW_TUNNEL=1), rotation drill
-   (kill cloudflared -> supervisor respawns -> state file updates -> sender re-resolves ->
-   signed command e2e). THEN demote the worker to optional.
+2. DONE (2026-10-13, approved one-shot rehearsal, fully rolled back): server+supervisor ran
+   on the user's PC, rotation drill passed (new URL, same device), signed e2e passed from an
+   external sender (health nonce proof + read_file, byte-verified content). Evidence and the
+   exact procedure: docs/live-rehearsal-quick-tunnel.md.
+3. Production-ization (each approval-gated, source/review first): automated pointer
+   rendezvous (rehearsal used manual relay), always-on packaging (user-level autostart),
+   production key/token provisioning (device self-mints on the PC; sender key + token via a
+   managed handoff - never the rehearsal pattern), and only then routing a real flow with
+   the worker demoted to optional.
 
 The enroll-completion seam stays BLOCKED exactly as reviewed (503
 trusted_approval_source_unavailable) - this work changes transport, never authority. No live
