@@ -249,8 +249,16 @@ Scenario 'real-app-bad-nonce-exits-nonzero' {
   if($gate -eq 'pins not injected'){ return 'SKIP' }
   if($gate){ Say ('  gate: '+$gate); return $false }
   $r=Run-Tracked { Invoke-BoundedProcess -ExePath $appExe -Arguments @('--gw-runtime-paths-json','x') -OutDir $outDir -EnvRemove @{ELECTRON_RUN_AS_NODE=1} -TimeoutMs 20000 }
-  $ra=Get-RunAssessment -Run $r -Label 'real app bad nonce'
-  ($ra -ne '')
+  # exact adjudication, not any rejection: the app must have exited with precisely code 2
+  # (bad nonce), inside a proven-empty job, with no timeout and no launcher error, and its
+  # stdout must contain NO JSON evidence line. Any other failure shape is UNVERIFIED.
+  Report-Closure $r
+  if([string]$r.apiError){ Say ('  UNVERIFIED: launcher error: '+[string]$r.apiError); return $false }
+  if($r.timedOut){ Say '  UNVERIFIED: bad-nonce run timed out'; return $false }
+  if($r.treeCleaned -ne $true){ Say '  UNVERIFIED: closure not proven for the bad-nonce run'; return $false }
+  if($r.exitCode -ne 2){ Say ('  UNVERIFIED: expected exit code 2 for a bad nonce, got '+$r.exitCode); return $false }
+  if([string]$r.stdout -match '"v":1'){ Say '  UNVERIFIED: evidence JSON was emitted despite the bad nonce'; return $false }
+  $true
 }
 Scenario 'precheck-runtime-evidence-with-reviewed-pins' {
   if(-not $compiledAll){ return 'SKIP' }
@@ -314,8 +322,14 @@ Scenario 'installer-shortcut-renamed-old-absent' {
 # owner wants it gone) is a separate owner step via win-watchdog-remove.txt, run by the
 # owner outside this harness - never invoked, created, or replaced from here.
 function Test-WdPresent {
-  # tri-state: $true/$false only on definitive answers, $null on scheduler failure
-  try{ $c=New-Object -ComObject 'Schedule.Service'; $c.Connect(); $null=$c.GetFolder('\').GetTask('GlassWidgets-Watchdog'); return $true }
+  # tri-state: $true/$false only on definitive answers, $null (UNVERIFIED) otherwise.
+  # ABSENT is proven ONLY by GetTask itself throwing file-not-found (0x80070002); a
+  # failure in Connect or GetFolder proves nothing about the task and stays UNVERIFIED.
+  $c=$null; $f=$null
+  try{ $c=New-Object -ComObject 'Schedule.Service' }catch{ return $null }
+  try{ $c.Connect() }catch{ return $null }
+  try{ $f=$c.GetFolder('\') }catch{ return $null }
+  try{ $null=$f.GetTask('GlassWidgets-Watchdog'); return $true }
   catch [System.Runtime.InteropServices.COMException]{ if($_.Exception.HResult -eq -2147024894){ return $false }; return $null }
   catch{ return $null }
 }
