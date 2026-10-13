@@ -165,6 +165,14 @@ foreach($x in @('Add-Type','CREATE_SUSPENDED','AssignProcessToJobObject','JOB_OB
 foreach($x in @('ArgumentList','Get-CimInstance','.GetAwaiter(','RedirectStandardOutput',' -Parallel','Invoke-WithChildEnv','SetEnvironmentVariable')){
   T ('static-lacks-'+$x) (-not $bodyText.Contains($x))
 }
+foreach($x in @('assignedToJob','attrInitialized','faultInject','fault injection: after create, before assign','fault injection: simulated assign failure','SetLastError=true)] static extern uint ResumeThread')){
+  T ('static-has-'+$x) ($bodyText.Contains($x))
+}
+$tpIdx=$bodyText.IndexOf('TerminateProcess(proc, 1)'); $atjIdx=$bodyText.IndexOf('assignedToJob = true;')
+T 'static-handle-verify-before-assign-flag' ($tpIdx -ge 0 -and $atjIdx -gt $tpIdx)
+$aiIdx=$bodyText.IndexOf('attrInitialized = true;'); $upIdx=$bodyText.IndexOf('UpdateProcThreadAttribute(attrList')
+T 'static-attrinit-before-update' ($aiIdx -ge 0 -and $upIdx -gt $aiIdx)
+T 'static-delete-attrlist-guarded' ($bodyText.Contains('if (attrInitialized) { DeleteProcThreadAttributeList(attrList); }'))
 $runIdx=$bodyText.IndexOf('public static Result Run')
 $cpi=$bodyText.IndexOf('CreateProcess(null',$runIdx); $asi=$bodyText.IndexOf('AssignProcessToJobObject(job',$runIdx); $rsi=$bodyText.IndexOf('ResumeThread(thread',$runIdx)
 T 'static-suspended-assign-resume-order' ($runIdx -ge 0 -and $cpi -gt $runIdx -and $asi -gt $cpi -and $rsi -gt $asi)

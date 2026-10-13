@@ -10,7 +10,7 @@
 # CONTAINMENT (the only kill scope): every launch runs inside a dedicated Windows Job
 # Object with KILL_ON_JOB_CLOSE. The process is created SUSPENDED, assigned to the job,
 # and only then resumed (a failed resume is a hard error + job termination), so every
-# descendant is contained from birth - no parent-pid enumeration, no late-descendant race,
+# descendant is contained from birth (a pre-assignment failure terminates and verifies the exact process handle; post-assignment, job emptiness is verified) - no parent-pid enumeration, no late-descendant race,
 # no reparent escape, no PID-reuse risk (the kernel tracks job membership by handle, not
 # pid). Termination kills the whole job atomically and job emptiness is verified
 # afterwards. A pre-existing running app instance is in a DIFFERENT job and can NEVER be
@@ -130,7 +130,7 @@ public static class GwBounded {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len, IntPtr retLen);
   [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcess(string appName, StringBuilder cmdLine, IntPtr procAttrs, IntPtr threadAttrs, bool inheritHandles, uint flags, IntPtr env, string curDir, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
-  [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr proc, uint exitCode);
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
@@ -195,12 +195,13 @@ public static class GwBounded {
     } finally { Marshal.FreeHGlobal(p); }
   }
 
-  public static Result Run(string exe, string[] args, string stdoutPath, string stderrPath, int timeoutMs, string[] envRemove, string[] envSetPairs) {
+  public static Result Run(string exe, string[] args, string stdoutPath, string stderrPath, int timeoutMs, string[] envRemove, string[] envSetPairs, int faultInject) {
     Result r = new Result();
     r.Started = false; r.TimedOut = false; r.ClosureProven = false; r.ActiveAfterExit = 0; r.ExitCode = -1; r.Error = "";
     IntPtr job = IntPtr.Zero, proc = IntPtr.Zero, thread = IntPtr.Zero;
     IntPtr hOut = IntPtr.Zero, hErr = IntPtr.Zero, hIn = IntPtr.Zero;
     IntPtr attrList = IntPtr.Zero, handleArray = IntPtr.Zero, envBlock = IntPtr.Zero;
+    bool assignedToJob = false, attrInitialized = false;
     try {
       SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
       sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
@@ -228,6 +229,7 @@ public static class GwBounded {
       if (listSize == IntPtr.Zero) { r.Error = Err("InitializeProcThreadAttributeList(size)"); return r; }
       attrList = Marshal.AllocHGlobal(listSize);
       if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref listSize)) { r.Error = Err("InitializeProcThreadAttributeList"); return r; }
+      attrInitialized = true;
       handleArray = Marshal.AllocHGlobal(IntPtr.Size * 3);
       Marshal.WriteIntPtr(handleArray, 0, hIn);
       Marshal.WriteIntPtr(handleArray, IntPtr.Size, hOut);
@@ -248,17 +250,24 @@ public static class GwBounded {
       if (!created) { r.Error = Err("CreateProcess"); return r; }
       r.Started = true;
       proc = pi.hProcess; thread = pi.hThread;
-      if (!AssignProcessToJobObject(job, proc)) {
+      if (faultInject == 1) { throw new InvalidOperationException("fault injection: after create, before assign"); }
+      bool asgOk = (faultInject == 2) ? false : AssignProcessToJobObject(job, proc);
+      int asgErr = (!asgOk && faultInject == 0) ? Marshal.GetLastWin32Error() : 0;
+      if (!asgOk) {
+        // pre-assignment failure: the suspended process is NOT in the job - terminate the
+        // EXACT process handle and verify that handle is dead
+        r.Error = (faultInject == 2) ? "fault injection: simulated assign failure" : ("AssignProcessToJobObject failed (win32 " + asgErr.ToString() + ")");
         TerminateProcess(proc, 1);
         WaitForSingleObject(proc, 5000);
         r.ClosureProven = (WaitForSingleObject(proc, 0) == 0);
-        r.Error = Err("AssignProcessToJobObject");
         return r;
       }
+      assignedToJob = true;
       uint rr = ResumeThread(thread);
+      int rrErr = (rr == 0xFFFFFFFF) ? Marshal.GetLastWin32Error() : 0;
       CloseHandle(thread); thread = IntPtr.Zero;
       if (rr == 0xFFFFFFFF) {
-        r.Error = Err("ResumeThread");
+        r.Error = "ResumeThread failed (win32 " + rrErr.ToString() + ")";
         TerminateJobObject(job, 1);
         WaitForSingleObject(proc, 5000);
         r.ClosureProven = (QueryActive(job) == 0);
@@ -294,12 +303,15 @@ public static class GwBounded {
     } catch (Exception ex) {
       r.Error = "exception: " + ex.GetType().Name + ": " + ex.Message;
       try {
-        if (job != IntPtr.Zero) { TerminateJobObject(job, 1); }
-        if (proc != IntPtr.Zero) { WaitForSingleObject(proc, 5000); }
+        if (proc != IntPtr.Zero) {
+          if (assignedToJob && job != IntPtr.Zero) { TerminateJobObject(job, 1); }
+          else { TerminateProcess(proc, 1); }
+          WaitForSingleObject(proc, 5000);
+        } else if (job != IntPtr.Zero) { TerminateJobObject(job, 1); }
       } catch { }
       try {
         if (proc == IntPtr.Zero) { r.ClosureProven = true; }
-        else if (job != IntPtr.Zero) { r.ClosureProven = (QueryActive(job) == 0); }
+        else if (assignedToJob && job != IntPtr.Zero) { r.ClosureProven = (QueryActive(job) == 0); }
         else { r.ClosureProven = (WaitForSingleObject(proc, 0) == 0); }
       } catch { r.ClosureProven = false; }
       return r;
@@ -310,7 +322,7 @@ public static class GwBounded {
       if (hIn != IntPtr.Zero && hIn != INVALID_HANDLE) { CloseHandle(hIn); }
       if (hOut != IntPtr.Zero && hOut != INVALID_HANDLE) { CloseHandle(hOut); }
       if (hErr != IntPtr.Zero && hErr != INVALID_HANDLE) { CloseHandle(hErr); }
-      if (attrList != IntPtr.Zero) { DeleteProcThreadAttributeList(attrList); Marshal.FreeHGlobal(attrList); }
+      if (attrList != IntPtr.Zero) { if (attrInitialized) { DeleteProcThreadAttributeList(attrList); } Marshal.FreeHGlobal(attrList); }
       if (handleArray != IntPtr.Zero) { Marshal.FreeHGlobal(handleArray); }
       if (envBlock != IntPtr.Zero) { Marshal.FreeHGlobal(envBlock); }
     }
@@ -437,7 +449,7 @@ function Invoke-BoundedProcess {
     $rem=@(); foreach($k in $EnvRemove.Keys){ $rem+=[string]$k }
     $pairs=@(); foreach($k in $EnvSet.Keys){ $pairs+=[string]$k; $pairs+=[string]$EnvSet[$k] }
     try{
-      $r=[GwBounded]::Run($ExePath,[string[]]$Arguments,$outPath,$errPath,$TimeoutMs,[string[]]$rem,[string[]]$pairs)
+      $r=[GwBounded]::Run($ExePath,[string[]]$Arguments,$outPath,$errPath,$TimeoutMs,[string[]]$rem,[string[]]$pairs,0)
       $res=[pscustomobject]@{started=[bool]$r.Started;timedOut=[bool]$r.TimedOut;treeCleaned=[bool]$r.ClosureProven;activeAfterExit=[int]$r.ActiveAfterExit;exitCode=[int]$r.ExitCode;apiError=[string]$r.Error}
     }catch{
       $res=[pscustomobject]@{started=$null;timedOut=$false;treeCleaned=$false;activeAfterExit=-1;exitCode=$null;apiError=('launcher exception - launch state UNKNOWN: '+$_.Exception.Message)}
