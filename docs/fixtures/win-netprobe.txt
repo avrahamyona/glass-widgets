@@ -1,0 +1,101 @@
+# win-netprobe.txt - READ-ONLY network reachability probe for the independent (self-hosted)
+# server design. Runs on the user's PC (real Windows PowerShell 5.1). Diagnostic only: it
+# opens NO ports, adds NO firewall rules, creates NO router mappings, changes NOTHING.
+# It answers one question: which reachability paths to this PC are actually available, so the
+# own-server design picks a real one instead of guessing. External reads are plain HTTPS GETs
+# to free public IP-echo services (no account, no data sent - they only see the connection
+# itself) and one read-only UPnP/SSDP discovery broadcast on the LAN.
+# Authorization for running it is established outside this file. Send the whole output back.
+$ErrorActionPreference='Continue'
+$ProgressPreference='SilentlyContinue'
+try{ [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 }catch{}
+function Say($m){ Write-Host $m }
+$crlf=[string][char]13+[string][char]10
+Say '== GlassWidgets network reachability probe (read-only) =='
+Say ('PS version: '+$PSVersionTable.PSVersion.ToString())
+
+# --- 1. local IPv4 interfaces ---
+$v4private=@(); $v4cgnat=@(); $v4public=@()
+try{
+  $addrs=Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' -and $_.IPAddress -ne '127.0.0.1' }
+  foreach($a in $addrs){
+    $ip=$a.IPAddress
+    $oct=$ip.Split('.')
+    $o1=[int]$oct[0]; $o2=[int]$oct[1]
+    $kind='public'
+    if($o1 -eq 10 -or ($o1 -eq 172 -and $o2 -ge 16 -and $o2 -le 31) -or ($o1 -eq 192 -and $o2 -eq 168) -or ($o1 -eq 169 -and $o2 -eq 254)){ $kind='private'; $script:v4private+=$ip }
+    elseif($o1 -eq 100 -and $o2 -ge 64 -and $o2 -le 127){ $kind='cgnat'; $script:v4cgnat+=$ip }
+    else{ $script:v4public+=$ip }
+    Say ('  iface: '+$ip+'/'+$a.PrefixLength+' ('+$a.InterfaceAlias+') -> '+$kind)
+  }
+}catch{ Say '  UNVERIFIED: Get-NetIPAddress failed (not Windows?): '+$_.Exception.Message }
+$gw4=''
+try{ $r=Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop | Select-Object -First 1; if($r){ $gw4=$r.NextHop } }catch{}
+Say ('  default gateway v4: '+$(if($gw4){$gw4}else{'none/UNVERIFIED'}))
+
+# --- 2. external IPv4 (read-only echo) ---
+$ext4=''
+foreach($u in @('https://api.ipify.org','https://checkip.amazonaws.com')){
+  if($ext4){ break }
+  try{ $ext4=(Invoke-WebRequest -Uri $u -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop).Content.Trim() }catch{ Say ('  echo via '+$u+' failed: '+$_.Exception.Message) }
+}
+if($ext4 -notmatch '^\d{1,3}(\.\d{1,3}){3}$'){ $ext4='' }
+Say ('  external IPv4 (as seen outside): '+$(if($ext4){$ext4}else{'UNVERIFIED'}))
+$extIsCgnat=$false
+if($ext4){
+  $eo=$ext4.Split('.'); $e1=[int]$eo[0]; $e2=[int]$eo[1]
+  if($e1 -eq 100 -and $e2 -ge 64 -and $e2 -le 127){ $extIsCgnat=$true }
+  elseif($e1 -eq 10 -or ($e1 -eq 172 -and $e2 -ge 16 -and $e2 -le 31) -or ($e1 -eq 192 -and $e2 -eq 168)){ $extIsCgnat=$true }
+}
+
+# --- 3. UPnP / IGD discovery (read-only SSDP broadcast; NO mapping is added) ---
+$igd='UNVERIFIED'
+try{
+  $udp=New-Object System.Net.Sockets.UdpClient
+  $udp.Client.ReceiveTimeout=3000
+  $probe='M-SEARCH * HTTP/1.1'+$crlf+'HOST: 239.255.255.250:1900'+$crlf+'MAN: "ssdp:discover"'+$crlf+'MX: 2'+$crlf+'ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1'+$crlf+$crlf
+  $bytes=[Text.Encoding]::ASCII.GetBytes($probe)
+  $null=$udp.Send($bytes,$bytes.Length,'239.255.255.250',1900)
+  $igd='not found'
+  $deadline=(Get-Date).AddSeconds(3.5)
+  while((Get-Date) -lt $deadline){
+    try{
+      $ep=New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any,0)
+      $resp=$udp.Receive([ref]$ep)
+      $txt=[Text.Encoding]::ASCII.GetString($resp)
+      if($txt -match 'InternetGatewayDevice'){ $igd='FOUND at '+$ep.Address.ToString(); break }
+    }catch{ break }
+  }
+  $udp.Close()
+}catch{ $igd='UNVERIFIED ('+$_.Exception.Message+')' }
+Say ('  UPnP InternetGatewayDevice: '+$igd+' (discovery only - no mapping created)')
+
+# --- 4. IPv6 ---
+$v6global=@(); $v6native=$false
+try{
+  $addrs6=Get-NetIPAddress -AddressFamily IPv6 -ErrorAction Stop | Where-Object { $_.IPAddress -match '^[23][0-9a-fA-F]{3}:' }
+  foreach($a in $addrs6){
+    $v6global+=($a.IPAddress+' ('+$a.PrefixOrigin+')')
+    if($a.PrefixOrigin -eq 'RouterAdvertisement'){ $v6native=$true }
+  }
+}catch{ Say '  UNVERIFIED: IPv6 enumeration failed: '+$_.Exception.Message }
+$gw6=''
+try{ $r6=Get-NetRoute -DestinationPrefix '::/0' -ErrorAction Stop | Select-Object -First 1; if($r6){ $gw6=$r6.NextHop } }catch{}
+Say ('  global IPv6 addresses: '+$(if($v6global.Count){$v6global -join ', '}else{'none'}))
+Say ('  default gateway v6: '+$(if($gw6){$gw6}else{'none'}))
+if($v6global.Count -and -not $v6native){ Say '  note: global-looking IPv6 without RouterAdvertisement origin - treat as UNVERIFIED native' }
+
+# --- 5. verdicts ---
+Say ''
+Say '== VERDICTS =='
+if($extIsCgnat){ Say 'PORT-FORWARD: BLOCKED - the external IPv4 is in the carrier-grade-NAT range; router forwarding cannot reach this PC from the internet' }
+elseif($igd.StartsWith('FOUND')){ Say 'PORT-FORWARD: CANDIDATE - router IGD discovered and external IPv4 is public; a router mapping (a separate, explicit step) could expose the own server' }
+elseif($v4public.Count){ Say 'PORT-FORWARD: CANDIDATE - this PC holds a public IPv4 directly ('+($v4public -join ', ')+')' }
+elseif($ext4){ Say 'PORT-FORWARD: UNKNOWN - NAT present but no IGD answer; manual router access would be needed to know' }
+else{ Say 'PORT-FORWARD: UNVERIFIED - external IPv4 could not be determined' }
+if($v6native -and $gw6){ Say 'DIRECT-IPV6: CANDIDATE - native global IPv6 with a v6 gateway; the own server can bind a global v6 address directly (inbound reachability still needs a live test and the Windows firewall pinhole, both separate explicit steps)' }
+else{ Say 'DIRECT-IPV6: UNAVAILABLE/UNVERIFIED - no native global IPv6 found' }
+Say 'LAN-ONLY: always available as a fallback (same-network reachability, audited bind opt-in already in the server)'
+Say ''
+Say 'Read-only run - nothing was opened, mapped, or changed. Send this whole output back.'
+Read-Host 'Press Enter to close'
