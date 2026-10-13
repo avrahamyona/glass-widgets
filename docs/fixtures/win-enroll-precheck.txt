@@ -21,8 +21,10 @@ $appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
 # older install can linger). This script is therefore DIAGNOSTIC-ONLY: no verdict here is a permit
 # to enroll/mint. The runtime-proof step (see the printed note) is still required.
 $devDir=$null
-$probe=Join-Path $env:TEMP 'gw-precheck-probe.js'
-$probeOut=Join-Path $env:TEMP 'gw-precheck-out.txt'
+$stage=Join-Path $env:TEMP ('gw-precheck-'+[guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+$probe=Join-Path $stage 'probe.js'
+$probeOut=Join-Path $stage 'out.txt'
 $verdict='UNKNOWN'; $reasons=@()
 try{
   Say '== GlassWidgets enroll precheck =='
@@ -46,7 +48,7 @@ try{
     Say ''; Say 'meaning: DO NOT send an enroll - the identity root is unproven. Send this output back.'
     throw 'STOP-AFTER-VERDICT'
   }
-  if($candidates.Count -eq 0)
+  if($candidates.Count -eq 0){
     $verdict='UNKNOWN'; $reasons+='no userData root with app artifacts found under %APPDATA% matching *glasswidget* - the runtime identity root is unproven (app may never have run, or uses another name)'
     Say ''; Say ('VERDICT: '+$verdict)
     foreach($r in $reasons){ Say ('  - '+$r) }
@@ -54,6 +56,7 @@ try{
     throw 'STOP-AFTER-VERDICT'
   }
   $devDir=Join-Path $candidates[0] 'device'
+  $devFile=Join-Path $devDir 'device.json'
   Say ('candidate userData root (located by artifacts - NOT runtime-proven): '+$candidates[0])
     # 1. strict presence: only "not found" counts as absent; any other failure is UNREADABLE
   $present=$false; $unreadable=$false
@@ -129,9 +132,9 @@ try{
   }
   Say ''
   Say ('VERDICT: '+$verdict)
-  if($verdict -eq 'HEALTHY'){ Say ('deviceId (derived): '+$devId); Say 'meaning: a healthy identity exists at the CANDIDATE root (an enroll would return it). Still confirm the root via the runtime-proof step before acting.' }
-  if($verdict -eq 'ABSENT'){ Say 'meaning: no identity at the CANDIDATE root. This is NOT a mint permit - artifacts only locate a candidate, and a wrong root reads ABSENT over a real identity elsewhere. Enroll stays blocked until the runtime-proof step confirms this root.' }
-  if($verdict -eq 'UNHEALTHY' -or $verdict -eq 'UNREADABLE'){ Say 'meaning: DO NOT send an enroll - the installed version could REPLACE this file. Send this output back.' }
+  if($verdict -eq 'HEALTHY'){ Say ('deviceId (derived): '+$devId); Say 'finding: a healthy identity file exists at the CANDIDATE root. Diagnostic only - no enroll implication is drawn from this script.' }
+  if($verdict -eq 'ABSENT'){ Say 'finding: no identity file at the CANDIDATE root. Diagnostic only - artifacts do not prove the runtime root, so this says nothing about whether an identity exists elsewhere. NOT a mint permit.' }
+  if($verdict -eq 'UNHEALTHY' -or $verdict -eq 'UNREADABLE'){ Say 'finding: a file exists but is not provably healthy at the CANDIDATE root. Diagnostic only - report this; any enroll decision stays with the reviewed runtime-proof process.' }
   foreach($r in $reasons){ Say ('  - '+$r) }
   Say ''
   Say 'NOTE: DIAGNOSTIC-ONLY - no verdict here permits an enroll. The runtime-proof step (packed-asar introspection, pending ops agreement) must confirm the root first.'
@@ -142,8 +145,7 @@ try{
     Say 'Send this whole output back.'
   }
 }finally{
-  Remove-Item $probe -Force -ErrorAction SilentlyContinue
-  Remove-Item $probeOut -Force -ErrorAction SilentlyContinue
+  if($stage -and (Test-Path -LiteralPath $stage)){ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
   try{ Stop-Transcript | Out-Null }catch{}
   Read-Host 'Press Enter to close'
 }

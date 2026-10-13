@@ -13,17 +13,25 @@ $taskName='GlassWidgets-Watchdog'
 $HR_NOT_FOUND=-2147024894 # 0x80070002 - "the system cannot find the file specified" (task truly absent)
 $script:svc=$null
 function WdFolder(){
-  if(-not $script:svc){ $script:svc=New-Object -ComObject 'Schedule.Service'; $script:svc.Connect() }
-  return $script:svc.GetFolder('\')
+  # Connect/GetFolder failures are SCHEDULER failures, never task facts - isolated here, and a
+  # failed Connect drops the cached service so a retry reconnects cleanly.
+  if(-not $script:svc){
+    try{ $c=New-Object -ComObject 'Schedule.Service'; $c.Connect(); $script:svc=$c }
+    catch{ $script:svc=$null; throw ('cannot connect to the Task Scheduler service ('+$_.Exception.Message+') - no task facts available') }
+  }
+  try{ return $script:svc.GetFolder('\') }
+  catch{ $script:svc=$null; throw ('cannot open the root task folder ('+$_.Exception.Message+') - no task facts available') }
 }
 function Test-WdTaskPresent(){
-  # returns $true/$false ONLY on a definitive answer; anything else throws (fail closed)
+  # returns $true/$false ONLY on a definitive answer. Absence is accepted EXCLUSIVELY from the
+  # TYPED COM exception whose HResult is 0x80070002 - never from message text, and Connect/
+  # GetFolder failures (above) can never reach this branch as 'absent'.
   try{ $null=(WdFolder).GetTask($taskName); return $true }
-  catch{
-    $hr=$_.Exception.HResult
-    if($hr -eq $HR_NOT_FOUND -or ([string]$_.Exception.Message) -match '0x80070002'){ return $false }
-    throw ('task query failed - this is NOT proof of absence ('+$_.Exception.Message+')')
+  catch [System.Runtime.InteropServices.COMException]{
+    if($_.Exception.HResult -eq $HR_NOT_FOUND){ return $false }
+    throw ('task query failed with COM error 0x'+('{0:X8}' -f ($_.Exception.HResult -band 0xFFFFFFFF))+' - this is NOT proof of absence')
   }
+  catch{ throw ('task query failed ('+$_.Exception.GetType().Name+': '+$_.Exception.Message+') - this is NOT proof of absence') }
 }
 try{
   Say '== GlassWidgets watchdog removal =='
@@ -33,12 +41,12 @@ try{
   }else{
     $deleted=$false
     try{ (WdFolder).DeleteTask($taskName,0); $deleted=$true }
-    catch{
-      $hr=$_.Exception.HResult
-      if($hr -eq $HR_NOT_FOUND -or ([string]$_.Exception.Message) -match '0x80070002'){
-        Say 'PASS 1: task vanished before the delete call (exact not-found) - goal reached'
-      }else{ throw ('task delete failed ('+$_.Exception.Message+') - NOT deleted, NOT assumed gone') }
+    catch [System.Runtime.InteropServices.COMException]{
+      if($_.Exception.HResult -eq $HR_NOT_FOUND){
+        Say 'PASS 1: task vanished before the delete call (typed not-found) - goal reached'
+      }else{ throw ('task delete failed with COM error 0x'+('{0:X8}' -f ($_.Exception.HResult -band 0xFFFFFFFF))+' - NOT deleted, NOT assumed gone') }
     }
+    catch{ throw ('task delete failed ('+$_.Exception.GetType().Name+': '+$_.Exception.Message+') - NOT deleted, NOT assumed gone') }
     if($deleted){ Say 'PASS 1: delete call issued for GlassWidgets-Watchdog' }
   }
   # PASS 2: verify AFTER the delete with a FRESH query - only the exact not-found proves it
