@@ -12,6 +12,7 @@
 #      unreadable / not_checked. On an older app without the mode, or on any evidence failure,
 #      VERDICT stays UNKNOWN and the file is NOT checked against any guessed root.
 # ACL comparison mirrors the app's shared evaluator (src/lib/acl-check.js) exactly.
+param([string]$AsarSha256='') # optional pin: sha256 of resources\app.asar from the REVIEWED 0.4.64 build
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 function Say($m){ Write-Host $m }
@@ -36,6 +37,28 @@ try{
     $verN=[int]$m.Groups[1].Value*1000000+[int]$m.Groups[2].Value*1000+[int]$m.Groups[3].Value
     if($verN -lt 4064){ $reasons+='installed '+$verText+' has no runtime-evidence mode (needs 0.4.64+) - the userData root cannot be proven' }
     else{
+      # BUILD GATE (before ANY invocation): a version string does NOT prove the mode exists -
+      # earlier 0.4.64 candidates lacked it and would boot normally if launched. The packed
+      # resources\app.asar must (a) match the pinned hash when one is supplied, and (b) contain
+      # the mode's build marker. An unknown build is NEVER launched.
+      $asar=Join-Path (Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets') 'resources\app.asar'
+      $buildOk=$false
+      if(-not (Test-Path $asar)){ $reasons+='packed app.asar not found at '+$asar+' - unknown build, not launched' }
+      else{
+        if($AsarSha256){
+          $h=(Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash
+          if($h -ine $AsarSha256){ $reasons+='app.asar hash '+$h+' does NOT match the pinned build '+$AsarSha256+' - unknown build, not launched' }
+          else{ Say ('build pinned: app.asar sha256 matches the reviewed build') ; $buildOk=$true }
+        }else{ $reasons+='no -AsarSha256 pin supplied - build identity rests on the marker scan only' ; $buildOk=$true }
+        if($buildOk){
+          $marker='--gw-runtime-paths-json'
+          $bytes=[System.IO.File]::ReadAllBytes($asar)
+          $found=[System.Text.Encoding]::ASCII.GetString($bytes).IndexOf($marker) -ge 0
+          if(-not $found){ $reasons+='build marker '+$marker+' ABSENT in the packed app.asar - this build has no evidence mode, NOT launched'; $buildOk=$false }
+          else{ Say ('build marker present in app.asar: '+$marker) }
+        }
+      }
+    if($buildOk){
       # 1. runtime evidence: the packed app answers for itself, nonce-bound
       $nonce=[guid]::NewGuid().ToString('N')
       $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
@@ -48,9 +71,13 @@ try{
         if($rt){
           if($rt.v -ne 1){ $reasons+='runtime-paths schema is not v1' }
           elseif([string]$rt.nonce -ne $nonce){ $reasons+='nonce mismatch - the capture is not from this run (stale or foreign)' }
-          elseif($rt.isPackaged -ne $true){ $reasons+='isPackaged is not true - this is not the packed installed runtime' }
+          elseif(-not ($rt.isPackaged -is [bool] -and $rt.isPackaged -eq $true)){ $reasons+='isPackaged is not strictly boolean true - this is not the packed installed runtime' }
           elseif([string]$rt.exe -ine $appExe){ $reasons+='the answering exe ('+[string]$rt.exe+') is not the installed exe ('+$appExe+')' }
-          elseif([string]::IsNullOrWhiteSpace([string]$rt.userData)){ $reasons+='runtime returned an empty userData' }
+          elseif(-not [regex]::Match([string]$rt.version,'^(\d+)\.(\d+)\.(\d+)').Success){ $reasons+='runtime version is unparseable: '+[string]$rt.version }
+          elseif([regex]::Match([string]$rt.version,'^(\d+)\.(\d+)\.(\d+)').Value -cne $m.Value){ $reasons+='runtime version ('+[string]$rt.version+') does not match the installed version ('+$verText+')' }
+          elseif(-not ($rt.ts -is [long] -or $rt.ts -is [int] -or $rt.ts -is [double])){ $reasons+='runtime ts is not numeric' }
+          elseif([math]::Abs(([DateTimeOffset]::Now.ToUnixTimeMilliseconds())-[int64]$rt.ts) -gt 60000){ $reasons+='runtime ts is not fresh (over 60s from now) - stale capture rejected' }
+          elseif([string]::IsNullOrWhiteSpace([string]$rt.userData) -or -not [System.IO.Path]::IsPathRooted([string]$rt.userData)){ $reasons+='runtime returned a missing or non-absolute userData' }
           else{
             $verdict='RUNTIME_EVIDENCE_OK'
             Say ('runtime userData (answered by the app itself): '+[string]$rt.userData)
@@ -120,6 +147,7 @@ try{
           }
         }
       }
+    }
     }
   }
   Say ''
