@@ -1055,6 +1055,10 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
   }catch(e){try{fs.unlinkSync(tmp)}catch{};audit({kind:'enroll_device',stage:'persist_fail',err:String(e&&e.message||e).slice(0,120)});return false}
  }
  loadDevice();
+ // re-judge identity health at ENROLL time (the boot verdict may be stale). Shared by the
+ // enroll REQUEST path and the approval EFFECT path. The gate both serve: an existing identity
+ // that does not load HEALTHY is never replaced by a fresh mint - only strict 'absent' mints.
+ const enrollHealthProbe=()=>{loadDevice();return devLoadState};
  const deviceSign=text=>crypto.sign(null,Buffer.from(String(text),'utf8'),devKey).toString('hex');
  async function enrollDeviceCmd(m,intake){
   // worker-signed ONLY: the tunnel intake marker arrives as an INTERNAL parameter (never a sender
@@ -1072,7 +1076,9 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
   if('challenge' in eData&&(typeof eData.challenge!=='string'||!ENROLL_CHALLENGE_RE.test(eData.challenge))){audit({kind:'enroll_device',stage:'bad_challenge',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','bad challenge')} // malformed OR wrong-typed: refused explicitly, never silently ignored (no String() coercion past the shape check)
   const ePayload=Object.keys(eData).length?JSON.stringify(eData):'';
   if(!tun&&!(validPreapproval(m,ePayload)||(m.device!=null&&validPreapproval(m,ePayload,m.device)))){audit({kind:'enroll_device',stage:'bad_sig',id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','unsigned enroll refused')}
+  enrollHealthProbe(); // fresh verdict at REQUEST time - a key written/fixed since boot is honored, a broken one is refused below
   if(devKey&&devId){pendingEnrollRead={id:String(m.id),device:devId,until:Date.now()+120000};audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});return ack(m.id,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)})}
+  if(devLoadState!=='absent'){audit({kind:'enroll_device',stage:'enroll_unhealthy_identity',state:devLoadState,id:String(m.id||'').slice(0,40)});return ack(m.id,'failed','device identity exists but is not healthy ('+devLoadState+') - enroll refused; recover or remove it manually')} // an existing-but-unhealthy identity is NEVER replaced by a new mint (absent vs invalid gate)
   // PAIRING GATE (release gate): founding the device identity requires an on-PC human approval.
   // The candidate keypair is minted IN MEMORY ONLY (never persisted before approval); the parked
   // card binds THIS command id, THIS challenge episode, THIS candidate pubkey/fingerprint and its
@@ -1141,6 +1147,7 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
  async function execEnroll(p){
   const{pubB64,privB64,eData}=p.enroll||{};
   if(!pubB64||!privB64){audit({kind:'enroll_device',stage:'pairing_payload_missing',id:String(p.cmdId||'').slice(0,40)});return pairingTerminal(p.cmdId,'failed','pairing payload missing')}
+  enrollHealthProbe(); // fresh verdict at EFFECT time - the approval may come minutes after the request
   if(devKey&&devId){ // enrolled while the card was parked
    if(devPubB64!==pubB64){ // a DIFFERENT key won the race: the fingerprint the owner approved on screen is NOT the live identity. NEVER claim success on another key - terminal failure + audit, explicit fresh approval required for the actual live fingerprint.
     audit({kind:'enroll_device',stage:'pairing_superseded',id:String(p.cmdId||'').slice(0,40),shown:p.fp||null,actual:fingerprint(devPubB64)});
@@ -1150,6 +1157,7 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
    audit({kind:'enroll_device',stage:'already_enrolled',device:devId,fingerprint:fingerprint(devPubB64)});
    return pairingTerminal(p.cmdId,'done','already enrolled',{deviceId:devId,pubkey:devPubB64,...chProofFor(eData)});
   }
+  if(devLoadState!=='absent'){audit({kind:'enroll_device',stage:'pairing_unhealthy_identity',state:devLoadState,id:String(p.cmdId||'').slice(0,40)});return pairingTerminal(p.cmdId,'failed','device identity exists but is not healthy ('+devLoadState+') - refused to replace; recover or remove it manually')} // same absent-vs-invalid gate at the moment of effect
   audit({kind:'enroll_device',stage:'pairing_persist_begin',id:String(p.cmdId||'').slice(0,40),fingerprint:p.fp}); // fault checkpoint: BEFORE the effect
   if(!persistDevice(pubB64,privB64))return pairingTerminal(p.cmdId,'failed','device key persist failed');
   audit({kind:'enroll_device',stage:'pairing_persisted',id:String(p.cmdId||'').slice(0,40),fingerprint:p.fp}); // fault checkpoint: the effect LANDED (crash after here = recovery must reconcile done)
@@ -1256,6 +1264,6 @@ const{createFileOutbox}=require('./durable-store.js'); // the shared durable sto
   while(pendingOps.size)await Promise.allSettled([...pendingOps]); // in-flight card decisions / pairing terminals / enroll effects finish BEFORE the journal lease closes - a LOOP, because a drained op can chain the next one (approval -> enroll exec -> pairing terminal); a caller MUST await this before starting another agent on the same profile
   await Promise.allSettled([...pendingRecovery]); // in-flight recovery finishes BEFORE the journal lease closes
   if(journalStore){try{journalStore.close()}catch{}journalStore=null;journalTried=false} // an in-process restart re-acquires cleanly (a same-PID live lock would refuse)
- },__debug:()=>({timers:agentTimers.size,ops:pendingOps.size,recovery:pendingRecovery.size,parked:pendingApprovals.size,journalOpen:!!journalStore,dev:devLoadState})};
+ },__debug:()=>({timers:agentTimers.size,ops:pendingOps.size,recovery:pendingRecovery.size,parked:pendingApprovals.size,journalOpen:!!journalStore,dev:devLoadState}),__enrollHealthProbe:enrollHealthProbe};
 }
 module.exports=startAgent;

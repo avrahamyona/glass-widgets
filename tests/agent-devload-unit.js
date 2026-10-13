@@ -73,6 +73,30 @@ async function main(){
  assert.strictEqual(D.__debug().dev,'corrupt','corrupt file -> corrupt, got: '+D.__debug().dev);
  await D.stop();
 
+ // 5) ENROLL-TIME re-judgment (the absent-vs-invalid gate): the boot verdict may be stale.
+ // A fresh install boots 'absent'; a broken key appearing AFTER boot must flip the enroll gate
+ // to refuse (probe != absent), and removing it must restore 'absent' (mint allowed).
+ const p5=path.join(root,'p5');
+ aclVerdict=true;
+ const E=startOn(p5);
+ assert.strictEqual(E.__debug().dev,'absent','p5 boots absent');
+ fs.mkdirSync(path.join(p5,'device'),{recursive:true});
+ fs.writeFileSync(path.join(p5,'device','device.json'),'{"pub":1}corrupt'); // broken key lands AFTER boot
+ assert.strictEqual(E.__enrollHealthProbe(),'corrupt','enroll-time probe re-judges: post-boot corrupt key refuses the mint (gate closed)');
+ assert.strictEqual(E.__debug().dev,'corrupt','probe refreshes the shared verdict');
+ fs.unlinkSync(path.join(p5,'device','device.json'));
+ assert.strictEqual(E.__enrollHealthProbe(),'absent','removing the file restores absent (mint allowed again)');
+ fs.writeFileSync(path.join(p5,'device','device.json'),JSON.stringify({pub:PUB_B64,priv:PRIV_B64})); // a HEALTHY key lands after boot
+ assert.strictEqual(E.__enrollHealthProbe(),'ok','a healthy post-boot key loads - enroll returns it instead of minting');
+ await E.stop();
+
+ // 6) mismatch (stored pub does NOT derive from priv) -> gate closed
+ const KP2=crypto.generateKeyPairSync('ed25519');
+ fs.writeFileSync(path.join(p5,'device','device.json'),JSON.stringify({pub:KP2.publicKey.export({format:'der',type:'spki'}).toString('base64'),priv:PRIV_B64}));
+ const F=startOn(p5);
+ assert.strictEqual(F.__enrollHealthProbe(),'mismatch','mismatched stored pub -> mismatch (gate closed)');
+ await F.stop();
+
  fs.rmSync(root,{recursive:true,force:true});
  console.log('DEVLOAD verdict ordering: PASS (fresh=absent without ACL probe, acl fail-closed on existing key, ok, corrupt)');
 }

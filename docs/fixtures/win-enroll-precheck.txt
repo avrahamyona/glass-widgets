@@ -1,5 +1,7 @@
 ﻿# win-enroll-precheck.txt - run on the user's PC BEFORE any enroll send (regular PowerShell)
-# READ-ONLY: changes nothing, prints no key material.
+# CHANGES NO APP STATE: the app's identity and settings are untouched and no key material is
+# printed. It DOES write a Desktop transcript (enroll-precheck-log.txt) and temporary probe
+# files under %TEMP% (cleaned up at the end).
 # Why: the installed 0.4.63 (8288dce) collapses a missing / corrupt / ACL-unverifiable device key
 # into "no key", and a new enroll can then REPLACE device.json. No-rotation is only guaranteed
 # for a healthy, successfully loaded identity. This tells us which case this PC is in:
@@ -14,7 +16,7 @@ function Say($m){ Write-Host $m }
 $d=[Environment]::GetFolderPath('Desktop')
 try{ Start-Transcript -Path (Join-Path $d 'enroll-precheck-log.txt') -Force | Out-Null }catch{}
 $appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
-$devDir=Join-Path $env:APPDATA 'glasswidgets\device'
+$devDir=Join-Path $env:APPDATA 'GlassWidgets\device' # the real userData path: %APPDATA%\<productName GlassWidgets>\device
 $devFile=Join-Path $devDir 'device.json'
 $probe=Join-Path $env:TEMP 'gw-precheck-probe.js'
 $probeOut=Join-Path $env:TEMP 'gw-precheck-out.txt'
@@ -39,19 +41,30 @@ try{
   }else{
     # 2. ACL owner-only on the file AND the directory (exact current-user SID)
     $mySid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    # EXACT parity with the app's shared evaluator (src/lib/acl-check.js evalAclDump), checked on
+    # the same Get-Acl projection the app uses (sid/rights/allow/inherited + owner + protected):
+    #   DACL protected, OWNER SID == current user, EXACTLY ONE ACE, ACE SID == current user,
+    #   Allow only, IsInherited === false, rights an integer in [0, 2032127] (FULL_CONTROL mask).
+    #   Numeric bounds, not string tests - a hardened file holds (R,W), a dir FullControl, BOTH pass.
     function Test-OwnerOnly($p,$isDir){
       try{
-        $a=Get-Acl -LiteralPath $p; $rules=@($a.Access)
-        if(-not $a.AreAccessRulesProtected){ return 'inheritance on: '+$p }
-        if($rules.Count -ne 1){ return 'rule count '+$rules.Count+' on '+$p }
-        $sid=$rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-        if($sid -ne $mySid){ return 'rule SID is not the current user on '+$p }
-        if($rules[0].AccessControlType -ne 'Allow'){ return 'rule is not Allow on '+$p }
-        $rw=[string]$rules[0].FileSystemRights
-        if($isDir){ if($rw -notmatch 'FullControl'){ return 'dir rights not FullControl: '+$rw } }
-        elseif($rw -notmatch 'FullControl' -and ($rw -notmatch 'Read' -or $rw -notmatch 'Write')){ return 'file rights missing Read/Write: '+$rw }
+        $item=Get-Item -LiteralPath $p -Force
+        if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){ return 'path is a reparse point/symlink: '+$p }
+        $a=Get-Acl -LiteralPath $p
+        if($a.AreAccessRulesProtected -ne $true){ return 'DACL not protected (inheritance on): '+$p }
+        $own=$null; try{ $own=([System.Security.Principal.NTAccount]$a.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $own=[string]$a.Owner }
+        if($own -ne $mySid){ return 'owner SID is not the current user on '+$p+': '+$own }
+        $rules=@($a.Access)
+        if($rules.Count -ne 1){ return 'ACE count '+$rules.Count+' on '+$p+' (expected exactly 1)' }
+        $r=$rules[0]
+        $sid=$null; try{ $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $sid=[string]$r.IdentityReference }
+        if($sid -ne $mySid){ return 'ACE SID is not the current user on '+$p+': '+$sid }
+        if($r.AccessControlType -ne 'Allow'){ return 'ACE is not Allow on '+$p }
+        if([bool]$r.IsInherited -ne $false){ return 'ACE is inherited on '+$p }
+        $rights=[int64]$r.FileSystemRights
+        if($rights -lt 0 -or $rights -gt 2032127){ return 'rights out of bounds on '+$p+': '+$rights }
         return ''
-      }catch{ return 'ACL check failed: '+$_.Exception.Message }
+      }catch{ return 'ACL evaluation failed on '+$p+': '+$_.Exception.Message }
     }
     $aclF=Test-OwnerOnly $devFile $false
     $aclD=Test-OwnerOnly $devDir $true
