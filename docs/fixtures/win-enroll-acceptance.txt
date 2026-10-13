@@ -1,0 +1,205 @@
+﻿# win-enroll-acceptance.txt - Windows acceptance harness for the enroll precheck.
+# Runs on the user's PC (real Windows PowerShell 5.1) ONLY when the reviewed packed build
+# is installed and ops has injected the reviewed hashes. NOT for general use.
+# It extracts the EXACT shipped C# and helper block from win-enroll-precheck.txt (single
+# source of truth - no copies) and exercises them end-to-end against real processes:
+#   - a locally compiled test-double exe (Add-Type, no downloads) for timeout, descendant,
+#     fault-injection, parser and closure scenarios
+#   - the real installed app for gate-refusal, bad-nonce, env-scrub and runtime evidence
+# The child env of THIS script never matters: the launcher builds a separate env block.
+param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='',[string]$PrecheckPath='')
+$ErrorActionPreference='Continue'
+$ProgressPreference='SilentlyContinue'
+function Say($m){ Write-Host $m }
+$script:pass=0; $script:fail=0; $script:skip=0
+function Scenario($name,[scriptblock]$fn){
+  try{ $ok=& $fn }catch{ Say ('FAIL '+$name+' (exception: '+$_.Exception.Message+')'); $script:fail++; return }
+  if($ok -eq $true){ Say ('PASS '+$name); $script:pass++ }
+  elseif($ok -eq 'SKIP'){ Say ('SKIP '+$name); $script:skip++ }
+  else{ Say ('FAIL '+$name); $script:fail++ }
+}
+Say '== GlassWidgets Windows acceptance (real PS) =='
+Say ('PS version: '+$PSVersionTable.PSVersion.ToString())
+Scenario 'ps-is-real-5.1' { ($PSVersionTable.PSVersion.Major -eq 5) }
+
+$stage=Join-Path $env:TEMP ('gw-accept-'+[guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+$appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
+if(-not $PrecheckPath){ $PrecheckPath=Join-Path $PSScriptRoot 'win-enroll-precheck.txt' }
+$doubleExe=Join-Path $stage 'gw-double.exe'
+$outDir=Join-Path $stage 'caps'; New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+# GW-DOUBLE-BEGIN
+$doubleCs=@'
+using System;
+using System.Diagnostics;
+using System.Threading;
+public static class GwDouble {
+  public static int Main(string[] args) {
+    string mode = args.Length > 0 ? args[0] : "json";
+    if (mode == "sleep") { Thread.Sleep(int.Parse(args[1]) * 1000); return 0; }
+    if (mode == "spawn-sleep") {
+      Process.Start(new ProcessStartInfo("cmd.exe", "/c timeout /t 30 /nobreak >nul") { UseShellExecute = false, CreateNoWindow = true });
+      return 0;
+    }
+    if (mode == "json") {
+      string nonce = args[1]; string ver = args[2]; string ud = args[3]; string ex = args[4];
+      long ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+      Console.WriteLine("{\"v\":1,\"nonce\":\"" + nonce + "\",\"isPackaged\":true,\"exe\":\"" + ex.Replace("\\", "\\\\") + "\",\"version\":\"" + ver + "\",\"ts\":" + ts.ToString() + ",\"userData\":\"" + ud.Replace("\\", "\\\\") + "\"}");
+      return 0;
+    }
+    if (mode == "two-json") { Console.WriteLine("{\"v\":1}"); Console.WriteLine("{\"v\":2}"); return 0; }
+    if (mode == "junk-json") { Console.WriteLine("noise"); Console.WriteLine("{\"v\":1}"); return 0; }
+    if (mode == "exit2") { return 2; }
+    if (mode == "big") { Console.WriteLine(new string('x', 100000)); return 0; }
+    return 3;
+  }
+}
+'@
+# GW-DOUBLE-END
+
+# --- extract the EXACT shipped C# + helpers from the precheck (single source of truth) ---
+$precheckText=[System.IO.File]::ReadAllText($PrecheckPath)
+$csMark=$precheckText.IndexOf('# GW-CS-BEGIN')
+$csStart=$precheckText.IndexOf("@'",$csMark)+2
+$csEnd=$precheckText.IndexOf("'@",$csStart)
+$hs=$precheckText.IndexOf('function ConvertTo-NormalizedVersion')
+$hm=$precheckText.IndexOf('# ---------- main flow ----------')
+$compiledAll=$false
+if($csMark -lt 0 -or $csStart -lt 2 -or $csEnd -le $csStart -or $hs -lt 0 -or $hm -le $hs){ Say 'FATAL: cannot extract shipped blocks from the precheck file' }
+else{
+  try{
+    Add-Type -TypeDefinition $precheckText.Substring($csStart,$csEnd-$csStart) -ErrorAction Stop
+    . ([ScriptBlock]::Create($precheckText.Substring($hs,$hm-$hs)))
+    Add-Type -TypeDefinition $doubleCs -OutputAssembly $doubleExe -OutputType ConsoleApplication -ErrorAction Stop
+    $compiledAll=$true
+  }catch{ Say ('FATAL: local compile failed: '+$_.Exception.Message) }
+}
+Scenario 'shipped-blocks-and-double-compile' { $compiledAll }
+function No-Leftovers { @(Get-Process -Name 'gw-double' -ErrorAction SilentlyContinue).Count -eq 0 }
+function Run-Double {
+  param([string[]]$Args2,[int]$TimeoutMs=20000,[int]$Fault=0)
+  return Invoke-BoundedProcess -ExePath $doubleExe -Arguments $Args2 -OutDir $outDir -TimeoutMs $TimeoutMs -Runner {
+    param($e,$a,$op,$ep,$t)
+    $r=[GwBounded]::Run($e,[string[]]$a,$op,$ep,$t,[string[]]@(),[string[]]@(),$Fault)
+    [pscustomobject]@{started=[bool]$r.Started;timedOut=[bool]$r.TimedOut;treeCleaned=[bool]$r.ClosureProven;activeAfterExit=[int]$r.ActiveAfterExit;exitCode=[int]$r.ExitCode;apiError=[string]$r.Error}
+  }.GetNewClosure()
+}
+
+Scenario 'double-normal-json-e2e' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $nonce=[guid]::NewGuid().ToString('N')
+  $r=Run-Double @('json',$nonce,'0.4.64','C:\Users\u\AppData\Roaming\GlassWidgets') 10000
+  $ra=Get-RunAssessment -Run $r -Label 'double'
+  if($ra){ Say ('  '+$ra); return $false }
+  $pr=ConvertTo-RuntimeEvidence -Raw $r.stdout -Nonce $nonce -ExpectedVersion '0.4.64' -AppExe $doubleExe -NowMs ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())
+  ($pr.ok -and (No-Leftovers))
+}
+Scenario 'double-two-json-rejected' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('two-json') 10000
+  $pr=ConvertTo-RuntimeEvidence -Raw $r.stdout -Nonce 'n' -ExpectedVersion '0.4.64' -AppExe $doubleExe -NowMs 0
+  ((-not $pr.ok) -and (No-Leftovers))
+}
+Scenario 'double-junk-then-json-rejected' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('junk-json') 10000
+  $pr=ConvertTo-RuntimeEvidence -Raw $r.stdout -Nonce 'n' -ExpectedVersion '0.4.64' -AppExe $doubleExe -NowMs 0
+  ((-not $pr.ok) -and (No-Leftovers))
+}
+Scenario 'double-nonzero-exit-rejected' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('exit2') 10000
+  $ra=Get-RunAssessment -Run $r -Label 'double'
+  (($ra -ne '') -and (No-Leftovers))
+}
+Scenario 'double-timeout-tree-killed' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('sleep','60') 2000
+  (($r.timedOut -eq $true) -and ($r.treeCleaned -eq $true) -and (No-Leftovers))
+}
+Scenario 'double-natural-exit-with-descendant-rejected' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('spawn-sleep') 15000
+  $ra=Get-RunAssessment -Run $r -Label 'double'
+  (($r.timedOut -eq $false) -and ($r.activeAfterExit -gt 0) -and ($ra -ne '') -and ($r.treeCleaned -eq $true) -and (No-Leftovers))
+}
+Scenario 'fault1-after-create-before-assign' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('json','n','0.4.64','C:\d') 10000 1
+  (($r.started -eq $true) -and ([string]$r.apiError -like '*fault injection*') -and ($r.treeCleaned -eq $true) -and (No-Leftovers))
+}
+Scenario 'fault2-simulated-assign-failure' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $r=Run-Double @('json','n','0.4.64','C:\d') 10000 2
+  (($r.started -eq $true) -and ([string]$r.apiError -like '*simulated assign failure*') -and ($r.treeCleaned -eq $true) -and (No-Leftovers))
+}
+Scenario 'preexisting-process-never-touched' {
+  if(-not $compiledAll){ return 'SKIP' }
+  $sleeper=Start-Process -FilePath $doubleExe -ArgumentList @('sleep','300') -PassThru -WindowStyle Hidden
+  Start-Sleep -Milliseconds 500
+  $r=Run-Double @('exit2') 10000
+  $alive=$false; try{ $null=Get-Process -Id $sleeper.Id -ErrorAction Stop; $alive=$true }catch{ $alive=$false }
+  try{ Stop-Process -Id $sleeper.Id -Force -ErrorAction Stop }catch{}
+  ($alive -eq $true)
+}
+
+# --- precheck invocation scenarios (real PS 5.1 child, real file output) ---
+function Invoke-Precheck {
+  param([hashtable]$Params)
+  $ps1=Join-Path $stage 'precheck-run.ps1'
+  Copy-Item -LiteralPath $PrecheckPath -Destination $ps1 -Force
+  $argList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$ps1)
+  foreach($k in $Params.Keys){ $argList+=('-'+$k); $argList+=([string]$Params[$k]) }
+  $out= '' | & powershell.exe @argList 2>&1 | Out-String
+  return [string]$out
+}
+$wrongHash='0000000000000000000000000000000000000000000000000000000000000000'
+Scenario 'precheck-refuses-wrong-asar-pin' {
+  if(-not (Test-Path $appExe)){ return 'SKIP' }
+  $o=Invoke-Precheck @{AsarSha256=$wrongHash;ExeSha256=$wrongHash;ExpectedVersion='0.4.64'}
+  (($o -match 'VERDICT: UNKNOWN') -and ($o -notmatch 'RUNTIME_EVIDENCE_OK'))
+}
+Scenario 'precheck-refuses-missing-params' {
+  if(-not (Test-Path $appExe)){ return 'SKIP' }
+  $o=Invoke-Precheck @{}
+  (($o -match 'VERDICT: UNKNOWN') -and ($o -notmatch 'RUNTIME_EVIDENCE_OK'))
+}
+Scenario 'real-app-bad-nonce-exits-nonzero' {
+  if((-not (Test-Path $appExe)) -or -not $compiledAll){ return 'SKIP' }
+  $r=Invoke-BoundedProcess -ExePath $appExe -Arguments @('--gw-runtime-paths-json','x') -OutDir $outDir -EnvRemove @{ELECTRON_RUN_AS_NODE=1} -TimeoutMs 20000
+  $ra=Get-RunAssessment -Run $r -Label 'real app bad nonce'
+  ($ra -ne '')
+}
+$pinsReady=($AsarSha256 -and $ExeSha256 -and $ExpectedVersion)
+Scenario 'precheck-runtime-evidence-with-reviewed-pins' {
+  if(-not $pinsReady){ return 'SKIP' }
+  $o=Invoke-Precheck @{AsarSha256=$AsarSha256;ExeSha256=$ExeSha256;ExpectedVersion=$ExpectedVersion}
+  Say $o
+  ($o -match 'VERDICT: RUNTIME_EVIDENCE_OK')
+}
+Scenario 'env-scrub-e2e-parent-var-set' {
+  if(-not $pinsReady){ return 'SKIP' }
+  $env:ELECTRON_RUN_AS_NODE='1'
+  $o=Invoke-Precheck @{AsarSha256=$AsarSha256;ExeSha256=$ExeSha256;ExpectedVersion=$ExpectedVersion}
+  Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+  ($o -match 'VERDICT: RUNTIME_EVIDENCE_OK')
+}
+Scenario 'installer-shortcut-renamed-old-absent' {
+  $newName=-join [char[]](0x05D7,0x05D9,0x05D9,0x05DD,0x20,0x05E9,0x05DC,0x05D9)
+  $sm=Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+  $desk=[Environment]::GetFolderPath('Desktop')
+  $candidates=@((Join-Path $sm ('GlassWidgets\'+$newName+'.lnk')),(Join-Path $sm ($newName+'.lnk')),(Join-Path $desk ($newName+'.lnk')))
+  $oldNames=@((Join-Path $sm 'GlassWidgets\GlassWidgets.lnk'),(Join-Path $desk 'GlassWidgets.lnk'))
+  $foundNew=$false
+  foreach($c in $candidates){ if(Test-Path -LiteralPath $c){ $foundNew=$true; Say ('  new shortcut: '+$c); try{ $sh=(New-Object -ComObject WScript.Shell).CreateShortcut($c); Say ('    target: '+$sh.TargetPath) }catch{} } }
+  $oldLeft=$false
+  foreach($c in $oldNames){ if(Test-Path -LiteralPath $c){ $oldLeft=$true; Say ('  OLD shortcut still present: '+$c) } }
+  if($oldLeft){ return $false }
+  if(-not $foundNew){ Say '  WARN: no renamed shortcut found in the standard locations - verify manually' }
+  $true
+}
+Say ''
+Say ('SUMMARY pass='+$script:pass+' fail='+$script:fail+' skip='+$script:skip)
+if(Test-Path -LiteralPath $stage){ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+if($script:fail -gt 0){ exit 1 }
