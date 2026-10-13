@@ -31,9 +31,12 @@
 //   2. terminal poll: the sender/orchestrator delivers the PC's done terminal; caller runs
 //      verifyEnrollTerminal against the EPISODE ROW (challenge/issued_at read from D1, not the
 //      request) - preparation only.
-//   3. owner approval: main/ops recovers the user's approval message from the ORIGINAL channel
-//      (WhatsApp wamid) - the message that approves the exact fingerprint shown for THIS cmdId;
-//      caller passes {channel:'whatsapp', ref:<wamid>, fingerprint, cmdId, approvedAt}.
+//   3. owner approval: recovered from a TRUSTED ORIGINAL channel by a caller whose source is
+//      independent of the device being enrolled. A request-posted approval object is NOT
+//      evidence (any reply-key holder could mint one); the approval record passed here must be
+//      the product of that independent recovery: {channel, ref:<original message id>, fingerprint,
+//      cmdId, approvedAt}. Where no trusted recovery source exists, the composition must leave
+//      this seam BLOCKED - no approval, no INSERT - rather than trust a posted object.
 //   4. recordApproval(cmdId, terminalResult, approval): verifies BOTH chains and flips
 //      status issued->approved in ONE conditional UPDATE (replay-safe).
 //   5. confirmRegistration(cmdId, maxDevices): status must be 'approved'; atomic capped
@@ -164,12 +167,17 @@ async function recordApproval(DB, cmdId, terminalResult, approval, now) {
   return { ok: true, device: t.device };
 }
 
-// Final step: status 'approved' required; atomic capped INSERT a la tunnel-route.js; the flip
-// to 'confirmed' is conditional. Replay with the same evidence is idempotent; conflicts keep
-// the row for reconciliation.
+// Final step: status 'approved' required; atomic capped INSERT a la tunnel-route.js. maxDevices
+// is TRUSTED SERVER CONFIG ONLY: a non-integer / out-of-range / infinite value is clamped to
+// the default, never honored (a request-supplied Infinity/string/large must not bypass the cap).
+// An INSERT failure is an OUTAGE until a readback proves otherwise: id_conflict is returned only
+// when a row with a DIFFERENT key is actually read back; a readback of our own key means a lost
+// response (treated as already); no row means store_unavailable. The flip to 'confirmed' is
+// conditional AND proven: a zero-change UPDATE (race) is reconciled by readback, never claimed.
 async function confirmRegistration(DB, cmdId, maxDevices) {
   if (!DB) return { ok: false, reason: 'no_db' };
-  const max = +maxDevices || 2;
+  const n = +maxDevices;
+  const max = (Number.isSafeInteger(n) && n >= 1 && n <= 10) ? n : 2; // strict bounded: 1..10, default 2
   const p = await DB.prepare('SELECT status,term_device_id,term_pubkey FROM enroll_episodes WHERE cmd_id=?').bind(String(cmdId || '')).first();
   if (!p) return { ok: false, reason: 'no_episode' };
   if (p.status === 'confirmed') {
@@ -181,20 +189,35 @@ async function confirmRegistration(DB, cmdId, maxDevices) {
   const existing = await DB.prepare('SELECT pubkey FROM devices WHERE device_id=?').bind(p.term_device_id).first();
   if (existing) {
     if (existing.pubkey !== p.term_pubkey) return { ok: false, reason: 'id_conflict' };
-    await DB.prepare("UPDATE enroll_episodes SET status='confirmed',confirmed_at=? WHERE cmd_id=? AND status='approved'").bind(Date.now(), String(cmdId)).run();
-    return { ok: true, already: true, deviceId: p.term_device_id };
+    return markConfirmed(DB, cmdId, p, true);
   }
   let r;
   try {
     r = await DB.prepare('INSERT INTO devices (device_id,pubkey,enrolled_at) SELECT ?,?,? WHERE (SELECT COUNT(*) FROM devices) < ?').bind(p.term_device_id, p.term_pubkey, Date.now(), max).run();
   } catch {
+    // INSERT failed. Only an ACTUAL readback decides what this was: a conflicting key is a real
+    // id_conflict; our own key means the write landed and the response was lost; no row means
+    // the store is unavailable - say so, keep the approved row, let a retry reconcile.
     const won = await DB.prepare('SELECT pubkey FROM devices WHERE device_id=?').bind(p.term_device_id).first();
-    if (won && won.pubkey === p.term_pubkey) { await DB.prepare("UPDATE enroll_episodes SET status='confirmed',confirmed_at=? WHERE cmd_id=? AND status='approved'").bind(Date.now(), String(cmdId)).run(); return { ok: true, already: true, deviceId: p.term_device_id }; }
-    return { ok: false, reason: 'id_conflict' };
+    if (won) {
+      if (won.pubkey !== p.term_pubkey) return { ok: false, reason: 'id_conflict' };
+      return markConfirmed(DB, cmdId, p, true);
+    }
+    return { ok: false, reason: 'store_unavailable' };
   }
   if (r.meta.changes === 0) return { ok: false, reason: 'device_limit' }; // approved row survives
-  await DB.prepare("UPDATE enroll_episodes SET status='confirmed',confirmed_at=? WHERE cmd_id=? AND status='approved'").bind(Date.now(), String(cmdId)).run();
-  return { ok: true, deviceId: p.term_device_id };
+  return markConfirmed(DB, cmdId, p, false);
+}
+
+// The confirmed transition must be PROVEN: a zero-change conditional UPDATE means a concurrent
+// transition won the race - reconcile by reading the row back, and only an exact confirmed row
+// with the same evidence counts as success. Anything else is a race to reconcile, not a success.
+async function markConfirmed(DB, cmdId, p, already) {
+  const u = await DB.prepare("UPDATE enroll_episodes SET status='confirmed',confirmed_at=? WHERE cmd_id=? AND status='approved'").bind(Date.now(), String(cmdId)).run();
+  if (u.meta && u.meta.changes > 0) return { ok: true, already, deviceId: p.term_device_id };
+  const rb = await DB.prepare('SELECT status,term_device_id,term_pubkey FROM enroll_episodes WHERE cmd_id=?').bind(String(cmdId)).first();
+  if (rb && rb.status === 'confirmed' && rb.term_device_id === p.term_device_id && rb.term_pubkey === p.term_pubkey) return { ok: true, already: true, deviceId: p.term_device_id };
+  return { ok: false, reason: 'confirm_race' };
 }
 
 // SEND/RECORD ORDERING (ops gap 5). HONEST SCOPE: this helper is NOT a transaction. It only

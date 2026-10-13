@@ -23,14 +23,16 @@ class FakeStmt{constructor(db,sql,args){this.db=db;this.sql=sql;this.args=args}
    const r=d.ep.get(a[7]);if(!r||r.status!=='issued')return{meta:{changes:0}};
    Object.assign(r,{status:'approved',term_device_id:a[0],term_pubkey:a[1],term_approved_at:a[2],approval_channel:a[3],approval_ref:a[4],approval_fingerprint:a[5],approved_at:a[6]});return{meta:{changes:1}}}
   if(s.startsWith("UPDATE enroll_episodes SET status='confirmed'")){
+   if(d.raceConfirm){if(d.onConfirmUpdate)d.onConfirmUpdate(d.ep.get(a[1]));return{meta:{changes:0}}} // a concurrent transition always wins
    const r=d.ep.get(a[1]);if(!r||r.status!=='approved')return{meta:{changes:0}};
    r.status='confirmed';r.confirmed_at=a[0];return{meta:{changes:1}}}
   if(s.startsWith('INSERT INTO devices')){
+   if(d.failInsert)throw new Error('store down');
    if(d.devices.has(a[0]))throw new Error('PK');
    if(d.devices.size>=a[3])return{meta:{changes:0}};
    d.devices.set(a[0],{pubkey:a[1],enrolled_at:a[2]});return{meta:{changes:1}}}
   throw new Error('unexpected run: '+s)}}
-class FakeDB{constructor(){this.ep=new Map();this.devices=new Map()}
+class FakeDB{constructor(){this.ep=new Map();this.devices=new Map();this.failInsert=false;this.raceConfirm=false}
  prepare(sql){const db=this;return{bind(...args){return new FakeStmt(db,sql,args)}}}}
 function mintDevice(){const{publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');
  const pubkey=publicKey.export({format:'der',type:'spki'}).toString('base64');
@@ -160,5 +162,55 @@ const approval=(cmdId,fp,over={})=>({channel:'whatsapp',ref:'wamid.HBgMOTcyNTQ5O
   const db=new FakeDB();
   const r2=await issueEpisodeThen(db,{cmdId:'cmd-16',challenge:'nonce-NNNN-16',issuedAt:now,userInstructionRef:'r'},async()=>{calls.push('deliver');assert(db.ep.has('cmd-16'),'episode durable BEFORE delivery');return 'sent'});
   assert(r2.ok===true&&r2.delivered===true&&r2.result==='sent'&&calls.length===1,'delivery strictly after durable episode')}
+ // 17. INSERT outage, readback finds NOTHING -> store_unavailable (never id_conflict), approved survives
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-17',ch='nonce-OOOO-17';
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey)))).ok);
+  db.failInsert=true;
+  const c=await confirmRegistration(db,cmd,2);
+  assert(c.ok===false&&c.reason==='store_unavailable','outage without readback row is store_unavailable');
+  assert(db.ep.get(cmd).status==='approved'&&db.devices.size===0,'approved row survives the outage');
+  db.failInsert=false;
+  const c2=await confirmRegistration(db,cmd,2);
+  assert(c2.ok===true&&db.devices.size===1,'retry after outage reconciles')}
+ // 18. INSERT throws but readback shows a DIFFERENT key -> real id_conflict
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-18',ch='nonce-PPPP-18';
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey)))).ok);
+  db.failInsert=true;db.devices.set(dev.deviceId,{pubkey:'OTHERKEY'});
+  const c=await confirmRegistration(db,cmd,2);
+  assert(c.ok===false&&c.reason==='id_conflict','conflicting readback is id_conflict')}
+ // 19. INSERT throws but readback shows OUR key -> lost response: already + confirmed (proven)
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-19',ch='nonce-QQQQ-19';
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey)))).ok);
+  db.failInsert=true;db.devices.set(dev.deviceId,{pubkey:dev.pubkey}); // the write actually landed
+  const c=await confirmRegistration(db,cmd,2);
+  assert(c.ok===true&&c.already===true&&db.ep.get(cmd).status==='confirmed','lost response reconciled via readback')}
+ // 20. confirm UPDATE race: zero-change, readback shows our exact confirmed row -> ok already
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-20',ch='nonce-RRRR-20';
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey)))).ok);
+  db.raceConfirm=true;db.onConfirmUpdate=r=>{r.status='confirmed'}; // the racer commits the same transition instead of us
+  const c=await confirmRegistration(db,cmd,2);
+  assert(c.ok===true&&c.already===true,'race reconciled by exact readback')}
+ // 21. confirm UPDATE race: zero-change, readback does NOT match -> confirm_race, never success
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-21',ch='nonce-SSSS-21';
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey)))).ok);
+  db.raceConfirm=true; // row stays 'approved' - no matching confirmed readback
+  const c=await confirmRegistration(db,cmd,2);
+  assert(c.ok===false&&c.reason==='confirm_race','unproven confirm is a race to reconcile')}
+ // 22. maxDevices is strict bounded: Infinity / string / 0 / 99 all clamp to the default cap
+ {const dev=mintDevice(),db=new FakeDB(),cmd='cmd-22',ch='nonce-TTTT-22';
+  db.devices.set('a'.repeat(16),{pubkey:'x'});db.devices.set('b'.repeat(16),{pubkey:'y'}); // cap 2 reached
+  assert((await recordIssuedEpisode(db,{cmdId:cmd,challenge:ch,issuedAt:now-60000,userInstructionRef:'r'})).ok);
+  assert((await recordApproval(db,cmd,terminal(dev,cmd,ch,now-5000),approval(cmd,fpFn(dev.pubkey)))).ok);
+  for(const bad of[Infinity,'99',0,99,-1,NaN]){
+   const c=await confirmRegistration(db,cmd,bad);
+   assert(c.ok===false&&c.reason==='device_limit','cap bypass refused for '+bad);
+   assert(db.devices.size===2,'registry unchanged for '+bad)}
+  const ok=await confirmRegistration(db,newFake=Object.assign(new FakeDB(),{ }),10); // fresh db, legit max 10
+  assert(ok.ok===false&&ok.reason==='no_episode','bounded max 10 accepted (fresh db: no episode)')}
  console.log('WORKER-ENROLL-COMPLETION-UNIT: PASS');
 })().catch(e=>{console.error('FAIL',e);process.exit(1)});
