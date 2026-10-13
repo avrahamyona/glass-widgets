@@ -72,4 +72,19 @@ async function sendMail({host,port,user,pass,from,to,subject,text,socketImpl,tim
  }catch(e){return{ok:false,stage:stage0,reason:String(e&&e.message||e).slice(0,80)}}
 }
 
-module.exports={sendMail,buildMessage};
+// Bounded retry with linear backoff (design: bounded retries into the audit log). The caller
+// logs each attempt's outcome; the password is never in the returned objects. sleepImpl and
+// nowFn are injected for tests.
+async function sendMailRetry(opts,{attempts=3,backoffMs=2000,sleepImpl,sendImpl}={}){
+ const sleep=sleepImpl||(ms=>new Promise(r=>setTimeout(r,ms)));
+ const send=sendImpl||sendMail; // injectable for tests - module-scope refs are not monkey-patchable
+ let last=null;
+ for(let i=1;i<=Math.max(1,attempts);i++){
+  last=await send(opts);
+  if(last.ok)return{...last,attempt:i};
+  if(i<attempts)await sleep(backoffMs);
+ }
+ return{...last,attempt:Math.max(1,attempts)};
+}
+
+module.exports={sendMail,sendMailRetry,buildMessage};

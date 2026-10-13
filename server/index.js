@@ -111,11 +111,11 @@ async function main(){
    if(process.env.GW_MAILER==='1'){
     const mc=cfg.mailer||{};
     if(mc.host&&mc.user&&mc.pass&&mc.from&&mc.to){
-     const{sendMail}=require('./lib/pointer-mailer');
+     const{sendMailRetry}=require('./lib/pointer-mailer');
      onPointer=async rec=>{
-      const r=await sendMail({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
+      const r=await sendMailRetry({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
        subject:'GW-POINTER '+device.id,text:JSON.stringify(rec)});
-      log(r.ok?'info':'warn',{kind:'mailer',stage:r.ok?'sent':'send_fail',mailStage:r.stage});
+      log(r.ok?'info':'warn',{kind:'mailer',stage:r.ok?'sent':'send_fail',mailStage:r.stage,attempt:r.attempt});
      };
     }else log('warn',{kind:'mailer',stage:'config_incomplete'}); // GW_MAILER=1 without a full cfg.mailer: loud skip, never a partial attempt
    }

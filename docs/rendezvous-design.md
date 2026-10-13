@@ -49,6 +49,9 @@ E. Manual relay (the user pastes the state file) - the rehearsal pattern. Always
 
 ## Recommendation
 
+- SHIPPED (2026-10-14, source): pointer-mailer.js + GW_MAILER=1 wiring + guided config
+  fixture + autostart draft + go-live runbook (docs/mailer-go-live.md). Pending live: the
+  user's app-password, config on the PC, and the Instinct-side gmail wake subscription.
 - Ship B as the independent primary (only new component: pointer-mailer.js + one vaulted
   secret), keep A as a convenience hook while the worker lives, document C as the
   zero-config fallback. Sender side (Instinct): gmail wake subscription on the pointer

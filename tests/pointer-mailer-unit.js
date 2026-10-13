@@ -67,6 +67,16 @@ async function main(){
   let t2=false;try{buildMessage({from:FROM,to:'x@y.z\nBCC: evil@x',subject:SUBJ,text:'a'})}catch(e){t2=true}
   assert(t2,'header injection refused')}
 
+ // 8) sendMailRetry: retry stops on first success (attempt counted), exhausts on persistent failure
+ {const pm=require('../server/lib/pointer-mailer');
+  let calls=0;const sleeps=[];
+  let r=await pm.sendMailRetry({},{attempts:5,backoffMs:100,sleepImpl:async ms=>sleeps.push(ms),
+   sendImpl:async()=>{calls++;return calls<3?{ok:false,stage:'auth_pass',reason:'535'}:{ok:true}}});
+  assert(r.ok===true&&r.attempt===3&&calls===3&&sleeps.length===2,'retry stops at first success with attempt count');
+  calls=0;sleeps.length=0;
+  r=await pm.sendMailRetry({},{attempts:2,backoffMs:100,sleepImpl:async ms=>sleeps.push(ms),
+   sendImpl:async()=>{calls++;return{ok:false,stage:'io',reason:'timeout'}}});
+  assert(r.ok===false&&r.attempt===2&&calls===2&&sleeps.length===1&&r.stage==='io','persistent failure exhausts attempts, last stage kept')}
  clearTimeout(watchdog);
  console.log('POINTER-MAILER-UNIT: PASS');
 }
