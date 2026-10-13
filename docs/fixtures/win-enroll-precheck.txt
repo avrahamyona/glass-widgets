@@ -9,12 +9,16 @@
 #
 # CONTAINMENT (the only kill scope): every launch runs inside a dedicated Windows Job
 # Object with KILL_ON_JOB_CLOSE. The process is created SUSPENDED, assigned to the job,
-# and only then resumed, so every descendant is contained from birth - no parent-pid
-# enumeration, no late-descendant race, no reparent escape, no PID-reuse risk (the kernel
-# tracks job membership by handle, not pid). Termination kills the whole job atomically
-# and job emptiness is verified afterwards. A pre-existing running app instance is in a
-# DIFFERENT job and can NEVER be touched by anything here. Output goes to files, never
-# pipes, and files are read only after the run returns - reads are bounded by construction.
+# and only then resumed (a failed resume is a hard error + job termination), so every
+# descendant is contained from birth - no parent-pid enumeration, no late-descendant race,
+# no reparent escape, no PID-reuse risk (the kernel tracks job membership by handle, not
+# pid). Termination kills the whole job atomically and job emptiness is verified
+# afterwards. A pre-existing running app instance is in a DIFFERENT job and can NEVER be
+# touched by anything here. Handle inheritance is explicit (STARTUPINFOEX handle list:
+# ONLY NUL/stdout/stderr - no other parent handle leaks in). The child gets a SEPARATE
+# environment block (built per launch; the parent env is never mutated). Output goes to
+# files, never pipes; a capture is read only after containment closure is proven, and
+# reads are capped (64KB) - an unclosed run's capture is never read.
 #
 # PRE-LAUNCH GATE (ALL must pass before ANY invocation; otherwise UNKNOWN, nothing runs):
 #   - -AsarSha256, -ExeSha256 AND -ExpectedVersion are ALL REQUIRED, injected at handoff
@@ -27,11 +31,13 @@
 #
 # LAUNCH CONTRACT (evidence mode AND content probe share it): suspended create, job
 # assign, resume; per-child environment (ELECTRON_RUN_AS_NODE removed for the evidence
-# launch, set to 1 ONLY for the probe child); bounded wait (evidence 20s, probe 10s);
-# natural exit must be code 0 with ZERO active processes left in the job (a surviving
-# descendant means the capture may be contaminated - rejected); the whole trimmed stdout
-# is parsed ONCE as exactly one JSON document (arrays, scalars, multiple documents,
-# leading/trailing nonblank content and malformed JSON are all rejected).
+# launch, set to 1 ONLY for the probe child, both via the child's OWN environment block);
+# bounded wait (evidence 20s, probe 10s); containment closure must be PROVEN for every
+# outcome; natural exit must be code 0 with ZERO active processes left in the job (a
+# surviving descendant means the capture may be contaminated - rejected); captures are
+# read capped at 64KB; the whole trimmed stdout is parsed ONCE as exactly one JSON
+# document (arrays, scalars, multiple documents, leading/trailing nonblank content and
+# malformed JSON are all rejected).
 # ACL comparison mirrors the app's shared evaluator (src/lib/acl-check.js) exactly.
 param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='')
 
@@ -39,6 +45,8 @@ param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='')
 $gwCs = @'
 using System;
 using System.Text;
+using System.Collections;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 public static class GwBounded {
@@ -54,6 +62,7 @@ public static class GwBounded {
   const uint CREATE_SUSPENDED = 0x00000004;
   const uint CREATE_NO_WINDOW = 0x08000000;
   const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+  const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
   const uint STARTF_USESTDHANDLES = 0x00000100;
   const uint WAIT_TIMEOUT = 0x00000102;
   const uint GENERIC_READ = 0x80000000;
@@ -63,6 +72,7 @@ public static class GwBounded {
   const uint OPEN_EXISTING = 3;
   const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
   const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+  static readonly IntPtr PROC_THREAD_ATTRIBUTE_HANDLE_LIST = new IntPtr(0x00020002);
   const int JobObjectExtendedLimitInformation = 9;
   const int JobObjectBasicAccountingInformation = 1;
   static readonly IntPtr INVALID_HANDLE = new IntPtr(-1);
@@ -79,6 +89,9 @@ public static class GwBounded {
     public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
     public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
   }
+
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
 
   [StructLayout(LayoutKind.Sequential)]
   struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
@@ -116,13 +129,16 @@ public static class GwBounded {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len, IntPtr retLen);
-  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcess(string appName, StringBuilder cmdLine, IntPtr procAttrs, IntPtr threadAttrs, bool inheritHandles, uint flags, IntPtr env, string curDir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcess(string appName, StringBuilder cmdLine, IntPtr procAttrs, IntPtr threadAttrs, bool inheritHandles, uint flags, IntPtr env, string curDir, ref STARTUPINFOEX si, out PROCESS_INFORMATION pi);
   [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr proc, uint exitCode);
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
   [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SECURITY_ATTRIBUTES sa, uint disp, uint flags, IntPtr tmpl);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref IntPtr size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attr, IntPtr value, IntPtr size, IntPtr prevValue, IntPtr returnSize);
+  [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
 
   static string Err(string stage) { return stage + " failed (win32 " + Marshal.GetLastWin32Error().ToString() + ")"; }
 
@@ -146,9 +162,25 @@ public static class GwBounded {
     sb.Append('"');
   }
 
+  // Builds a SEPARATE Unicode environment block for the child (never mutates the parent):
+  // the current process env copied, removals applied, overrides set, names sorted.
+  public static string BuildEnvBlock(string[] remove, string[] setPairs) {
+    Dictionary<string,string> d = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+    foreach (DictionaryEntry de in Environment.GetEnvironmentVariables()) {
+      d[(string)de.Key] = (string)de.Value;
+    }
+    if (remove != null) { foreach (string k in remove) { if (k != null) { d.Remove(k); } } }
+    if (setPairs != null) { for (int i = 0; i + 1 < setPairs.Length; i += 2) { if (setPairs[i] != null) { d[setPairs[i]] = setPairs[i + 1] ?? ""; } } }
+    List<string> keys = new List<string>(d.Keys);
+    keys.Sort(StringComparer.OrdinalIgnoreCase);
+    StringBuilder sb = new StringBuilder();
+    foreach (string k in keys) { sb.Append(k); sb.Append('='); sb.Append(d[k]); sb.Append('\0'); }
+    sb.Append('\0');
+    return sb.ToString();
+  }
+
   static IntPtr OpenOut(string path, ref SECURITY_ATTRIBUTES sa, uint disp, uint access) {
-    IntPtr h = CreateFile(path, access, FILE_SHARE_READ, ref sa, disp, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
-    return h;
+    return CreateFile(path, access, FILE_SHARE_READ, ref sa, disp, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
   }
 
   static int QueryActive(IntPtr job) {
@@ -163,11 +195,12 @@ public static class GwBounded {
     } finally { Marshal.FreeHGlobal(p); }
   }
 
-  public static Result Run(string exe, string[] args, string stdoutPath, string stderrPath, int timeoutMs) {
+  public static Result Run(string exe, string[] args, string stdoutPath, string stderrPath, int timeoutMs, string[] envRemove, string[] envSetPairs) {
     Result r = new Result();
     r.Started = false; r.TimedOut = false; r.ClosureProven = false; r.ActiveAfterExit = 0; r.ExitCode = -1; r.Error = "";
     IntPtr job = IntPtr.Zero, proc = IntPtr.Zero, thread = IntPtr.Zero;
     IntPtr hOut = IntPtr.Zero, hErr = IntPtr.Zero, hIn = IntPtr.Zero;
+    IntPtr attrList = IntPtr.Zero, handleArray = IntPtr.Zero, envBlock = IntPtr.Zero;
     try {
       SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
       sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
@@ -189,16 +222,29 @@ public static class GwBounded {
       try { Marshal.StructureToPtr(li, lp, false); setOk = SetInformationJobObject(job, JobObjectExtendedLimitInformation, lp, (uint)liSize); }
       finally { Marshal.FreeHGlobal(lp); }
       if (!setOk) { r.Error = Err("SetInformationJobObject"); return r; }
-      STARTUPINFO si = new STARTUPINFO();
-      si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-      si.dwFlags = (int)STARTF_USESTDHANDLES;
-      si.hStdInput = hIn; si.hStdOutput = hOut; si.hStdError = hErr;
+      // explicit handle inheritance: ONLY NUL/stdout/stderr reach the child
+      IntPtr listSize = IntPtr.Zero;
+      InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref listSize);
+      if (listSize == IntPtr.Zero) { r.Error = Err("InitializeProcThreadAttributeList(size)"); return r; }
+      attrList = Marshal.AllocHGlobal(listSize);
+      if (!InitializeProcThreadAttributeList(attrList, 1, 0, ref listSize)) { r.Error = Err("InitializeProcThreadAttributeList"); return r; }
+      handleArray = Marshal.AllocHGlobal(IntPtr.Size * 3);
+      Marshal.WriteIntPtr(handleArray, 0, hIn);
+      Marshal.WriteIntPtr(handleArray, IntPtr.Size, hOut);
+      Marshal.WriteIntPtr(handleArray, IntPtr.Size * 2, hErr);
+      if (!UpdateProcThreadAttribute(attrList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handleArray, new IntPtr(IntPtr.Size * 3), IntPtr.Zero, IntPtr.Zero)) { r.Error = Err("UpdateProcThreadAttribute"); return r; }
+      envBlock = Marshal.StringToHGlobalUni(BuildEnvBlock(envRemove, envSetPairs));
+      STARTUPINFOEX siex = new STARTUPINFOEX();
+      siex.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+      siex.StartupInfo.dwFlags = (int)STARTF_USESTDHANDLES;
+      siex.StartupInfo.hStdInput = hIn; siex.StartupInfo.hStdOutput = hOut; siex.StartupInfo.hStdError = hErr;
+      siex.lpAttributeList = attrList;
       string cmd = Quote(exe, args);
       StringBuilder cmdBuf = new StringBuilder(cmd, cmd.Length + 1);
       PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
       bool created = CreateProcess(null, cmdBuf, IntPtr.Zero, IntPtr.Zero, true,
-        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-        IntPtr.Zero, null, ref si, out pi);
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+        envBlock, null, ref siex, out pi);
       if (!created) { r.Error = Err("CreateProcess"); return r; }
       r.Started = true;
       proc = pi.hProcess; thread = pi.hThread;
@@ -209,8 +255,15 @@ public static class GwBounded {
         r.Error = Err("AssignProcessToJobObject");
         return r;
       }
-      ResumeThread(thread);
+      uint rr = ResumeThread(thread);
       CloseHandle(thread); thread = IntPtr.Zero;
+      if (rr == 0xFFFFFFFF) {
+        r.Error = Err("ResumeThread");
+        TerminateJobObject(job, 1);
+        WaitForSingleObject(proc, 5000);
+        r.ClosureProven = (QueryActive(job) == 0);
+        return r;
+      }
       uint w = WaitForSingleObject(proc, (uint)timeoutMs);
       if (w == WAIT_TIMEOUT) {
         r.TimedOut = true;
@@ -227,8 +280,7 @@ public static class GwBounded {
         TerminateJobObject(job, 1);
         for (int i = 0; i < 50; i++) {
           active = QueryActive(job);
-          if (active == 0) { break; }
-          if (active < 0) { break; }
+          if (active <= 0) { break; }
           System.Threading.Thread.Sleep(100);
         }
       }
@@ -236,7 +288,20 @@ public static class GwBounded {
       if (!r.TimedOut && r.Error.Length == 0) {
         uint code;
         if (GetExitCodeProcess(proc, out code)) { r.ExitCode = (int)code; }
+        else { r.Error = Err("GetExitCodeProcess"); }
       }
+      return r;
+    } catch (Exception ex) {
+      r.Error = "exception: " + ex.GetType().Name + ": " + ex.Message;
+      try {
+        if (job != IntPtr.Zero) { TerminateJobObject(job, 1); }
+        if (proc != IntPtr.Zero) { WaitForSingleObject(proc, 5000); }
+      } catch { }
+      try {
+        if (proc == IntPtr.Zero) { r.ClosureProven = true; }
+        else if (job != IntPtr.Zero) { r.ClosureProven = (QueryActive(job) == 0); }
+        else { r.ClosureProven = (WaitForSingleObject(proc, 0) == 0); }
+      } catch { r.ClosureProven = false; }
       return r;
     } finally {
       if (thread != IntPtr.Zero) { CloseHandle(thread); }
@@ -245,6 +310,9 @@ public static class GwBounded {
       if (hIn != IntPtr.Zero && hIn != INVALID_HANDLE) { CloseHandle(hIn); }
       if (hOut != IntPtr.Zero && hOut != INVALID_HANDLE) { CloseHandle(hOut); }
       if (hErr != IntPtr.Zero && hErr != INVALID_HANDLE) { CloseHandle(hErr); }
+      if (attrList != IntPtr.Zero) { DeleteProcThreadAttributeList(attrList); Marshal.FreeHGlobal(attrList); }
+      if (handleArray != IntPtr.Zero) { Marshal.FreeHGlobal(handleArray); }
+      if (envBlock != IntPtr.Zero) { Marshal.FreeHGlobal(envBlock); }
     }
   }
 }
@@ -303,7 +371,11 @@ function Test-ClosureProven {
   # The staging dir may be removed only when EVERY started run ended with verified job
   # emptiness. A run that never started left nothing behind. Anything else: preserve.
   param($Runs)
-  foreach($r in @($Runs)){ if($r.started -and -not $r.treeCleaned){ return $false } }
+  foreach($r in @($Runs)){
+    if($null -eq $r){ return $false }
+    if($r.started -eq $false){ continue }
+    if($r.treeCleaned -ne $true){ return $false }
+  }
   return $true
 }
 function Get-RunAssessment {
@@ -318,33 +390,35 @@ function Get-RunAssessment {
     if($Run.treeCleaned){ return ($Label+' timed out - the whole job was terminated and verified empty; rejected') }
     return ($Label+' timed out and job emptiness could NOT be verified - rejected; staging preserved, check Task Manager')
   }
+  if($Run.treeCleaned -ne $true){ return ($Label+' finished but containment closure was NOT proven - rejected; staging preserved, check Task Manager') }
   if($Run.exitCode -ne 0){ return ($Label+' exited with code '+$Run.exitCode+' - rejected') }
   if($Run.activeAfterExit -ne 0){ return ($Label+' exited but left active descendants in its job (capture may be contaminated) - rejected; descendants were terminated inside the job') }
   return ''
 }
-function Invoke-WithChildEnv {
-  # Temporarily applies per-child env overrides to THIS process (CreateProcess copies the
-  # parent env at creation time), invokes Body, then restores every touched variable -
-  # including on exceptions. The child sees exactly the intended env; the parent is restored.
-  param([hashtable]$EnvRemove,[hashtable]$EnvSet,[scriptblock]$Body)
-  $saved=@{}
-  foreach($k in (@($EnvRemove.Keys)+@($EnvSet.Keys))){ $saved[$k]=[Environment]::GetEnvironmentVariable($k,'Process') }
+function Read-CaptureCapped {
+  # Bounded capture read: at most CapBytes+1 bytes are ever read; overCap flags a bigger
+  # file. Called ONLY for runs whose containment closure was proven (never for an
+  # unclosed run - a surviving descendant could still be appending).
+  param([Parameter(Mandatory=$true)][string]$Path,[int]$CapBytes=65536)
+  if(-not (Test-Path -LiteralPath $Path)){ return [pscustomobject]@{text='';overCap=$false} }
+  $fs=$null
   try{
-    foreach($k in $EnvRemove.Keys){ Remove-Item -LiteralPath ('Env:'+$k) -ErrorAction SilentlyContinue }
-    foreach($k in $EnvSet.Keys){ [Environment]::SetEnvironmentVariable($k,[string]$EnvSet[$k],'Process') }
-    & $Body
-  }finally{
-    foreach($k in $saved.Keys){
-      if($null -eq $saved[$k]){ Remove-Item -LiteralPath ('Env:'+$k) -ErrorAction SilentlyContinue }
-      else{ [Environment]::SetEnvironmentVariable($k,[string]$saved[$k],'Process') }
-    }
-  }
+    $fs=New-Object System.IO.FileStream($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+    $n=[int][Math]::Min([long]$fs.Length,[long]$CapBytes+1)
+    $buf=New-Object byte[] $n
+    $read=0; while($read -lt $n){ $k=$fs.Read($buf,$read,$n-$read); if($k -le 0){ break }; $read+=$k }
+    $txt=[System.Text.Encoding]::UTF8.GetString($buf,0,$read)
+    return [pscustomobject]@{text=$txt;overCap=($fs.Length -gt $CapBytes)}
+  }catch{ return [pscustomobject]@{text='';overCap=$false} }
+  finally{ if($null -ne $fs){ try{ $fs.Dispose() }catch{} } }
 }
 function Invoke-BoundedProcess {
   # Shared bounded-launch contract: the child runs inside a dedicated kill-on-close Job
-  # Object (created suspended, assigned, resumed - via GwBounded, compiled locally).
-  # Output goes to FILES, never pipes, and is read only after the run returns, so reads
-  # are bounded by construction. Runner is injectable for deterministic tests.
+  # Object (created suspended, assigned, resumed - via GwBounded, compiled locally), with
+  # an explicit handle list and its OWN environment block. Output goes to FILES, read
+  # capped, and read ONLY after containment closure is proven. started is a tri-state:
+  # $false ONLY on an explicit never-created result from the launcher; $null = UNKNOWN
+  # (blocks stage cleanup). Runner is injectable for deterministic tests.
   param(
     [Parameter(Mandatory=$true)][string]$ExePath,
     [string[]]$Arguments=@(),
@@ -360,18 +434,24 @@ function Invoke-BoundedProcess {
   if($null -ne $Runner){
     $res=& $Runner $ExePath $Arguments $outPath $errPath $TimeoutMs
   }else{
+    $rem=@(); foreach($k in $EnvRemove.Keys){ $rem+=[string]$k }
+    $pairs=@(); foreach($k in $EnvSet.Keys){ $pairs+=[string]$k; $pairs+=[string]$EnvSet[$k] }
     try{
-      $res=Invoke-WithChildEnv -EnvRemove $EnvRemove -EnvSet $EnvSet -Body {
-        $r=[GwBounded]::Run($ExePath,[string[]]$Arguments,$outPath,$errPath,$TimeoutMs)
-        [pscustomobject]@{started=[bool]$r.Started;timedOut=[bool]$r.TimedOut;treeCleaned=[bool]$r.ClosureProven;activeAfterExit=[int]$r.ActiveAfterExit;exitCode=[int]$r.ExitCode;apiError=[string]$r.Error}
-      }.GetNewClosure()
+      $r=[GwBounded]::Run($ExePath,[string[]]$Arguments,$outPath,$errPath,$TimeoutMs,[string[]]$rem,[string[]]$pairs)
+      $res=[pscustomobject]@{started=[bool]$r.Started;timedOut=[bool]$r.TimedOut;treeCleaned=[bool]$r.ClosureProven;activeAfterExit=[int]$r.ActiveAfterExit;exitCode=[int]$r.ExitCode;apiError=[string]$r.Error}
     }catch{
-      $res=[pscustomobject]@{started=$false;timedOut=$false;treeCleaned=$false;activeAfterExit=-1;exitCode=$null;apiError=('launcher exception: '+$_.Exception.Message)}
+      $res=[pscustomobject]@{started=$null;timedOut=$false;treeCleaned=$false;activeAfterExit=-1;exitCode=$null;apiError=('launcher exception - launch state UNKNOWN: '+$_.Exception.Message)}
     }
   }
-  $out=''; if(Test-Path -LiteralPath $outPath){ try{ $out=[System.IO.File]::ReadAllText($outPath) }catch{ $out='' } }
-  $err=''; if(Test-Path -LiteralPath $errPath){ try{ $err=[System.IO.File]::ReadAllText($errPath) }catch{ $err='' } }
-  return [pscustomobject]@{started=[bool]$res.started;timedOut=[bool]$res.timedOut;treeCleaned=[bool]$res.treeCleaned;activeAfterExit=[int]$res.activeAfterExit;exitCode=$res.exitCode;stdout=$out;stderr=$err;apiError=[string]$res.apiError}
+  $out=''; $err=''; $overCap=$false; $outputUnread=$false
+  if($res.treeCleaned -eq $true){
+    $co=Read-CaptureCapped -Path $outPath; $out=$co.text
+    $ce=Read-CaptureCapped -Path $errPath; $err=$ce.text
+    $overCap=($co.overCap -or $ce.overCap)
+  }elseif($res.started -eq $true){
+    $outputUnread=$true
+  }
+  return [pscustomobject]@{started=$res.started;timedOut=[bool]$res.timedOut;treeCleaned=[bool]$res.treeCleaned;activeAfterExit=[int]$res.activeAfterExit;exitCode=$res.exitCode;stdout=$out;stderr=$err;apiError=[string]$res.apiError;overCap=$overCap;outputUnread=$outputUnread}
 }
 # ---------- main flow ----------
 $ErrorActionPreference='Stop'
@@ -426,10 +506,14 @@ try{
   $rt=$null
   if($gateOk){
     $nonce=[guid]::NewGuid().ToString('N')
+    # launch state is recorded UNKNOWN before invocation; only an explicit never-created
+    # result permits stage cleanup - if anything escapes, the placeholder forces preserve
+    $runs+=[pscustomobject]@{started=$null;timedOut=$false;treeCleaned=$false;activeAfterExit=-1;exitCode=$null;stdout='';stderr='';apiError='not invoked yet';overCap=$false;outputUnread=$false}
     $ev=Invoke-BoundedProcess -ExePath $appExe -Arguments @('--gw-runtime-paths-json',$nonce) -OutDir $stage -EnvRemove @{ELECTRON_RUN_AS_NODE=1} -TimeoutMs 20000
-    $runs+=$ev
+    $runs[$runs.Count-1]=$ev
     $ra=Get-RunAssessment -Run $ev -Label 'evidence mode (20s bound)'
     if($ra){ $reasons+=$ra }
+    elseif($ev.overCap){ $reasons+='evidence capture exceeds the 64KB cap - rejected' }
     else{
       $nowMs=[DateTimeOffset]::Now.ToUnixTimeMilliseconds()
       $pr=ConvertTo-RuntimeEvidence -Raw $ev.stdout -Nonce $nonce -ExpectedVersion $ExpectedVersion -AppExe $appExe -NowMs $nowMs
@@ -496,10 +580,12 @@ try{
 }catch(e){console.log('CORRUPT');}
 '@
       Set-Content -Path $probe -Value $js -Encoding ASCII
+      $runs+=[pscustomobject]@{started=$null;timedOut=$false;treeCleaned=$false;activeAfterExit=-1;exitCode=$null;stdout='';stderr='';apiError='not invoked yet';overCap=$false;outputUnread=$false}
       $pv=Invoke-BoundedProcess -ExePath $appExe -Arguments @($probe,$devFile) -OutDir $stage -EnvSet @{ELECTRON_RUN_AS_NODE='1'} -TimeoutMs 10000
-      $runs+=$pv
+      $runs[$runs.Count-1]=$pv
       $ra2=Get-RunAssessment -Run $pv -Label 'content probe (10s bound)'
       if($ra2){ $reasons+=$ra2 }
+      elseif($pv.overCap){ $reasons+='content probe capture exceeds the 64KB cap - rejected' }
       else{
         $cpr=ConvertTo-ProbeResult -Raw $pv.stdout
         if($cpr.state -eq 'ok'){ $contentOk=$true; $devId=$cpr.deviceId }

@@ -1,21 +1,19 @@
 ﻿# precheck-tests.ps1 - deterministic adversarial tests for win-enroll-precheck.txt.
 # Runs on any pwsh 7+ dev box. The EXACT shipped helper block AND the EXACT shipped C#
 # source are extracted from the fixture file itself - never copies. The C# is compiled
-# here with Add-Type (P/Invoke declarations compile cross-platform; only Run() execution
-# is Windows-only and stays on the Windows acceptance list).
+# here with Add-Type (P/Invoke declarations compile cross-platform; Run() execution is
+# Windows-only and stays on the Windows acceptance list).
 param([string]$Body=(Join-Path $PSScriptRoot 'body.ps1'))
 $ErrorActionPreference='Stop'
 $script:pass=0; $script:fail=0
 function T($name,$cond){ if($cond){ $script:pass++; Write-Output ('PASS '+$name) } else { $script:fail++; Write-Output ('FAIL '+$name) } }
 $bodyText=[System.IO.File]::ReadAllText($Body)
 
-# --- extract and load the exact shipped helper block ---
 $hs=$bodyText.IndexOf('function ConvertTo-NormalizedVersion')
 $hm=$bodyText.IndexOf('# ---------- main flow ----------')
 if($hs -lt 0 -or $hm -lt 0 -or $hm -le $hs){ throw 'cannot isolate the helper block from the fixture' }
 . ([ScriptBlock]::Create($bodyText.Substring($hs,$hm-$hs)))
 
-# --- extract and COMPILE the exact shipped C# (compile evidence, not runtime evidence) ---
 $csMark=$bodyText.IndexOf('# GW-CS-BEGIN')
 $csStart=$bodyText.IndexOf("@'",$csMark)+2
 $csEnd=$bodyText.IndexOf("'@",$csStart)
@@ -26,17 +24,28 @@ try{ Add-Type -TypeDefinition $cs -ErrorAction Stop }catch{ $compileOk=$false; $
 T 'cs-compiles' $compileOk
 if(-not $compileOk){ Write-Output ('compile error: '+$compileErr) }
 
-# --- Quote(): the exact shipped C# running on this box, adversarial argv cases ---
+# --- Quote(): exact shipped C# running on this box ---
 T 'quote-plain'           ([GwBounded]::Quote('C:\x\app.exe',@('abc')) -ceq 'C:\x\app.exe abc')
 T 'quote-exe-space'       ([GwBounded]::Quote('C:\a b\app.exe',@('--x','v v')) -ceq '"C:\a b\app.exe" --x "v v"')
 T 'quote-empty-arg'       ([GwBounded]::Quote('C:\app.exe',@('')) -ceq 'C:\app.exe ""')
-T 'quote-embedded-quote'  ([GwBounded]::Quote('C:\app.exe',@('a"b')) -ceq '"a\"b"'.Insert(0,'C:\app.exe '))
+T 'quote-embedded-quote'  ([GwBounded]::Quote('C:\app.exe',@('a"b')) -ceq 'C:\app.exe "a\"b"')
 T 'quote-trailing-bs-nospace' ([GwBounded]::Quote('C:\app.exe',@('a\')) -ceq 'C:\app.exe a\')
 T 'quote-trailing-bs-quoted' ([GwBounded]::Quote('C:\app.exe',@('a b\')) -ceq 'C:\app.exe "a b\\"')
 T 'quote-bs-before-quote' ([GwBounded]::Quote('C:\app.exe',@('a\"b')) -ceq 'C:\app.exe "a\\\"b"')
 T 'quote-bs-no-quote'     ([GwBounded]::Quote('C:\app.exe',@('a\b')) -ceq 'C:\app.exe a\b')
 T 'quote-tab-arg'         ([GwBounded]::Quote('C:\app.exe',@('a'+[char]9+'b')) -ceq ('C:\app.exe "a'+[char]9+'b"'))
 T 'quote-multi-args'      ([GwBounded]::Quote('C:\app.exe',@('a','b c','d')) -ceq 'C:\app.exe a "b c" d')
+
+# --- BuildEnvBlock(): separate child env, real shipped C# on this box ---
+[Environment]::SetEnvironmentVariable('GW_EB1','parent-val','Process')
+$blk=[GwBounded]::BuildEnvBlock(@('GW_EB1'),@('GW_EB2','child-val'))
+$NUL=[char]0
+T 'envblock-removes'      (-not $blk.Contains('GW_EB1='))
+T 'envblock-sets'         ($blk.Contains('GW_EB2=child-val'+$NUL))
+T 'envblock-inherits'     ($blk.Contains('PATH=') -or $blk.Contains('Path='))
+T 'envblock-double-null-terminated' ($blk.EndsWith([string]$NUL+[string]$NUL))
+T 'envblock-parent-untouched' (([Environment]::GetEnvironmentVariable('GW_EB1','Process')) -eq 'parent-val')
+[Environment]::SetEnvironmentVariable('GW_EB1',$null,'Process')
 
 # --- version gate (PE normalization) ---
 T 'ver-pe-4part-padded'   ((Test-VersionGate '0.4.64.0' '0.4.64') -eq '')
@@ -99,14 +108,15 @@ T 'probe-trailing-extra'  ((ConvertTo-ProbeResult 'OK 0123456789abcdef extra').s
 T 'probe-uppercase-hex'   ((ConvertTo-ProbeResult 'OK 0123456789ABCDEF').state -eq 'error')
 T 'probe-empty'           ((ConvertTo-ProbeResult '').state -eq 'error')
 
-# --- stage preservation decision ---
+# --- stage preservation decision (tri-state started) ---
 function MR($started,$timedOut,$cleaned,$active=0,$code=0,$api=''){ [pscustomobject]@{started=$started;timedOut=$timedOut;treeCleaned=$cleaned;activeAfterExit=$active;exitCode=$code;stdout='';stderr='';apiError=$api} }
 T 'closure-empty-ok'      ((Test-ClosureProven @()) -eq $true)
 T 'closure-clean-ok'      ((Test-ClosureProven @((MR $true $false $true))) -eq $true)
 T 'closure-timeout-clean-ok' ((Test-ClosureProven @((MR $true $true $true))) -eq $true)
 T 'closure-unproven-preserve' ((Test-ClosureProven @((MR $true $true $false))) -eq $false)
-T 'closure-not-started-ok' ((Test-ClosureProven @((MR $false $false $false -1 $null 'x'))) -eq $true)
-T 'closure-one-bad-among-good' ((Test-ClosureProven @((MR $true $false $true),(MR $true $true $false))) -eq $false)
+T 'closure-never-created-ok' ((Test-ClosureProven @((MR $false $false $false -1 $null 'x'))) -eq $true)
+T 'closure-placeholder-preserve' ((Test-ClosureProven @((MR $null $false $false -1 $null 'not invoked yet'))) -eq $false)
+T 'closure-one-bad-among-good' ((Test-ClosureProven @((MR $true $false $true),(MR $null $false $false -1 $null 'not invoked yet'))) -eq $false)
 
 # --- run assessment: every adversarial outcome rejected explicitly ---
 T 'assess-clean'          ((Get-RunAssessment (MR $true $false $true 0 0) 'X') -eq '')
@@ -114,29 +124,32 @@ T 'assess-api-error'      ((Get-RunAssessment (MR $false $false $false -1 -1 'Cr
 T 'assess-not-started'    ((Get-RunAssessment (MR $false $false $true -1 -1 '') 'X') -ne '')
 T 'assess-timeout-contained' ((Get-RunAssessment (MR $true $true $true) 'X') -ne '')
 T 'assess-timeout-unverified' ((Get-RunAssessment (MR $true $true $false) 'X') -ne '')
+T 'assess-closure-gate-always' ((Get-RunAssessment (MR $true $false $false 0 0) 'X') -ne '')
 T 'assess-nonzero-exit'   ((Get-RunAssessment (MR $true $false $true 0 2) 'X') -ne '')
 T 'assess-natural-exit-with-descendant' ((Get-RunAssessment (MR $true $false $true 2 0) 'X') -ne '')
 
-# --- per-child env wrapper (real env on this box) ---
-[Environment]::SetEnvironmentVariable('GW_T1','parent','Process')
-$seen=''
-Invoke-WithChildEnv -EnvRemove @{GW_T1=1} -EnvSet @{GW_T2='child'} -Body { $script:seen=([string][Environment]::GetEnvironmentVariable('GW_T1','Process'))+'|'+([string][Environment]::GetEnvironmentVariable('GW_T2','Process')) }
-T 'env-child-view'        ($seen -eq '|child')
-T 'env-parent-restored'   (([Environment]::GetEnvironmentVariable('GW_T1','Process')) -eq 'parent')
-T 'env-newvar-unset-after' ($null -eq [Environment]::GetEnvironmentVariable('GW_T2','Process'))
-$threw=$false
-try{ Invoke-WithChildEnv -EnvSet @{GW_T3='x'} -Body { throw 'boom' } }catch{ $threw=$true }
-T 'env-restore-on-exception' ($threw -and ($null -eq [Environment]::GetEnvironmentVariable('GW_T3','Process')))
-
-# --- Invoke-BoundedProcess with deterministic Runner mocks ---
+# --- capped capture reads ---
 $tmpDir=Join-Path ([System.IO.Path]::GetTempPath()) ('gw-test-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+$small=Join-Path $tmpDir 'small.txt'; [System.IO.File]::WriteAllText($small,'hello')
+$cap1=Read-CaptureCapped -Path $small
+T 'cap-small-ok'          (($cap1.text -eq 'hello') -and (-not $cap1.overCap))
+$big=Join-Path $tmpDir 'big.txt'
+$bigContent=New-Object string ('x',100000)
+[System.IO.File]::WriteAllText($big,$bigContent)
+$cap2=Read-CaptureCapped -Path $big
+T 'cap-overcap-flagged'   ($cap2.overCap -eq $true)
+T 'cap-overcap-bounded'   ($cap2.text.Length -le 65537)
+$cap3=Read-CaptureCapped -Path (Join-Path $tmpDir 'missing.txt')
+T 'cap-missing-empty'     (($cap3.text -eq '') -and (-not $cap3.overCap))
+
+# --- Invoke-BoundedProcess with deterministic Runner mocks ---
 $r1=Invoke-BoundedProcess -ExePath 'C:\x.exe' -OutDir $tmpDir -Runner { param($e,$a,$op,$ep,$t) [System.IO.File]::WriteAllText($op,'CAPTURED'); MR $true $true $true }
 T 'bp-timeout-contained'  ($r1.timedOut -and $r1.treeCleaned -and ($r1.stdout -eq 'CAPTURED'))
-$r2=Invoke-BoundedProcess -ExePath 'C:\x.exe' -OutDir $tmpDir -Runner { param($e,$a,$op,$ep,$t) MR $true $true $false }
-T 'bp-timeout-unverified' ($r2.timedOut -and (-not $r2.treeCleaned))
+$r2=Invoke-BoundedProcess -ExePath 'C:\x.exe' -OutDir $tmpDir -Runner { param($e,$a,$op,$ep,$t) [System.IO.File]::WriteAllText($op,'SHOULD-NOT-BE-READ'); MR $true $true $false }
+T 'bp-unproven-never-reads' (($r2.stdout -eq '') -and $r2.outputUnread)
 $r3=Invoke-BoundedProcess -ExePath 'C:\x.exe' -OutDir $tmpDir -Runner { param($e,$a,$op,$ep,$t) MR $false $false $false -1 $null 'CreateJobObject failed (win32 5)' }
-T 'bp-api-error-surfaced' ((-not $r3.started) -and ($r3.apiError -like '*CreateJobObject*'))
+T 'bp-api-error-surfaced' (($r3.started -eq $false) -and ($r3.apiError -like '*CreateJobObject*'))
 $r4=Invoke-BoundedProcess -ExePath 'C:\x.exe' -OutDir $tmpDir -Runner { param($e,$a,$op,$ep,$t) [System.IO.File]::WriteAllText($op,('{"v":1}'+$NL+'{"v":2}')); MR $true $false $true 0 0 }
 T 'bp-readback-fidelity-multiline' ($r4.stdout -eq ('{"v":1}'+$NL+'{"v":2}'))
 $r5=Invoke-BoundedProcess -ExePath 'C:\x.exe' -OutDir $tmpDir -Runner { param($e,$a,$op,$ep,$t) MR $true $false $true 0 2 }
@@ -146,10 +159,10 @@ T 'bp-descendants-surfaced' ($r6.activeAfterExit -eq 3)
 Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # --- static contract audits on the shipped fixture text ---
-foreach($x in @('Add-Type','CREATE_SUSPENDED','AssignProcessToJobObject','JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE','TerminateJobObject','QueryInformationJobObject','STARTF_USESTDHANDLES','STAGING PRESERVED','-ExeSha256')){
+foreach($x in @('Add-Type','CREATE_SUSPENDED','AssignProcessToJobObject','JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE','TerminateJobObject','QueryInformationJobObject','STARTUPINFOEX','PROC_THREAD_ATTRIBUTE_HANDLE_LIST','UpdateProcThreadAttribute','DeleteProcThreadAttributeList','EXTENDED_STARTUPINFO_PRESENT','BuildEnvBlock','0xFFFFFFFF','Err("GetExitCodeProcess")','Read-CaptureCapped','STAGING PRESERVED','-ExeSha256')){
   T ('static-has-'+$x) ($bodyText.Contains($x))
 }
-foreach($x in @('ArgumentList','Get-CimInstance','.GetAwaiter(','RedirectStandardOutput',' -Parallel')){
+foreach($x in @('ArgumentList','Get-CimInstance','.GetAwaiter(','RedirectStandardOutput',' -Parallel','Invoke-WithChildEnv','SetEnvironmentVariable')){
   T ('static-lacks-'+$x) (-not $bodyText.Contains($x))
 }
 $runIdx=$bodyText.IndexOf('public static Result Run')
