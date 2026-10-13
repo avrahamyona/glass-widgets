@@ -98,5 +98,15 @@ async function main(){
   }});
  if(!r.started){console.error('not started:',r.reason);process.exit(1)}
  console.log('server up on 127.0.0.1:'+r.port,'device',device.id,'fingerprint',fingerprint(device.pub),'roots',roots.length); // the fingerprint is the LOCAL source of truth for pairing comparison
+ // Efi-pattern reachability (opt-in, default OFF): outbound cloudflared quick tunnel + respawn
+ // supervisor + local state-file pointer (tunnel-state.json). No router/firewall changes - the
+ // server keeps binding 127.0.0.1 and cloudflared dials OUT. No worker, no D1 required.
+ if(process.env.GW_TUNNEL==='1'||cfg.tunnel===true){
+  try{
+   const{startTunnelSupervisor}=require('./lib/tunnel-supervisor');
+   const ts=await startTunnelSupervisor({dataDir,port:r.port,log:(stage,obj)=>log('info',{kind:'tunnel',stage,...obj}),getDevice:()=>({deviceId:device.id})});
+   console.log(ts.started?('tunnel supervisor up - pointer file: '+ts.file):('tunnel not started: '+ts.reason));
+  }catch(e){log('warn',{kind:'tunnel',stage:'supervisor_error',err:String(e&&e.message||e).slice(0,120)})}
+ }
 }
 main().catch(e=>{console.error(e);process.exit(1)});
