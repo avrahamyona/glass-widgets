@@ -1,32 +1,255 @@
-﻿# win-enroll-precheck.txt - run on the user's PC (regular PowerShell, no admin needed)
-# DIAGNOSTIC ONLY. This script gathers evidence and findings; it draws NO enroll conclusions,
-# issues NO permits, and changes NO app identity or settings. It writes a Desktop transcript
-# (enroll-precheck-log.txt) and a unique GUID temp staging dir (removed at the end, and only
-# after process-tree cleanup is verified). Launching the app's evidence mode may cause
-# Electron's own cache/log writes - zero writes is NOT claimed.
+﻿# win-enroll-precheck.txt - run on the user's PC (regular Windows PowerShell 5.1, no admin)
+# DIAGNOSTIC ONLY. Gathers evidence and findings; draws NO enroll conclusions, issues NO
+# permits, changes NO app identity or settings. Writes a Desktop transcript
+# (enroll-precheck-log.txt) and a unique GUID temp staging dir. The staging dir is removed
+# at the end ONLY when containment closure is proven for everything that ran; otherwise it
+# is PRESERVED and reported. Electron's own cache/log writes may happen - zero writes is
+# NOT claimed. The bounded launcher is compiled LOCALLY by Add-Type (no downloads); if
+# compilation is impossible the script stops at UNKNOWN before any launch.
+#
+# CONTAINMENT (the only kill scope): every launch runs inside a dedicated Windows Job
+# Object with KILL_ON_JOB_CLOSE. The process is created SUSPENDED, assigned to the job,
+# and only then resumed, so every descendant is contained from birth - no parent-pid
+# enumeration, no late-descendant race, no reparent escape, no PID-reuse risk (the kernel
+# tracks job membership by handle, not pid). Termination kills the whole job atomically
+# and job emptiness is verified afterwards. A pre-existing running app instance is in a
+# DIFFERENT job and can NEVER be touched by anything here. Output goes to files, never
+# pipes, and files are read only after the run returns - reads are bounded by construction.
 #
 # PRE-LAUNCH GATE (ALL must pass before ANY invocation; otherwise UNKNOWN, nothing runs):
-#   - -AsarSha256, -ExeSha256 AND -ExpectedVersion are ALL REQUIRED. The exe pin matters
-#     because an asar pin alone cannot identify a REPLACED exe. Values are injected at
-#     handoff from the REVIEWED build only - never derived from source.
-#   - Installed exe version must equal the reviewed version after PE normalization
-#     (a 4-part PE FileVersion like 0.4.64.0 normalizes to 0.4.64; prerelease is kept).
+#   - -AsarSha256, -ExeSha256 AND -ExpectedVersion are ALL REQUIRED, injected at handoff
+#     from the REVIEWED build only - never derived from source. An asar pin alone cannot
+#     identify a REPLACED exe, so the packaged exe hash is pinned too.
+#   - Installed exe version equals the reviewed version after PE normalization (a 4-part
+#     PE FileVersion like 0.4.64.0 normalizes to 0.4.64; prerelease is kept).
 #   - GlassWidgets.exe sha256 == -ExeSha256 AND resources\app.asar sha256 == -AsarSha256.
 #   - The mode's build marker must be present in the pinned asar (supporting check only).
 #
-# LAUNCH CONTRACT (evidence mode AND content probe share it):
-#   - Direct System.Diagnostics.Process on the exact exe (no cmd wrapper, so Kill reaches
-#     the real process). Per-child environment: ELECTRON_RUN_AS_NODE is REMOVED for the
-#     evidence launch and set to 1 ONLY for the probe child. Separate stdout/stderr pipes.
-#   - Bounded wait (evidence 20s, probe 10s). On timeout the WHOLE process tree rooted at
-#     our spawned pid is killed and verified gone (children first, root last). A pre-existing
-#     running app instance is a DIFFERENT tree and is never touched; pre-existing pids are
-#     snapshotted before launch and re-verified alive afterwards.
-#   - Natural exit must be code 0. The whole trimmed stdout is parsed ONCE as exactly one
-#     JSON document: arrays, scalars, multiple documents, leading/trailing nonblank content
-#     and malformed JSON are all rejected. No line-skipping, no first-match.
+# LAUNCH CONTRACT (evidence mode AND content probe share it): suspended create, job
+# assign, resume; per-child environment (ELECTRON_RUN_AS_NODE removed for the evidence
+# launch, set to 1 ONLY for the probe child); bounded wait (evidence 20s, probe 10s);
+# natural exit must be code 0 with ZERO active processes left in the job (a surviving
+# descendant means the capture may be contaminated - rejected); the whole trimmed stdout
+# is parsed ONCE as exactly one JSON document (arrays, scalars, multiple documents,
+# leading/trailing nonblank content and malformed JSON are all rejected).
 # ACL comparison mirrors the app's shared evaluator (src/lib/acl-check.js) exactly.
 param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='')
+
+# GW-CS-BEGIN
+$gwCs = @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+
+public static class GwBounded {
+  public sealed class Result {
+    public bool Started;
+    public bool TimedOut;
+    public bool ClosureProven;
+    public int ActiveAfterExit;
+    public int ExitCode;
+    public string Error;
+  }
+
+  const uint CREATE_SUSPENDED = 0x00000004;
+  const uint CREATE_NO_WINDOW = 0x08000000;
+  const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+  const uint STARTF_USESTDHANDLES = 0x00000100;
+  const uint WAIT_TIMEOUT = 0x00000102;
+  const uint GENERIC_READ = 0x80000000;
+  const uint GENERIC_WRITE = 0x40000000;
+  const uint FILE_SHARE_READ = 0x00000001;
+  const uint CREATE_ALWAYS = 2;
+  const uint OPEN_EXISTING = 3;
+  const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+  const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+  const int JobObjectExtendedLimitInformation = 9;
+  const int JobObjectBasicAccountingInformation = 1;
+  static readonly IntPtr INVALID_HANDLE = new IntPtr(-1);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct SECURITY_ATTRIBUTES { public int nLength; public IntPtr lpSecurityDescriptor; public bool bInheritHandle; }
+
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  struct STARTUPINFO {
+    public int cb;
+    public string lpReserved; public string lpDesktop; public string lpTitle;
+    public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+    public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags;
+    public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
+    public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct IO_COUNTERS { public ulong ReadOperationCount; public ulong WriteOperationCount; public ulong OtherOperationCount; public ulong ReadTransferCount; public ulong WriteTransferCount; public ulong OtherTransferCount; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    public long PerProcessUserTimeLimit; public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize; public UIntPtr MaximumWorkingSetSize;
+    public uint ActiveProcessLimit; public UIntPtr Affinity;
+    public uint PriorityClass; public uint SchedulingClass;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit; public UIntPtr JobMemoryLimit;
+    public UIntPtr PeakProcessMemoryUsed; public UIntPtr PeakJobMemoryUsed;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+    public long TotalUserTime; public long TotalKernelTime;
+    public long ThisPeriodTotalUserTime; public long ThisPeriodTotalKernelTime;
+    public uint TotalPageFaultCount; public uint TotalProcesses;
+    public uint ActiveProcesses; public uint TotalTerminatedProcesses;
+  }
+
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attrs, string name);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len, IntPtr retLen);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcess(string appName, StringBuilder cmdLine, IntPtr procAttrs, IntPtr threadAttrs, bool inheritHandles, uint flags, IntPtr env, string curDir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr proc, uint exitCode);
+  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SECURITY_ATTRIBUTES sa, uint disp, uint flags, IntPtr tmpl);
+
+  static string Err(string stage) { return stage + " failed (win32 " + Marshal.GetLastWin32Error().ToString() + ")"; }
+
+  public static string Quote(string exe, string[] args) {
+    StringBuilder sb = new StringBuilder();
+    AppendArg(sb, exe);
+    if (args != null) { foreach (string a in args) { sb.Append(' '); AppendArg(sb, a); } }
+    return sb.ToString();
+  }
+  static void AppendArg(StringBuilder sb, string a) {
+    if (a == null) { a = ""; }
+    if (a.Length != 0 && a.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0) { sb.Append(a); return; }
+    sb.Append('"');
+    for (int i = 0; ; ) {
+      int bs = 0;
+      while (i < a.Length && a[i] == '\\') { bs++; i++; }
+      if (i >= a.Length) { for (int k = 0; k < bs * 2; k++) { sb.Append('\\'); } break; }
+      if (a[i] == '"') { for (int k = 0; k < bs * 2 + 1; k++) { sb.Append('\\'); } sb.Append('"'); i++; }
+      else { for (int k = 0; k < bs; k++) { sb.Append('\\'); } sb.Append(a[i]); i++; }
+    }
+    sb.Append('"');
+  }
+
+  static IntPtr OpenOut(string path, ref SECURITY_ATTRIBUTES sa, uint disp, uint access) {
+    IntPtr h = CreateFile(path, access, FILE_SHARE_READ, ref sa, disp, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+    return h;
+  }
+
+  static int QueryActive(IntPtr job) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION acc = new JOBOBJECT_BASIC_ACCOUNTING_INFORMATION();
+    int size = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+    IntPtr p = Marshal.AllocHGlobal(size);
+    try {
+      Marshal.StructureToPtr(acc, p, false);
+      if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, p, (uint)size, IntPtr.Zero)) { return -1; }
+      acc = (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)Marshal.PtrToStructure(p, typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+      return (int)acc.ActiveProcesses;
+    } finally { Marshal.FreeHGlobal(p); }
+  }
+
+  public static Result Run(string exe, string[] args, string stdoutPath, string stderrPath, int timeoutMs) {
+    Result r = new Result();
+    r.Started = false; r.TimedOut = false; r.ClosureProven = false; r.ActiveAfterExit = 0; r.ExitCode = -1; r.Error = "";
+    IntPtr job = IntPtr.Zero, proc = IntPtr.Zero, thread = IntPtr.Zero;
+    IntPtr hOut = IntPtr.Zero, hErr = IntPtr.Zero, hIn = IntPtr.Zero;
+    try {
+      SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
+      sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+      sa.lpSecurityDescriptor = IntPtr.Zero;
+      sa.bInheritHandle = true;
+      hOut = OpenOut(stdoutPath, ref sa, CREATE_ALWAYS, GENERIC_WRITE);
+      if (hOut == INVALID_HANDLE || hOut == IntPtr.Zero) { r.Error = Err("open stdout file"); return r; }
+      hErr = OpenOut(stderrPath, ref sa, CREATE_ALWAYS, GENERIC_WRITE);
+      if (hErr == INVALID_HANDLE || hErr == IntPtr.Zero) { r.Error = Err("open stderr file"); return r; }
+      hIn = OpenOut("NUL", ref sa, OPEN_EXISTING, GENERIC_READ);
+      if (hIn == INVALID_HANDLE || hIn == IntPtr.Zero) { r.Error = Err("open NUL"); return r; }
+      job = CreateJobObject(IntPtr.Zero, null);
+      if (job == IntPtr.Zero) { r.Error = Err("CreateJobObject"); return r; }
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+      li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      int liSize = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+      IntPtr lp = Marshal.AllocHGlobal(liSize);
+      bool setOk;
+      try { Marshal.StructureToPtr(li, lp, false); setOk = SetInformationJobObject(job, JobObjectExtendedLimitInformation, lp, (uint)liSize); }
+      finally { Marshal.FreeHGlobal(lp); }
+      if (!setOk) { r.Error = Err("SetInformationJobObject"); return r; }
+      STARTUPINFO si = new STARTUPINFO();
+      si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+      si.dwFlags = (int)STARTF_USESTDHANDLES;
+      si.hStdInput = hIn; si.hStdOutput = hOut; si.hStdError = hErr;
+      string cmd = Quote(exe, args);
+      StringBuilder cmdBuf = new StringBuilder(cmd, cmd.Length + 1);
+      PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+      bool created = CreateProcess(null, cmdBuf, IntPtr.Zero, IntPtr.Zero, true,
+        CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+        IntPtr.Zero, null, ref si, out pi);
+      if (!created) { r.Error = Err("CreateProcess"); return r; }
+      r.Started = true;
+      proc = pi.hProcess; thread = pi.hThread;
+      if (!AssignProcessToJobObject(job, proc)) {
+        TerminateProcess(proc, 1);
+        WaitForSingleObject(proc, 5000);
+        r.ClosureProven = (WaitForSingleObject(proc, 0) == 0);
+        r.Error = Err("AssignProcessToJobObject");
+        return r;
+      }
+      ResumeThread(thread);
+      CloseHandle(thread); thread = IntPtr.Zero;
+      uint w = WaitForSingleObject(proc, (uint)timeoutMs);
+      if (w == WAIT_TIMEOUT) {
+        r.TimedOut = true;
+        TerminateJobObject(job, 1);
+        WaitForSingleObject(proc, 5000);
+      } else if (w != 0) {
+        r.Error = Err("WaitForSingleObject");
+        TerminateJobObject(job, 1);
+        WaitForSingleObject(proc, 5000);
+      }
+      int active = QueryActive(job);
+      r.ActiveAfterExit = active < 0 ? -1 : active;
+      if (active != 0) {
+        TerminateJobObject(job, 1);
+        for (int i = 0; i < 50; i++) {
+          active = QueryActive(job);
+          if (active == 0) { break; }
+          if (active < 0) { break; }
+          System.Threading.Thread.Sleep(100);
+        }
+      }
+      r.ClosureProven = (active == 0);
+      if (!r.TimedOut && r.Error.Length == 0) {
+        uint code;
+        if (GetExitCodeProcess(proc, out code)) { r.ExitCode = (int)code; }
+      }
+      return r;
+    } finally {
+      if (thread != IntPtr.Zero) { CloseHandle(thread); }
+      if (proc != IntPtr.Zero) { CloseHandle(proc); }
+      if (job != IntPtr.Zero) { CloseHandle(job); }
+      if (hIn != IntPtr.Zero && hIn != INVALID_HANDLE) { CloseHandle(hIn); }
+      if (hOut != IntPtr.Zero && hOut != INVALID_HANDLE) { CloseHandle(hOut); }
+      if (hErr != IntPtr.Zero && hErr != INVALID_HANDLE) { CloseHandle(hErr); }
+    }
+  }
+}
+'@
+# GW-CS-END
 
 # ---------- pure, testable helpers (no side effects; delegates injectable) ----------
 function ConvertTo-NormalizedVersion {
@@ -76,88 +299,79 @@ function ConvertTo-ProbeResult {
   if($t -eq 'CORRUPT'){ return [pscustomobject]@{state='corrupt';deviceId=''} }
   return [pscustomobject]@{state='error';deviceId=''}
 }
-function Stop-ProcessTreeVerified {
-  # Kills the whole tree rooted at RootPid (children before root), then VERIFIES every pid is
-  # gone. Returns $true only when the tree is provably dead. Delegates are injectable for tests.
-  param(
-    [Parameter(Mandatory=$true)][int]$RootPid,
-    [scriptblock]$GetChildren=$null,
-    [scriptblock]$KillPid=$null,
-    [scriptblock]$PidAlive=$null
-  )
-  if($null -eq $GetChildren){ $GetChildren={ param($ppid) @(Get-CimInstance Win32_Process -Filter ('ParentProcessId='+$ppid) -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.ProcessId }) } }
-  if($null -eq $KillPid){ $KillPid={ param($pid2) try{ Stop-Process -Id $pid2 -Force -ErrorAction Stop }catch{} } }
-  if($null -eq $PidAlive){ $PidAlive={ param($pid2) try{ $null=Get-Process -Id $pid2 -ErrorAction Stop; $true }catch{ $false } } }
-  $stack=New-Object System.Collections.ArrayList
-  $all=New-Object System.Collections.ArrayList
-  [void]$stack.Add($RootPid)
-  $guard=0
-  while($stack.Count -gt 0 -and $guard -lt 128){
-    $guard++
-    $cur=[int]$stack[$stack.Count-1]; $stack.RemoveAt($stack.Count-1)
-    if($all.Contains($cur)){ continue }
-    [void]$all.Add($cur)
-    foreach($ch in @(& $GetChildren $cur)){ [void]$stack.Add([int]$ch) }
+function Test-ClosureProven {
+  # The staging dir may be removed only when EVERY started run ended with verified job
+  # emptiness. A run that never started left nothing behind. Anything else: preserve.
+  param($Runs)
+  foreach($r in @($Runs)){ if($r.started -and -not $r.treeCleaned){ return $false } }
+  return $true
+}
+function Get-RunAssessment {
+  # '' when the run's output is usable, else the rejection reason. Every adversarial
+  # outcome is rejected explicitly: launcher API failure, never started, timeout
+  # (contained or unverifiable), nonzero exit, and a natural exit that left surviving
+  # descendants in the job (they inherited the capture files - possible contamination).
+  param($Run,[string]$Label)
+  if([string]$Run.apiError){ return ('bounded launcher failed for '+$Label+': '+[string]$Run.apiError) }
+  if(-not $Run.started){ return ($Label+' could not be started') }
+  if($Run.timedOut){
+    if($Run.treeCleaned){ return ($Label+' timed out - the whole job was terminated and verified empty; rejected') }
+    return ($Label+' timed out and job emptiness could NOT be verified - rejected; staging preserved, check Task Manager')
   }
-  # kill children first: $all is in discovery order, root first - reverse it
-  for($i=$all.Count-1;$i -ge 0;$i--){ & $KillPid ([int]$all[$i]) }
-  $deadline=[DateTime]::UtcNow.AddSeconds(5)
-  do{
-    $anyAlive=$false
-    foreach($p2 in $all){ if(& $PidAlive ([int]$p2)){ $anyAlive=$true; break } }
-    if(-not $anyAlive){ return $true }
-    Start-Sleep -Milliseconds 150
-  }while([DateTime]::UtcNow -lt $deadline)
-  return $false
+  if($Run.exitCode -ne 0){ return ($Label+' exited with code '+$Run.exitCode+' - rejected') }
+  if($Run.activeAfterExit -ne 0){ return ($Label+' exited but left active descendants in its job (capture may be contaminated) - rejected; descendants were terminated inside the job') }
+  return ''
+}
+function Invoke-WithChildEnv {
+  # Temporarily applies per-child env overrides to THIS process (CreateProcess copies the
+  # parent env at creation time), invokes Body, then restores every touched variable -
+  # including on exceptions. The child sees exactly the intended env; the parent is restored.
+  param([hashtable]$EnvRemove,[hashtable]$EnvSet,[scriptblock]$Body)
+  $saved=@{}
+  foreach($k in (@($EnvRemove.Keys)+@($EnvSet.Keys))){ $saved[$k]=[Environment]::GetEnvironmentVariable($k,'Process') }
+  try{
+    foreach($k in $EnvRemove.Keys){ Remove-Item -LiteralPath ('Env:'+$k) -ErrorAction SilentlyContinue }
+    foreach($k in $EnvSet.Keys){ [Environment]::SetEnvironmentVariable($k,[string]$EnvSet[$k],'Process') }
+    & $Body
+  }finally{
+    foreach($k in $saved.Keys){
+      if($null -eq $saved[$k]){ Remove-Item -LiteralPath ('Env:'+$k) -ErrorAction SilentlyContinue }
+      else{ [Environment]::SetEnvironmentVariable($k,[string]$saved[$k],'Process') }
+    }
+  }
 }
 function Invoke-BoundedProcess {
-  # Shared bounded-launch contract: direct Process on the exact exe, per-child env, separate
-  # stdout/stderr pipes, bounded wait, tree-kill + verified cleanup on timeout, exit code
-  # captured on natural exit. Launcher/GetChildren/KillPid/PidAlive are injectable for tests.
+  # Shared bounded-launch contract: the child runs inside a dedicated kill-on-close Job
+  # Object (created suspended, assigned, resumed - via GwBounded, compiled locally).
+  # Output goes to FILES, never pipes, and is read only after the run returns, so reads
+  # are bounded by construction. Runner is injectable for deterministic tests.
   param(
     [Parameter(Mandatory=$true)][string]$ExePath,
     [string[]]$Arguments=@(),
+    [Parameter(Mandatory=$true)][string]$OutDir,
     [hashtable]$EnvRemove=@{},
     [hashtable]$EnvSet=@{},
     [int]$TimeoutMs=20000,
-    [scriptblock]$Launcher=$null,
-    [scriptblock]$GetChildren=$null,
-    [scriptblock]$KillPid=$null,
-    [scriptblock]$PidAlive=$null
+    [scriptblock]$Runner=$null
   )
-  $psi=New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName=$ExePath
-  foreach($a in $Arguments){ [void]$psi.ArgumentList.Add($a) }
-  $psi.UseShellExecute=$false
-  $psi.RedirectStandardOutput=$true
-  $psi.RedirectStandardError=$true
-  $psi.CreateNoWindow=$true
-  foreach($k in $EnvRemove.Keys){ if($psi.EnvironmentVariables.ContainsKey($k)){ $psi.EnvironmentVariables.Remove($k) } }
-  foreach($k in $EnvSet.Keys){ $psi.EnvironmentVariables[$k]=[string]$EnvSet[$k] }
-  $p=$null; $pid2=0
-  if($null -ne $Launcher){ $p=& $Launcher $psi } else { $p=[System.Diagnostics.Process]::Start($psi) }
-  if($null -ne $p){ try{ $pid2=[int]$p.Id }catch{ $pid2=0 } }
-  if($null -eq $p){ return [pscustomobject]@{started=$false;exitCode=$null;stdout='';stderr='';timedOut=$false;treeCleaned=$true} }
-  $so=$null; $se=$null
-  try{ $so=$p.StandardOutput.ReadToEndAsync() }catch{ $so=$null }
-  try{ $se=$p.StandardError.ReadToEndAsync() }catch{ $se=$null }
-  $exited=$false
-  try{ $exited=$p.WaitForExit($TimeoutMs) }catch{ $exited=$false }
-  $out=''; $err=''
-  if(-not $exited){
-    $cleaned=$false
-    if($pid2 -gt 0){ $cleaned=Stop-ProcessTreeVerified -RootPid $pid2 -GetChildren $GetChildren -KillPid $KillPid -PidAlive $PidAlive }
-    else{ try{ $p.Kill() }catch{}; $cleaned=$true }
-    # collect pipes only AFTER the tree is dead - reading before the kill could block forever
-    if($null -ne $so){ try{ $out=[string]$so.GetAwaiter().GetResult() }catch{ $out='' } }
-    if($null -ne $se){ try{ $err=[string]$se.GetAwaiter().GetResult() }catch{ $err='' } }
-    return [pscustomobject]@{started=$true;exitCode=$null;stdout=$out;stderr=$err;timedOut=$true;treeCleaned=$cleaned}
+  $outPath=Join-Path $OutDir ('stdout-'+[guid]::NewGuid().ToString('N')+'.txt')
+  $errPath=Join-Path $OutDir ('stderr-'+[guid]::NewGuid().ToString('N')+'.txt')
+  $res=$null
+  if($null -ne $Runner){
+    $res=& $Runner $ExePath $Arguments $outPath $errPath $TimeoutMs
+  }else{
+    try{
+      $res=Invoke-WithChildEnv -EnvRemove $EnvRemove -EnvSet $EnvSet -Body {
+        $r=[GwBounded]::Run($ExePath,[string[]]$Arguments,$outPath,$errPath,$TimeoutMs)
+        [pscustomobject]@{started=[bool]$r.Started;timedOut=[bool]$r.TimedOut;treeCleaned=[bool]$r.ClosureProven;activeAfterExit=[int]$r.ActiveAfterExit;exitCode=[int]$r.ExitCode;apiError=[string]$r.Error}
+      }.GetNewClosure()
+    }catch{
+      $res=[pscustomobject]@{started=$false;timedOut=$false;treeCleaned=$false;activeAfterExit=-1;exitCode=$null;apiError=('launcher exception: '+$_.Exception.Message)}
+    }
   }
-  if($null -ne $so){ try{ $out=[string]$so.GetAwaiter().GetResult() }catch{ $out='' } }
-  if($null -ne $se){ try{ $err=[string]$se.GetAwaiter().GetResult() }catch{ $err='' } }
-  $code=$null
-  try{ $code=[int]$p.ExitCode }catch{ $code=$null }
-  return [pscustomobject]@{started=$true;exitCode=$code;stdout=$out;stderr=$err;timedOut=$false;treeCleaned=$true}
+  $out=''; if(Test-Path -LiteralPath $outPath){ try{ $out=[System.IO.File]::ReadAllText($outPath) }catch{ $out='' } }
+  $err=''; if(Test-Path -LiteralPath $errPath){ try{ $err=[System.IO.File]::ReadAllText($errPath) }catch{ $err='' } }
+  return [pscustomobject]@{started=[bool]$res.started;timedOut=[bool]$res.timedOut;treeCleaned=[bool]$res.treeCleaned;activeAfterExit=[int]$res.activeAfterExit;exitCode=$res.exitCode;stdout=$out;stderr=$err;apiError=[string]$res.apiError}
 }
 # ---------- main flow ----------
 $ErrorActionPreference='Stop'
@@ -171,22 +385,26 @@ $stage=Join-Path $env:TEMP ('gw-precheck-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 $probe=Join-Path $stage 'probe.js'
 $verdict='UNKNOWN'; $finding='not_checked'; $reasons=@(); $devId=''
+$runs=@()
 try{
   Say '== GlassWidgets enroll precheck (diagnostic only) =='
-  # pre-existing app instances: snapshot BEFORE any launch; re-verified alive at the end.
-  # Our evidence launch is a DIFFERENT process tree and is the only tree we may ever kill.
-  $prePids=@(Get-Process -Name 'GlassWidgets' -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
-  if($prePids.Count -gt 0){ Say ('note: an app instance is already running (pids '+($prePids -join ',')+') - it is a separate tree and will NOT be touched') }
-  $treeTouched=$false
+  Say 'containment: every launch runs inside its own kill-on-close Windows Job Object; only that job can ever be terminated - an already-running app is in a different job and cannot be touched.'
   $gateOk=$false
   if(-not (Test-Path $appExe)){ $reasons+='installed exe not found at '+$appExe }
   else{
     $vi=(Get-Item $appExe).VersionInfo
     $verText=[string]$vi.ProductVersion; if([string]::IsNullOrWhiteSpace($verText)){ $verText=[string]$vi.FileVersion }
     Say ('app version: '+$verText)
+    $compiled=$false
+    if([type]::GetType('GwBounded')){ $compiled=$true }
+    else{
+      try{ Add-Type -TypeDefinition $gwCs -ErrorAction Stop; $compiled=$true }
+      catch{ $reasons+='cannot prepare the bounded launcher (local compile failed, no downloads attempted): '+$_.Exception.Message }
+    }
     $vg=Test-VersionGate -VerText $verText -ExpectedVersion $ExpectedVersion
     $asar=Join-Path $appHome 'resources\app.asar'
-    if($vg){ $reasons+=$vg }
+    if(-not $compiled){ }
+    elseif($vg){ $reasons+=$vg }
     elseif(-not $AsarSha256){ $reasons+='no -AsarSha256 pin supplied - the reviewed build hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
     elseif(-not $ExeSha256){ $reasons+='no -ExeSha256 pin supplied - an asar pin cannot identify a REPLACED exe; the reviewed packaged exe hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
     elseif(-not (Test-Path $asar)){ $reasons+='packed app.asar not found at '+$asar+' - unknown build, not launched' }
@@ -208,14 +426,10 @@ try{
   $rt=$null
   if($gateOk){
     $nonce=[guid]::NewGuid().ToString('N')
-    $ev=Invoke-BoundedProcess -ExePath $appExe -Arguments @('--gw-runtime-paths-json',$nonce) -EnvRemove @{ELECTRON_RUN_AS_NODE=1} -TimeoutMs 20000
-    if($ev.timedOut){ $treeTouched=$true }
-    if(-not $ev.started){ $reasons+='evidence mode could not be started' }
-    elseif($ev.timedOut){
-      if($ev.treeCleaned){ $reasons+='evidence mode timed out after 20s - process tree killed and verified gone; evidence rejected' }
-      else{ $reasons+='evidence mode timed out after 20s and the process tree could NOT be verified dead - evidence rejected; check running processes' }
-    }
-    elseif($ev.exitCode -ne 0){ $reasons+='evidence mode exited with code '+$ev.exitCode+' - rejected' }
+    $ev=Invoke-BoundedProcess -ExePath $appExe -Arguments @('--gw-runtime-paths-json',$nonce) -OutDir $stage -EnvRemove @{ELECTRON_RUN_AS_NODE=1} -TimeoutMs 20000
+    $runs+=$ev
+    $ra=Get-RunAssessment -Run $ev -Label 'evidence mode (20s bound)'
+    if($ra){ $reasons+=$ra }
     else{
       $nowMs=[DateTimeOffset]::Now.ToUnixTimeMilliseconds()
       $pr=ConvertTo-RuntimeEvidence -Raw $ev.stdout -Nonce $nonce -ExpectedVersion $ExpectedVersion -AppExe $appExe -NowMs $nowMs
@@ -230,7 +444,6 @@ try{
   if($rt){
     $devDir=Join-Path ([string]$rt.userData) 'device'
     $devFile=Join-Path $devDir 'device.json'
-    # strict presence: only "not found" is absence; any other failure is unreadable
     $present=$false; $unreadable=$false
     try{ $null=Get-Item -LiteralPath $devFile -Force -ErrorAction Stop; $present=$true }
     catch [System.Management.Automation.ItemNotFoundException]{ $present=$false }
@@ -268,9 +481,9 @@ try{
       $aclD=Test-OwnerOnly $devDir $true
       if($aclF){ $reasons+=('file ACL: '+$aclF) }
       if($aclD){ $reasons+=('dir ACL: '+$aclD) }
-      # content health via the app's OWN runtime (same node as the app, no downloads) -
-      # SAME bounded contract: direct process, ELECTRON_RUN_AS_NODE=1 for THIS child only,
-      # separate pipes, 10s bound, exit code 0 AND an exact known output line.
+      # content health via the app's OWN runtime - SAME containment contract: job-scoped
+      # launch, ELECTRON_RUN_AS_NODE=1 for THIS child only, 10s bound, exit 0, zero active
+      # processes left in the job, and an exact known output line.
       $contentOk=$false
       $js=@'
 const fs=require('fs'),crypto=require('crypto');
@@ -283,14 +496,10 @@ try{
 }catch(e){console.log('CORRUPT');}
 '@
       Set-Content -Path $probe -Value $js -Encoding ASCII
-      $pv=Invoke-BoundedProcess -ExePath $appExe -Arguments @($probe,$devFile) -EnvSet @{ELECTRON_RUN_AS_NODE='1'} -TimeoutMs 10000
-      if($pv.timedOut){ $treeTouched=$true }
-      if(-not $pv.started){ $reasons+='content probe could not be started' }
-      elseif($pv.timedOut){
-        if($pv.treeCleaned){ $reasons+='content probe timed out after 10s - process tree killed and verified gone' }
-        else{ $reasons+='content probe timed out after 10s and the process tree could NOT be verified dead - check running processes' }
-      }
-      elseif($pv.exitCode -ne 0){ $reasons+='content probe exited with code '+$pv.exitCode+' - rejected' }
+      $pv=Invoke-BoundedProcess -ExePath $appExe -Arguments @($probe,$devFile) -OutDir $stage -EnvSet @{ELECTRON_RUN_AS_NODE='1'} -TimeoutMs 10000
+      $runs+=$pv
+      $ra2=Get-RunAssessment -Run $pv -Label 'content probe (10s bound)'
+      if($ra2){ $reasons+=$ra2 }
       else{
         $cpr=ConvertTo-ProbeResult -Raw $pv.stdout
         if($cpr.state -eq 'ok'){ $contentOk=$true; $devId=$cpr.deviceId }
@@ -300,13 +509,6 @@ try{
       }
       if($contentOk -and -not $aclF -and -not $aclD){ $finding='healthy' }
       else{ $finding='unhealthy' }
-    }
-  }
-  # pre-existing instances must be untouched
-  if($prePids.Count -gt 0){
-    foreach($pp in $prePids){
-      $alive=$false; try{ $null=Get-Process -Id $pp -ErrorAction Stop; $alive=$true }catch{ $alive=$false }
-      if(-not $alive){ $reasons+='a pre-existing app instance (pid '+$pp+') is no longer running after the precheck - this should NOT happen; report it' }
     }
   }
   Say ''
@@ -320,7 +522,13 @@ try{
   Say ('FAIL: '+$_.Exception.Message)
   Say 'Send this whole output back.'
 }finally{
-  if($stage -and (Test-Path -LiteralPath $stage)){ Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+  if($stage -and (Test-Path -LiteralPath $stage)){
+    if(Test-ClosureProven $runs){
+      Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }else{
+      Say ('STAGING PRESERVED at '+$stage+' - process containment closure was NOT proven; do not delete manually before checking Task Manager for leftover processes, and report this line back.')
+    }
+  }
   try{ Stop-Transcript | Out-Null }catch{}
   Read-Host 'Press Enter to close'
 }
