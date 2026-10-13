@@ -16,18 +16,45 @@ function Say($m){ Write-Host $m }
 $d=[Environment]::GetFolderPath('Desktop')
 try{ Start-Transcript -Path (Join-Path $d 'enroll-precheck-log.txt') -Force | Out-Null }catch{}
 $appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
-$devDir=Join-Path $env:APPDATA 'GlassWidgets\device' # the real userData path: %APPDATA%\<productName GlassWidgets>\device
-$devFile=Join-Path $devDir 'device.json'
+# the userData root is NOT assumed from package.json - it is proven from RUNTIME ARTIFACTS below
+# (Electron decides the name in the packed runtime; a wrong guess could read ABSENT over a real
+# identity elsewhere). Until a root with app artifacts is found, the verdict is UNKNOWN.
+$devDir=$null
 $probe=Join-Path $env:TEMP 'gw-precheck-probe.js'
 $probeOut=Join-Path $env:TEMP 'gw-precheck-out.txt'
 $verdict='UNKNOWN'; $reasons=@()
 try{
-  Say '== GlassWidgets enroll precheck (read-only) =='
+  Say '== GlassWidgets enroll precheck =='
   if(Test-Path $appExe){
     $vi=(Get-Item $appExe).VersionInfo
     Say ('app version: '+$vi.ProductVersion)
   }else{ $reasons+='installed exe not found at '+$appExe }
-  # 1. strict presence: only "not found" counts as absent; any other failure is UNREADABLE
+  # 0. PROVE the userData root from runtime artifacts (never from a guessed name). A root counts
+  # only if it contains something the packed app actually writes (Electron dirs or app files).
+  # Zero proven roots OR more than one => UNKNOWN - never ABSENT, never a mint permit.
+  $artifactNames=@('config.json','agent-audit.log','device','pairing-pending','GPUCache','Local Storage','Session Storage','Cookies','outbox')
+  $proven=@()
+  $cands=@(Get-ChildItem -LiteralPath $env:APPDATA -Directory -ErrorAction SilentlyContinue | Where-Object {$_.Name -like '*glasswidget*'})
+  foreach($c in $cands){
+    foreach($a in $artifactNames){ if(Test-Path -LiteralPath (Join-Path $c.FullName $a)){ $proven+=$c.FullName; break } }
+  }
+  if($proven.Count -gt 1){
+    $verdict='UNKNOWN'; $reasons+='more than one userData root with app artifacts exists ('+($proven -join ', ')+') - the real identity root is ambiguous'
+    Say ''; Say ('VERDICT: '+$verdict)
+    foreach($r in $reasons){ Say ('  - '+$r) }
+    Say ''; Say 'meaning: DO NOT send an enroll - the identity root is unproven. Send this output back.'
+    throw 'STOP-AFTER-VERDICT'
+  }
+  if($proven.Count -eq 0){
+    $verdict='UNKNOWN'; $reasons+='no userData root with app artifacts found under %APPDATA% matching *glasswidget* - the runtime identity root is unproven (app may never have run, or uses another name)'
+    Say ''; Say ('VERDICT: '+$verdict)
+    foreach($r in $reasons){ Say ('  - '+$r) }
+    Say ''; Say 'meaning: DO NOT send an enroll - the identity root is unproven. Send this output back.'
+    throw 'STOP-AFTER-VERDICT'
+  }
+  $devDir=Join-Path $proven[0] 'device'
+  Say ('userData root (proven by runtime artifacts): '+$proven[0])
+    # 1. strict presence: only "not found" counts as absent; any other failure is UNREADABLE
   $present=$false; $unreadable=$false
   try{ $null=Get-Item -LiteralPath $devFile -Force -ErrorAction Stop; $present=$true }
   catch [System.Management.Automation.ItemNotFoundException]{ $present=$false }
@@ -108,8 +135,10 @@ try{
   Say ''
   Say 'This script changed nothing. Send this output back (and enroll-precheck-log.txt from the Desktop).'
 }catch{
-  Say ('FAIL: '+$_.Exception.Message)
-  Say 'Send this whole output back.'
+  if($_.Exception.Message -ne 'STOP-AFTER-VERDICT'){
+    Say ('FAIL: '+$_.Exception.Message)
+    Say 'Send this whole output back.'
+  }
 }finally{
   Remove-Item $probe -Force -ErrorAction SilentlyContinue
   Remove-Item $probeOut -Force -ErrorAction SilentlyContinue
