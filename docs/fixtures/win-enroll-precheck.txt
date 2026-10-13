@@ -1,147 +1,278 @@
-# win-enroll-precheck.txt - run on the user's PC (regular PowerShell, no admin needed)
+﻿# win-enroll-precheck.txt - run on the user's PC (regular PowerShell, no admin needed)
 # DIAGNOSTIC ONLY. This script gathers evidence and findings; it draws NO enroll conclusions,
 # issues NO permits, and changes NO app identity or settings. It writes a Desktop transcript
-# (enroll-precheck-log.txt) and a unique GUID temp staging dir (removed at the end). Launching
-# the app's evidence mode may cause Electron's own cache/log writes - zero writes is NOT claimed.
+# (enroll-precheck-log.txt) and a unique GUID temp staging dir (removed at the end, and only
+# after process-tree cleanup is verified). Launching the app's evidence mode may cause
+# Electron's own cache/log writes - zero writes is NOT claimed.
 #
-# What it does:
-#   0. Gates on the EXACT reviewed build: -AsarSha256 (sha256 of resources\app.asar) AND
-#      -ExpectedVersion (the reviewed package.json version string) are BOTH REQUIRED - without
-#      either, or on any mismatch, nothing is launched. Launch is timeout-bounded, exit-code
-#      checked, env-scrubbed, and accepts exactly one valid JSON record.
-#   1. Runs the installed app's --gw-runtime-paths-json <nonce> mode (0.4.64+) - the SINGLE
-#      agreed way to learn the packed runtime's OWN userData root. The nonce, isPackaged, exe
-#      path and version are verified; a mismatch means the evidence is rejected.
-#   2. Reports FILE_FINDING for device.json at the returned root: healthy / absent / unhealthy /
-#      unreadable / not_checked. On an older app without the mode, or on any evidence failure,
-#      VERDICT stays UNKNOWN and the file is NOT checked against any guessed root.
+# PRE-LAUNCH GATE (ALL must pass before ANY invocation; otherwise UNKNOWN, nothing runs):
+#   - -AsarSha256, -ExeSha256 AND -ExpectedVersion are ALL REQUIRED. The exe pin matters
+#     because an asar pin alone cannot identify a REPLACED exe. Values are injected at
+#     handoff from the REVIEWED build only - never derived from source.
+#   - Installed exe version must equal the reviewed version after PE normalization
+#     (a 4-part PE FileVersion like 0.4.64.0 normalizes to 0.4.64; prerelease is kept).
+#   - GlassWidgets.exe sha256 == -ExeSha256 AND resources\app.asar sha256 == -AsarSha256.
+#   - The mode's build marker must be present in the pinned asar (supporting check only).
+#
+# LAUNCH CONTRACT (evidence mode AND content probe share it):
+#   - Direct System.Diagnostics.Process on the exact exe (no cmd wrapper, so Kill reaches
+#     the real process). Per-child environment: ELECTRON_RUN_AS_NODE is REMOVED for the
+#     evidence launch and set to 1 ONLY for the probe child. Separate stdout/stderr pipes.
+#   - Bounded wait (evidence 20s, probe 10s). On timeout the WHOLE process tree rooted at
+#     our spawned pid is killed and verified gone (children first, root last). A pre-existing
+#     running app instance is a DIFFERENT tree and is never touched; pre-existing pids are
+#     snapshotted before launch and re-verified alive afterwards.
+#   - Natural exit must be code 0. The whole trimmed stdout is parsed ONCE as exactly one
+#     JSON document: arrays, scalars, multiple documents, leading/trailing nonblank content
+#     and malformed JSON are all rejected. No line-skipping, no first-match.
 # ACL comparison mirrors the app's shared evaluator (src/lib/acl-check.js) exactly.
-param([string]$AsarSha256='',[string]$ExpectedVersion='') # BOTH required: sha256 of the reviewed build's resources\app.asar + the reviewed package.json version string
+param([string]$AsarSha256='',[string]$ExeSha256='',[string]$ExpectedVersion='')
+
+# ---------- pure, testable helpers (no side effects; delegates injectable) ----------
+function ConvertTo-NormalizedVersion {
+  param([AllowEmptyString()][string]$v)
+  $t=([string]$v).Trim()
+  $core=$t; $pre=''
+  $mi=[regex]::Match($t,'^([^-]+)(-.*)$')
+  if($mi.Success){ $core=$mi.Groups[1].Value; $pre=$mi.Groups[2].Value }
+  $parts=@($core.Split('.'))
+  while($parts.Count -gt 3 -and $parts[$parts.Count-1] -eq '0'){ $parts=$parts[0..($parts.Count-2)] }
+  return (($parts -join '.')+$pre)
+}
+function Test-VersionGate {
+  param([AllowEmptyString()][string]$VerText,[AllowEmptyString()][string]$ExpectedVersion)
+  if([string]::IsNullOrWhiteSpace($VerText)){ return 'cannot read the installed exe version - evidence unavailable' }
+  $a=ConvertTo-NormalizedVersion $VerText
+  $b=ConvertTo-NormalizedVersion $ExpectedVersion
+  if($a -cne $b){ return ('installed exe version ('+$VerText+', normalized '+$a+') is not exactly the reviewed version ('+$ExpectedVersion+') - not launched') }
+  return ''
+}
+function ConvertTo-RuntimeEvidence {
+  param([AllowNull()][AllowEmptyString()][string]$Raw,[string]$Nonce,[string]$ExpectedVersion,[string]$AppExe,[long]$NowMs)
+  $t=([string]$Raw).Trim()
+  if($t -eq ''){ return [pscustomobject]@{ok=$false;reason='empty capture - no JSON record at all';rt=$null} }
+  if($t.StartsWith('[')){ return [pscustomobject]@{ok=$false;reason='capture is a JSON array - exactly one object required';rt=$null} }
+  $rt=$null
+  try{ $rt=($t | ConvertFrom-Json -ErrorAction Stop) }catch{ return [pscustomobject]@{ok=$false;reason=('capture is not exactly one valid JSON document: '+$_.Exception.Message);rt=$null} }
+  if($null -eq $rt){ return [pscustomobject]@{ok=$false;reason='capture parsed to null';rt=$null} }
+  if($rt -is [array]){ return [pscustomobject]@{ok=$false;reason='capture is a JSON array - exactly one object required';rt=$null} }
+  if(-not ($rt -is [pscustomobject])){ return [pscustomobject]@{ok=$false;reason='capture is not a JSON object (scalar rejected)';rt=$null} }
+  if($rt.v -ne 1){ return [pscustomobject]@{ok=$false;reason='runtime-paths schema is not v1';rt=$null} }
+  if([string]$rt.nonce -cne $Nonce){ return [pscustomobject]@{ok=$false;reason='nonce mismatch - the capture is not from this run (stale or foreign)';rt=$null} }
+  if(-not ($rt.isPackaged -is [bool] -and $rt.isPackaged)){ return [pscustomobject]@{ok=$false;reason='isPackaged is not strictly boolean true - this is not the packed installed runtime';rt=$null} }
+  if([string]$rt.exe -ine $AppExe){ return [pscustomobject]@{ok=$false;reason=('the answering exe ('+[string]$rt.exe+') is not the installed exe ('+$AppExe+')');rt=$null} }
+  if([string]$rt.version -cne $ExpectedVersion.Trim()){ return [pscustomobject]@{ok=$false;reason=('runtime version ('+[string]$rt.version+') does not exactly match the reviewed package version ('+$ExpectedVersion.Trim()+')');rt=$null} }
+  if(-not ($rt.ts -is [long] -or $rt.ts -is [int] -or $rt.ts -is [double])){ return [pscustomobject]@{ok=$false;reason='runtime ts is not numeric';rt=$null} }
+  if([math]::Abs($NowMs-[int64]$rt.ts) -gt 60000){ return [pscustomobject]@{ok=$false;reason='runtime ts is not fresh (over 60s from now) - stale capture rejected';rt=$null} }
+  $ud=[string]$rt.userData
+  if([string]::IsNullOrWhiteSpace($ud) -or -not ($ud -match '^([A-Za-z]:[\\/]|\\\\)')){ return [pscustomobject]@{ok=$false;reason='runtime returned a missing or non-absolute userData';rt=$null} }
+  return [pscustomobject]@{ok=$true;reason='';rt=$rt}
+}
+function ConvertTo-ProbeResult {
+  param([AllowEmptyString()][string]$Raw)
+  $t=([string]$Raw).Trim()
+  if($t -cmatch '^OK ([0-9a-f]{16})$'){ return [pscustomobject]@{state='ok';deviceId=$Matches[1]} }
+  if($t -eq 'MISMATCH'){ return [pscustomobject]@{state='mismatch';deviceId=''} }
+  if($t -eq 'CORRUPT'){ return [pscustomobject]@{state='corrupt';deviceId=''} }
+  return [pscustomobject]@{state='error';deviceId=''}
+}
+function Stop-ProcessTreeVerified {
+  # Kills the whole tree rooted at RootPid (children before root), then VERIFIES every pid is
+  # gone. Returns $true only when the tree is provably dead. Delegates are injectable for tests.
+  param(
+    [Parameter(Mandatory=$true)][int]$RootPid,
+    [scriptblock]$GetChildren=$null,
+    [scriptblock]$KillPid=$null,
+    [scriptblock]$PidAlive=$null
+  )
+  if($null -eq $GetChildren){ $GetChildren={ param($ppid) @(Get-CimInstance Win32_Process -Filter ('ParentProcessId='+$ppid) -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.ProcessId }) } }
+  if($null -eq $KillPid){ $KillPid={ param($pid2) try{ Stop-Process -Id $pid2 -Force -ErrorAction Stop }catch{} } }
+  if($null -eq $PidAlive){ $PidAlive={ param($pid2) try{ $null=Get-Process -Id $pid2 -ErrorAction Stop; $true }catch{ $false } } }
+  $stack=New-Object System.Collections.ArrayList
+  $all=New-Object System.Collections.ArrayList
+  [void]$stack.Add($RootPid)
+  $guard=0
+  while($stack.Count -gt 0 -and $guard -lt 128){
+    $guard++
+    $cur=[int]$stack[$stack.Count-1]; $stack.RemoveAt($stack.Count-1)
+    if($all.Contains($cur)){ continue }
+    [void]$all.Add($cur)
+    foreach($ch in @(& $GetChildren $cur)){ [void]$stack.Add([int]$ch) }
+  }
+  # kill children first: $all is in discovery order, root first - reverse it
+  for($i=$all.Count-1;$i -ge 0;$i--){ & $KillPid ([int]$all[$i]) }
+  $deadline=[DateTime]::UtcNow.AddSeconds(5)
+  do{
+    $anyAlive=$false
+    foreach($p2 in $all){ if(& $PidAlive ([int]$p2)){ $anyAlive=$true; break } }
+    if(-not $anyAlive){ return $true }
+    Start-Sleep -Milliseconds 150
+  }while([DateTime]::UtcNow -lt $deadline)
+  return $false
+}
+function Invoke-BoundedProcess {
+  # Shared bounded-launch contract: direct Process on the exact exe, per-child env, separate
+  # stdout/stderr pipes, bounded wait, tree-kill + verified cleanup on timeout, exit code
+  # captured on natural exit. Launcher/GetChildren/KillPid/PidAlive are injectable for tests.
+  param(
+    [Parameter(Mandatory=$true)][string]$ExePath,
+    [string[]]$Arguments=@(),
+    [hashtable]$EnvRemove=@{},
+    [hashtable]$EnvSet=@{},
+    [int]$TimeoutMs=20000,
+    [scriptblock]$Launcher=$null,
+    [scriptblock]$GetChildren=$null,
+    [scriptblock]$KillPid=$null,
+    [scriptblock]$PidAlive=$null
+  )
+  $psi=New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName=$ExePath
+  foreach($a in $Arguments){ [void]$psi.ArgumentList.Add($a) }
+  $psi.UseShellExecute=$false
+  $psi.RedirectStandardOutput=$true
+  $psi.RedirectStandardError=$true
+  $psi.CreateNoWindow=$true
+  foreach($k in $EnvRemove.Keys){ if($psi.EnvironmentVariables.ContainsKey($k)){ $psi.EnvironmentVariables.Remove($k) } }
+  foreach($k in $EnvSet.Keys){ $psi.EnvironmentVariables[$k]=[string]$EnvSet[$k] }
+  $p=$null; $pid2=0
+  if($null -ne $Launcher){ $p=& $Launcher $psi } else { $p=[System.Diagnostics.Process]::Start($psi) }
+  if($null -ne $p){ try{ $pid2=[int]$p.Id }catch{ $pid2=0 } }
+  if($null -eq $p){ return [pscustomobject]@{started=$false;exitCode=$null;stdout='';stderr='';timedOut=$false;treeCleaned=$true} }
+  $so=$null; $se=$null
+  try{ $so=$p.StandardOutput.ReadToEndAsync() }catch{ $so=$null }
+  try{ $se=$p.StandardError.ReadToEndAsync() }catch{ $se=$null }
+  $exited=$false
+  try{ $exited=$p.WaitForExit($TimeoutMs) }catch{ $exited=$false }
+  $out=''; $err=''
+  if(-not $exited){
+    $cleaned=$false
+    if($pid2 -gt 0){ $cleaned=Stop-ProcessTreeVerified -RootPid $pid2 -GetChildren $GetChildren -KillPid $KillPid -PidAlive $PidAlive }
+    else{ try{ $p.Kill() }catch{}; $cleaned=$true }
+    # collect pipes only AFTER the tree is dead - reading before the kill could block forever
+    if($null -ne $so){ try{ $out=[string]$so.GetAwaiter().GetResult() }catch{ $out='' } }
+    if($null -ne $se){ try{ $err=[string]$se.GetAwaiter().GetResult() }catch{ $err='' } }
+    return [pscustomobject]@{started=$true;exitCode=$null;stdout=$out;stderr=$err;timedOut=$true;treeCleaned=$cleaned}
+  }
+  if($null -ne $so){ try{ $out=[string]$so.GetAwaiter().GetResult() }catch{ $out='' } }
+  if($null -ne $se){ try{ $err=[string]$se.GetAwaiter().GetResult() }catch{ $err='' } }
+  $code=$null
+  try{ $code=[int]$p.ExitCode }catch{ $code=$null }
+  return [pscustomobject]@{started=$true;exitCode=$code;stdout=$out;stderr=$err;timedOut=$false;treeCleaned=$true}
+}
+# ---------- main flow ----------
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 function Say($m){ Write-Host $m }
 $d=[Environment]::GetFolderPath('Desktop')
 try{ Start-Transcript -Path (Join-Path $d 'enroll-precheck-log.txt') -Force | Out-Null }catch{}
 $appExe=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets\GlassWidgets.exe'
+$appHome=Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets'
 $stage=Join-Path $env:TEMP ('gw-precheck-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 $probe=Join-Path $stage 'probe.js'
-$probeOut=Join-Path $stage 'out.txt'
-$cap=Join-Path $stage 'rt.json'
 $verdict='UNKNOWN'; $finding='not_checked'; $reasons=@(); $devId=''
 try{
   Say '== GlassWidgets enroll precheck (diagnostic only) =='
-  if(-not (Test-Path $appExe)){ throw ('installed exe not found at '+$appExe) }
-  $vi=(Get-Item $appExe).VersionInfo
-  $verText=[string]$vi.ProductVersion; if([string]::IsNullOrWhiteSpace($verText)){ $verText=[string]$vi.FileVersion }
-  Say ('app version: '+$verText)
-  $m=[regex]::Match($verText,'^(\d+)\.(\d+)\.(\d+)')
-  if(-not $m.Success){ $reasons+='cannot parse the installed version - evidence mode unavailable' }
+  # pre-existing app instances: snapshot BEFORE any launch; re-verified alive at the end.
+  # Our evidence launch is a DIFFERENT process tree and is the only tree we may ever kill.
+  $prePids=@(Get-Process -Name 'GlassWidgets' -ErrorAction SilentlyContinue | ForEach-Object { [int]$_.Id })
+  if($prePids.Count -gt 0){ Say ('note: an app instance is already running (pids '+($prePids -join ',')+') - it is a separate tree and will NOT be touched') }
+  $treeTouched=$false
+  $gateOk=$false
+  if(-not (Test-Path $appExe)){ $reasons+='installed exe not found at '+$appExe }
   else{
-    $verN=[int]$m.Groups[1].Value*1000000+[int]$m.Groups[2].Value*1000+[int]$m.Groups[3].Value
-    if($verN -lt 4064){ $reasons+='installed '+$verText+' has no runtime-evidence mode (needs 0.4.64+) - the userData root cannot be proven' }
+    $vi=(Get-Item $appExe).VersionInfo
+    $verText=[string]$vi.ProductVersion; if([string]::IsNullOrWhiteSpace($verText)){ $verText=[string]$vi.FileVersion }
+    Say ('app version: '+$verText)
+    $vg=Test-VersionGate -VerText $verText -ExpectedVersion $ExpectedVersion
+    $asar=Join-Path $appHome 'resources\app.asar'
+    if($vg){ $reasons+=$vg }
+    elseif(-not $AsarSha256){ $reasons+='no -AsarSha256 pin supplied - the reviewed build hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
+    elseif(-not $ExeSha256){ $reasons+='no -ExeSha256 pin supplied - an asar pin cannot identify a REPLACED exe; the reviewed packaged exe hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
+    elseif(-not (Test-Path $asar)){ $reasons+='packed app.asar not found at '+$asar+' - unknown build, not launched' }
     else{
-      # BUILD GATE (before ANY invocation): a version string does NOT prove the mode exists -
-      # earlier 0.4.64 candidates lacked it and would boot normally if launched. The packed
-      # resources\app.asar must (a) match the pinned hash when one is supplied, and (b) contain
-      # the mode's build marker. An unknown build is NEVER launched.
-      $asar=Join-Path (Join-Path $env:LOCALAPPDATA 'Programs\GlassWidgets') 'resources\app.asar'
-      $buildOk=$false
-      if(-not (Test-Path $asar)){ $reasons+='packed app.asar not found at '+$asar+' - unknown build, not launched' }
-      elseif(-not $AsarSha256){ $reasons+='no -AsarSha256 pin supplied - the exact reviewed build hash is REQUIRED before any launch; UNKNOWN, nothing was run' }
-      elseif(-not $ExpectedVersion){ $reasons+='no -ExpectedVersion supplied - the reviewed package version string is REQUIRED before any launch; UNKNOWN, nothing was run' }
+      $hx=(Get-FileHash -LiteralPath $appExe -Algorithm SHA256).Hash
+      $ha=(Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash
+      if($hx -ine $ExeSha256){ $reasons+='GlassWidgets.exe hash '+$hx+' does NOT match the pinned reviewed exe '+$ExeSha256+' - unknown build, not launched' }
+      elseif($ha -ine $AsarSha256){ $reasons+='app.asar hash '+$ha+' does NOT match the pinned reviewed asar '+$AsarSha256+' - unknown build, not launched' }
       else{
-        $h=(Get-FileHash -LiteralPath $asar -Algorithm SHA256).Hash
-        if($h -ine $AsarSha256){ $reasons+='app.asar hash '+$h+' does NOT match the pinned build '+$AsarSha256+' - unknown build, not launched' }
-        else{
-          Say ('build pinned: app.asar sha256 matches the reviewed build')
-          # additional check only: the marker is supporting evidence, never the gate
-          $marker='--gw-runtime-paths-json'
-          $bytes=[System.IO.File]::ReadAllBytes($asar)
-          $found=[System.Text.Encoding]::ASCII.GetString($bytes).IndexOf($marker) -ge 0
-          if(-not $found){ $reasons+='build marker '+$marker+' ABSENT in the pinned app.asar - NOT launched (inconsistent build)' }
-          else{ Say ('build marker present (supporting check): '+$marker); $buildOk=$true }
-        }
+        Say 'build pinned: exe AND app.asar sha256 match the reviewed build'
+        $marker='--gw-runtime-paths-json'
+        $bytes=[System.IO.File]::ReadAllBytes($asar)
+        $found=[System.Text.Encoding]::ASCII.GetString($bytes).IndexOf($marker) -ge 0
+        if(-not $found){ $reasons+='build marker '+$marker+' ABSENT in the pinned app.asar - NOT launched (inconsistent build)' }
+        else{ Say ('build marker present (supporting check): '+$marker); $gateOk=$true }
       }
-    if($buildOk){
-      # 1. runtime evidence: the packed app answers for itself, nonce-bound. Launch hygiene:
-      # ELECTRON_RUN_AS_NODE is explicitly scrubbed from the child env (an inherited value would
-      # turn the evidence launch into a plain Node), bounded 20s timeout, exit code checked.
-      $nonce=[guid]::NewGuid().ToString('N')
-      $capErr=Join-Path $stage 'rt-err.txt'
-      $proc=$null; $exitOk=$false
-      try{
-        $prevEap=$ErrorActionPreference; $ErrorActionPreference='Continue'
-        try{
-          $proc=Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c','set "ELECTRON_RUN_AS_NODE="& "'+$appExe+'" --gw-runtime-paths-json '+$nonce+' >"'+$cap+'" 2>"'+$capErr+'"') -WindowStyle Hidden -PassThru
-        }finally{ $ErrorActionPreference=$prevEap }
-        if(-not $proc.WaitForExit(20000)){ try{ $proc.Kill() }catch{}; $reasons+='evidence mode timed out after 20s - rejected' }
-        elseif($proc.ExitCode -ne 0){ $reasons+='evidence mode exited with code '+$proc.ExitCode+' - rejected' }
-        else{ $exitOk=$true }
-      }catch{ $reasons+='evidence launch failed: '+$_.Exception.Message }
-      # EXACTLY ONE valid JSON record in the whole capture (never "first matching line")
-      $raw=''; if(Test-Path $cap){ $raw=(Get-Content $cap -Raw).Trim() }
-      $jsonRecs=@()
-      foreach($ln in ($raw -split "`r?`n")){ $t=$ln.Trim(); if($t.StartsWith('{')){ $p=$null; try{ $p=$t | ConvertFrom-Json -EA Stop }catch{ $p=$null }; if($p){ $jsonRecs+=$p } } }
-      if(-not $exitOk){ }
-      elseif($jsonRecs.Count -ne 1){ $reasons+='expected exactly ONE valid JSON record in the capture, found '+$jsonRecs.Count+' - rejected' }
+    }
+  }
+  $rt=$null
+  if($gateOk){
+    $nonce=[guid]::NewGuid().ToString('N')
+    $ev=Invoke-BoundedProcess -ExePath $appExe -Arguments @('--gw-runtime-paths-json',$nonce) -EnvRemove @{ELECTRON_RUN_AS_NODE=1} -TimeoutMs 20000
+    if($ev.timedOut){ $treeTouched=$true }
+    if(-not $ev.started){ $reasons+='evidence mode could not be started' }
+    elseif($ev.timedOut){
+      if($ev.treeCleaned){ $reasons+='evidence mode timed out after 20s - process tree killed and verified gone; evidence rejected' }
+      else{ $reasons+='evidence mode timed out after 20s and the process tree could NOT be verified dead - evidence rejected; check running processes' }
+    }
+    elseif($ev.exitCode -ne 0){ $reasons+='evidence mode exited with code '+$ev.exitCode+' - rejected' }
+    else{
+      $nowMs=[DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+      $pr=ConvertTo-RuntimeEvidence -Raw $ev.stdout -Nonce $nonce -ExpectedVersion $ExpectedVersion -AppExe $appExe -NowMs $nowMs
+      if(-not $pr.ok){ $reasons+=$pr.reason }
       else{
-        $rt=$jsonRecs[0]
-        if($rt){
-          if($rt.v -ne 1){ $reasons+='runtime-paths schema is not v1' }
-          elseif([string]$rt.nonce -ne $nonce){ $reasons+='nonce mismatch - the capture is not from this run (stale or foreign)' }
-          elseif(-not ($rt.isPackaged -is [bool] -and $rt.isPackaged -eq $true)){ $reasons+='isPackaged is not strictly boolean true - this is not the packed installed runtime' }
-          elseif([string]$rt.exe -ine $appExe){ $reasons+='the answering exe ('+[string]$rt.exe+') is not the installed exe ('+$appExe+')' }
-          elseif([string]$rt.version -cne $ExpectedVersion.Trim()){ $reasons+='runtime version ('+[string]$rt.version+') does not exactly match the reviewed package version ('+$ExpectedVersion.Trim()+')' }
-          elseif(-not ($rt.ts -is [long] -or $rt.ts -is [int] -or $rt.ts -is [double])){ $reasons+='runtime ts is not numeric' }
-          elseif([math]::Abs(([DateTimeOffset]::Now.ToUnixTimeMilliseconds())-[int64]$rt.ts) -gt 60000){ $reasons+='runtime ts is not fresh (over 60s from now) - stale capture rejected' }
-          elseif([string]::IsNullOrWhiteSpace([string]$rt.userData) -or -not [System.IO.Path]::IsPathRooted([string]$rt.userData)){ $reasons+='runtime returned a missing or non-absolute userData' }
-          else{
-            $verdict='RUNTIME_EVIDENCE_OK'
-            Say ('runtime userData (answered by the app itself): '+[string]$rt.userData)
-            $devDir=Join-Path ([string]$rt.userData) 'device'
-            $devFile=Join-Path $devDir 'device.json'
-            # 2a. strict presence: only "not found" is absence; any other failure is unreadable
-            $present=$false; $unreadable=$false
-            try{ $null=Get-Item -LiteralPath $devFile -Force -ErrorAction Stop; $present=$true }
-            catch [System.Management.Automation.ItemNotFoundException]{ $present=$false }
-            catch [System.IO.DirectoryNotFoundException]{ $present=$false }
-            catch [System.IO.FileNotFoundException]{ $present=$false }
-            catch{ $unreadable=$true; $reasons+='cannot inspect device.json: '+$_.Exception.GetType().Name }
-            if($unreadable){ $finding='unreadable' }
-            elseif(-not $present){ $finding='absent'; if(Test-Path $devDir){ $reasons+='device directory exists but device.json does not' } }
-            else{
-              # 2b. ACL parity with src/lib/acl-check.js (evalAclDump): protected DACL, OWNER SID ==
-              # current user, EXACTLY ONE ACE (sid == current user, Allow, IsInherited === false,
-              # rights an integer in [0, 2032127]). Numeric, never string tests.
-              $mySid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-              function Test-OwnerOnly($p,$isDir){
-                try{
-                  $item=Get-Item -LiteralPath $p -Force
-                  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){ return 'path is a reparse point/symlink: '+$p }
-                  $a=Get-Acl -LiteralPath $p
-                  if($a.AreAccessRulesProtected -ne $true){ return 'DACL not protected (inheritance on): '+$p }
-                  $own=$null; try{ $own=([System.Security.Principal.NTAccount]$a.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $own=[string]$a.Owner }
-                  if($own -ne $mySid){ return 'owner SID is not the current user on '+$p+': '+$own }
-                  $rules=@($a.Access)
-                  if($rules.Count -ne 1){ return 'ACE count '+$rules.Count+' on '+$p+' (expected exactly 1)' }
-                  $r=$rules[0]
-                  $sid=$null; try{ $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $sid=[string]$r.IdentityReference }
-                  if($sid -ne $mySid){ return 'ACE SID is not the current user on '+$p+': '+$sid }
-                  if($r.AccessControlType -ne 'Allow'){ return 'ACE is not Allow on '+$p }
-                  if([bool]$r.IsInherited -ne $false){ return 'ACE is inherited on '+$p }
-                  $rights=[int64]$r.FileSystemRights
-                  if($rights -lt 0 -or $rights -gt 2032127){ return 'rights out of bounds on '+$p+': '+$rights }
-                  return ''
-                }catch{ return 'ACL evaluation failed on '+$p+': '+$_.Exception.Message }
-              }
-              $aclF=Test-OwnerOnly $devFile $false
-              $aclD=Test-OwnerOnly $devDir $true
-              if($aclF){ $reasons+=('file ACL: '+$aclF) }
-              if($aclD){ $reasons+=('dir ACL: '+$aclD) }
-              # 2c. content health via the app's OWN runtime (same node as the app, no downloads)
-              $contentOk=$false
-              $js=@'
+        $rt=$pr.rt
+        $verdict='RUNTIME_EVIDENCE_OK'
+        Say ('runtime userData (answered by the app itself): '+[string]$rt.userData)
+      }
+    }
+  }
+  if($rt){
+    $devDir=Join-Path ([string]$rt.userData) 'device'
+    $devFile=Join-Path $devDir 'device.json'
+    # strict presence: only "not found" is absence; any other failure is unreadable
+    $present=$false; $unreadable=$false
+    try{ $null=Get-Item -LiteralPath $devFile -Force -ErrorAction Stop; $present=$true }
+    catch [System.Management.Automation.ItemNotFoundException]{ $present=$false }
+    catch [System.IO.DirectoryNotFoundException]{ $present=$false }
+    catch [System.IO.FileNotFoundException]{ $present=$false }
+    catch{ $unreadable=$true; $reasons+='cannot inspect device.json: '+$_.Exception.GetType().Name }
+    if($unreadable){ $finding='unreadable' }
+    elseif(-not $present){ $finding='absent'; if(Test-Path $devDir){ $reasons+='device directory exists but device.json does not' } }
+    else{
+      # ACL parity with src/lib/acl-check.js (evalAclDump): protected DACL, OWNER SID ==
+      # current user, EXACTLY ONE ACE (sid == current user, Allow, IsInherited === false,
+      # rights an integer in [0, 2032127]). Numeric, never string tests.
+      $mySid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+      function Test-OwnerOnly($p,$isDir){
+        try{
+          $item=Get-Item -LiteralPath $p -Force
+          if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){ return 'path is a reparse point/symlink: '+$p }
+          $a=Get-Acl -LiteralPath $p
+          if($a.AreAccessRulesProtected -ne $true){ return 'DACL not protected (inheritance on): '+$p }
+          $own=$null; try{ $own=([System.Security.Principal.NTAccount]$a.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $own=[string]$a.Owner }
+          if($own -ne $mySid){ return 'owner SID is not the current user on '+$p+': '+$own }
+          $rules=@($a.Access)
+          if($rules.Count -ne 1){ return 'ACE count '+$rules.Count+' on '+$p+' (expected exactly 1)' }
+          $r=$rules[0]
+          $sid=$null; try{ $sid=$r.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }catch{ $sid=[string]$r.IdentityReference }
+          if($sid -ne $mySid){ return 'ACE SID is not the current user on '+$p+': '+$sid }
+          if($r.AccessControlType -ne 'Allow'){ return 'ACE is not Allow on '+$p }
+          if([bool]$r.IsInherited -ne $false){ return 'ACE is inherited on '+$p }
+          $rights=[int64]$r.FileSystemRights
+          if($rights -lt 0 -or $rights -gt 2032127){ return 'rights out of bounds on '+$p+': '+$rights }
+          return ''
+        }catch{ return 'ACL evaluation failed on '+$p+': '+$_.Exception.Message }
+      }
+      $aclF=Test-OwnerOnly $devFile $false
+      $aclD=Test-OwnerOnly $devDir $true
+      if($aclF){ $reasons+=('file ACL: '+$aclF) }
+      if($aclD){ $reasons+=('dir ACL: '+$aclD) }
+      # content health via the app's OWN runtime (same node as the app, no downloads) -
+      # SAME bounded contract: direct process, ELECTRON_RUN_AS_NODE=1 for THIS child only,
+      # separate pipes, 10s bound, exit code 0 AND an exact known output line.
+      $contentOk=$false
+      $js=@'
 const fs=require('fs'),crypto=require('crypto');
 try{
   const j=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
@@ -151,21 +282,31 @@ try{
   else{console.log('OK '+crypto.createHash('sha256').update(pub).digest('hex').slice(0,16));}
 }catch(e){console.log('CORRUPT');}
 '@
-              Set-Content -Path $probe -Value $js -Encoding ASCII
-              $prevEap2=$ErrorActionPreference; $ErrorActionPreference='Continue'
-              try{ & cmd.exe /c ('set ELECTRON_RUN_AS_NODE=1&& "'+$appExe+'" "'+$probe+'" "'+$devFile+'" >"'+$probeOut+'" 2>&1') | Out-Null }finally{ $ErrorActionPreference=$prevEap2 }
-              $res=''; if(Test-Path $probeOut){ $res=(Get-Content $probeOut -Raw).Trim() }
-              if($res -match '^OK ([0-9a-f]{16})$'){ $contentOk=$true; $devId=$Matches[1] }
-              elseif($res -eq 'MISMATCH'){ $reasons+='stored public key does NOT derive from the private key' }
-              elseif($res -eq 'CORRUPT'){ $reasons+='device.json is not valid (unparseable / missing fields / bad key)' }
-              else{ $reasons+='could not run the content probe (got: '+$res+')' }
-              if($contentOk -and -not $aclF -and -not $aclD){ $finding='healthy' }
-              else{ $finding='unhealthy' }
-            }
-          }
-        }
+      Set-Content -Path $probe -Value $js -Encoding ASCII
+      $pv=Invoke-BoundedProcess -ExePath $appExe -Arguments @($probe,$devFile) -EnvSet @{ELECTRON_RUN_AS_NODE='1'} -TimeoutMs 10000
+      if($pv.timedOut){ $treeTouched=$true }
+      if(-not $pv.started){ $reasons+='content probe could not be started' }
+      elseif($pv.timedOut){
+        if($pv.treeCleaned){ $reasons+='content probe timed out after 10s - process tree killed and verified gone' }
+        else{ $reasons+='content probe timed out after 10s and the process tree could NOT be verified dead - check running processes' }
       }
+      elseif($pv.exitCode -ne 0){ $reasons+='content probe exited with code '+$pv.exitCode+' - rejected' }
+      else{
+        $cpr=ConvertTo-ProbeResult -Raw $pv.stdout
+        if($cpr.state -eq 'ok'){ $contentOk=$true; $devId=$cpr.deviceId }
+        elseif($cpr.state -eq 'mismatch'){ $reasons+='stored public key does NOT derive from the private key' }
+        elseif($cpr.state -eq 'corrupt'){ $reasons+='device.json is not valid (unparseable / missing fields / bad key)' }
+        else{ $reasons+='content probe returned an unrecognized output (not the exact known line) - rejected' }
+      }
+      if($contentOk -and -not $aclF -and -not $aclD){ $finding='healthy' }
+      else{ $finding='unhealthy' }
     }
+  }
+  # pre-existing instances must be untouched
+  if($prePids.Count -gt 0){
+    foreach($pp in $prePids){
+      $alive=$false; try{ $null=Get-Process -Id $pp -ErrorAction Stop; $alive=$true }catch{ $alive=$false }
+      if(-not $alive){ $reasons+='a pre-existing app instance (pid '+$pp+') is no longer running after the precheck - this should NOT happen; report it' }
     }
   }
   Say ''
