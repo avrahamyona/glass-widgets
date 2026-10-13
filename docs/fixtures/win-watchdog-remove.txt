@@ -4,7 +4,8 @@
 # hands. A file cannot prove authorization - it is established outside this file. This script DELETES the task and VERIFIES it is gone. It does NOT launch the app,
 # does NOT re-create the task, and does NOT touch autostart (the Run key) or the app itself.
 # Verification is exact, not exit-code-based: the Task Scheduler API (Schedule.Service) is asked
-# for the task, and ONLY the precise "not found" (0x80070002) counts as absent. Access denied,
+# for the task, and ONLY the precise "not found" (0x80070002 - COMException or
+# FileNotFoundException) counts as absent. Access denied,
 # a scheduler outage, or any other failure is NOT treated as absence - the script fails closed.
 # Idempotent: a verified-absent task is a PASS. Undo (re-create) is printed at the end.
 $ErrorActionPreference='Stop'
@@ -24,9 +25,14 @@ function WdFolder(){
 }
 function Test-WdTaskPresent(){
   # returns $true/$false ONLY on a definitive answer. Absence is accepted EXCLUSIVELY from the
-  # TYPED COM exception whose HResult is 0x80070002 - never from message text, and Connect/
-  # GetFolder failures (above) can never reach this branch as 'absent'.
+  # precise not-found (HResult 0x80070002), surfaced by Task Scheduler interop as EITHER a typed
+  # COMException OR a System.IO.FileNotFoundException - observed both on real PS 5.1. Never from
+  # message text, and Connect/GetFolder failures (above) can never reach this branch as 'absent'.
   try{ $null=(WdFolder).GetTask($taskName); return $true }
+  catch [System.IO.FileNotFoundException]{
+    if($_.Exception.HResult -eq $HR_NOT_FOUND){ return $false }
+    throw ('task query failed ('+$_.Exception.GetType().Name+': '+$_.Exception.Message+') - this is NOT proof of absence')
+  }
   catch [System.Runtime.InteropServices.COMException]{
     if($_.Exception.HResult -eq $HR_NOT_FOUND){ return $false }
     throw ('task query failed with COM error 0x'+('{0:X8}' -f ($_.Exception.HResult -band 0xFFFFFFFF))+' - this is NOT proof of absence')

@@ -330,6 +330,7 @@ function Test-WdPresent {
   try{ $c.Connect() }catch{ return $null }
   try{ $f=$c.GetFolder('\') }catch{ return $null }
   try{ $null=$f.GetTask('GlassWidgets-Watchdog'); return $true }
+  catch [System.IO.FileNotFoundException]{ if($_.Exception.HResult -eq -2147024894){ return $false }; return $null }
   catch [System.Runtime.InteropServices.COMException]{ if($_.Exception.HResult -eq -2147024894){ return $false }; return $null }
   catch{ return $null }
 }
