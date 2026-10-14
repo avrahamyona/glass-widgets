@@ -1,0 +1,30 @@
+# GlassWidgets standalone server - PRODUCTION setup (go-live step). Creates
+# %USERPROFILE%\gw-server\data\config.json with: a LOCALLY generated token (public-class by
+# design - the real gates are the signed envelopes/read-auth/device key; the token is printed
+# once for relay to the sender), the production sender PUBKEY (its private key never touches
+# the PC), port 47710 (distinct from the app's embedded server), roots = a scratch folder.
+# Idempotency: refuses to overwrite an existing config without -Force (losing the config
+# breaks the sender pairing). Authorization is established outside this file.
+# Prints everything it writes. No admin, no firewall, no router, no registry.
+param([switch]$Force,[string]$Base="$env:USERPROFILE\gw-server")
+$ErrorActionPreference='Stop'
+if(-not ($env:OS -eq 'Windows_NT')){ Write-Host 'ERROR: Windows-only fixture'; exit 2 }
+$data="$Base/data"
+$scratch="$Base/scratch"
+$cfgPath="$data/config.json"
+if((Test-Path $cfgPath) -and -not $Force){ Write-Host "config already exists at $cfgPath - refusing to overwrite (rerun with -Force to regenerate ALL values)"; exit 1 }
+New-Item -ItemType Directory -Force $data | Out-Null
+New-Item -ItemType Directory -Force $scratch | Out-Null
+$token=([Guid]::NewGuid().ToString('N')+[Guid]::NewGuid().ToString('N').Substring(0,16))
+$rootJson=($scratch -replace '\\','/')
+$config=[ordered]@{token=$token;senderPub='MCowBQYDK2VwAyEAk0i0oa/KfWjifsUClhkwZejfUCtcKL5BahCqwEdCo3Y=';port=47710;roots=@($rootJson)}
+$json=ConvertTo-Json $config -Compress
+[System.IO.File]::WriteAllText($cfgPath,$json)  # UTF-8 WITHOUT BOM - a BOM breaks JSON.parse at boot
+Write-Host '--- production server setup wrote: ---'
+Write-Host "config: $cfgPath"
+Write-Host "port: 47710  roots: $rootJson"
+Write-Host "senderPub: (baked, 44 chars base64)"
+Write-Host ''
+Write-Host "RELAY THIS TOKEN to your Instinct (public-class; it gates nothing private by itself):"
+Write-Host $token
+Write-Host 'OK - server setup done. Next: mailer config (win-mailer-config.ps1 -TestSend).'

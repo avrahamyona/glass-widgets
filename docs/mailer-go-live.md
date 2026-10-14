@@ -1,37 +1,50 @@
-# Email rendezvous go-live runbook (tomorrow, with the user)
+# Go-live runbook: independent server + email rendezvous (user home ~17:10, per-step yes)
 
-Approved 2026-10-14 01:00 (user: "do what's needed"; hands-on parts tomorrow). No live
-actions were taken tonight - everything below is prepared and waiting.
+Approved route (2026-10-14 01:00 + 07:38): email rendezvous, autostart, per-step approval.
+Nothing runs live without the user's explicit yes to THAT step. Each step = one ask.
 
-## Ready already
-- vault link for the app-password (kind=login "Gmail GlassWidgets PC", password field only) -
-  held by main; the user fills it when convenient. The password's REAL destination is the PC
-  config (typed into a masked prompt there); the vault is the user's safe store.
-- server/lib/pointer-mailer.js + GW_MAILER=1 wiring (10 suites green).
-- docs/fixtures/win-mailer-config.txt - guided, masked prompt, redacted verify, -TestSend.
-- docs/fixtures/win-autostart.txt - user-level Scheduled Task (-Install/-Uninstall).
+## Step 0 (anytime, before he's home if he wants): vault
+Fill the vault link (held by main, valid 7 days from 2026-10-14 01:00) with a Gmail
+app-password from myaccount.google.com/apppasswords (2FA must be on; name it e.g.
+"GlassWidgets PC"). The 16 letters will be typed ONCE into a masked prompt on the PC (step 4).
 
-## Tomorrow, one step per message
-1. Vault: fill the link (app-password from myaccount.google.com/apppasswords - needs 2FA on;
-   name suggestion: "GlassWidgets PC"). Keep the 16 letters somewhere safe - the PC prompt
-   needs them typed once.
-2. Deploy node portable (same block as the rehearsal, into %USERPROFILE%\gw-server\node).
-3. Deploy repo zip (fresh archive of the current branch, into %USERPROFILE%\gw-server\repo).
-4. Server setup fixture (fresh production values baked at go-time: locally generated token,
-   new production sender pubkey - private key stays with ops/Instinct only).
-5. Mailer config: run win-mailer-config.ps1 -TestSend -> one real mail must land in the
-   user's Gmail (I confirm receipt from my side).
-6. Autostart: win-autostart.ps1 -Install, then Start-ScheduledTask (no reboot needed).
-7. Live proof: tunnel rotates (or taskkill drill) -> GW-POINTER mail fires my wake -> I
-   resolvePointer -> health proof -> one signed read_file e2e. Then the worker is demoted
-   to optional-relay (separate decision).
+## Step 1: node portable
+Same block as the rehearsal (v24.21.0 + sha256 158f7685...e541) but into
+%USERPROFILE%\gw-server\node. Expected: "hash OK" + "v24.21.0".
 
-## Rollback (any point)
-win-autostart.ps1 -Uninstall; remove the "mailer" object from config.json; revoke the
-app-password at myaccount.google.com/apppasswords; delete %USERPROFILE%\gw-server.
+## Step 2: repo zip (attachment, fresh from branch tip)
+Save as %USERPROFILE%\gw-server\repo.zip, expand (block verifies sha256
+adc4adc05e8818432b7247f147c71dfb3c410489dda9a6581396ba609e3d7db3 then prints "repo OK").
 
-## Notes
-- The token in the production config is generated ON the PC and is public-class by design
-  (the baked-key model) - the real gates stay the signed envelopes/read-auth/device key.
-- GW_SERVER_PORT: pick a port distinct from 47700 if the Electron app's embedded server may
-  run simultaneously (bind conflict is loud, not silent - but let's not rely on it).
+## Step 3: server setup (win-server-setup.txt -> .ps1)
+Creates data\config.json: token generated ON the PC (public-class by design), production
+sender PUBKEY (private key stays with Instinct/ops only), port 47710, scratch roots.
+Expected: "RELAY THIS TOKEN" + 48 hex - user pastes the token back (public-class).
+Refuses to overwrite an existing config without -Force.
+
+## Step 4: mailer config (win-mailer-config.txt -> .ps1, run with -TestSend)
+Prompts: Gmail address + app-password (MASKED - typed on the PC, never in chat). Merges
+cfg.mailer, verifies reparse, echoes redacted only, sends ONE real test mail. Expected:
+"TEST SEND OK" + the mail in the user's Gmail (I confirm from my side via the GW-POINTER
+wake subscription, armed 07:39).
+
+## Step 5: autostart (win-autostart.txt -> .ps1, run with -Install)
+User-level Scheduled Task (no admin): logon trigger, restart-on-failure 3x/1min, no
+time-kill, wrapper sets GW_SERVER_CONFIG/GW_TUNNEL=1/GW_MAILER=1. Then:
+Start-ScheduledTask -TaskName GlassWidgetsServer (no reboot). Expected: "server up" +
+"tunnel supervisor up" in the task's console window (stays open - known cosmetic).
+
+## Step 6: live proof (mine, no user action)
+First pointer mail fires my wake -> resolvePointer -> /health nonce proof -> signed
+read_file e2e from my sandbox -> I report. Then the user just uses it.
+
+## Rollback (any point, user-level)
+win-autostart.ps1 -Uninstall; remove "mailer" from config.json (or rerun setup -Force);
+revoke the app-password at myaccount.google.com/apppasswords; delete
+%USERPROFILE%\gw-server. Nothing else exists (no admin, no firewall, no router, no registry).
+
+## Provisioning note (ops visibility, not smuggled)
+Production sender keypair generated by Instinct (private key sandbox-only, 600); the PC
+gets ONLY the pubkey. Token generated on the PC (public-class, relayed openly). The Gmail
+app-password is the only true secret: typed once into the PC's masked prompt, stored under
+the server data dir's owner-only ACL, revocable anytime.

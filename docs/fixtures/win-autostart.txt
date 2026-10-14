@@ -30,6 +30,7 @@ $lines=@(
  'rem (foreground keeps the task alive so restart-on-failure can track it).',
  "set GW_SERVER_CONFIG=$Base\data\config.json",
  'set GW_TUNNEL=1',
+ 'set GW_MAILER=1',
  "cd /d $Base\repo",
  "`"$node`" server\index.js"
 )
