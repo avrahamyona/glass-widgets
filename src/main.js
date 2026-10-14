@@ -304,7 +304,7 @@ async function runChatStream(){let backoff=1000;
  while(!chatStream.stop){
   let idleT=null;const ctl=new AbortController();
   try{
-   await chatCatchup();
+   await chatCatchup().catch(()=>{}); // best-effort: a failing GET must not block the live stream (0.4.64)
    const u=new URL(CHAT_STREAM_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('thread',chatStream.thread);u.searchParams.set('v',app.getVersion());
    const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
    if(!r.ok||!r.body)throw new Error('stream '+r.status);
@@ -324,7 +324,7 @@ ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  return {ok:true}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],cards:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};
- const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',in_reply_to:String(m.in_reply_to||'').slice(0,80),myReaction:String(m.myReaction||'').slice(0,8)}));
+ const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',err:String(m.err||'').slice(0,120),in_reply_to:String(m.in_reply_to||'').slice(0,80),myReaction:String(m.myReaction||'').slice(0,8)}));
  const prev=rd('chat-'+id+'.json',null),byId=new Map();
  if(prev&&Array.isArray(prev.messages))for(const m of prev.messages)if(m&&m.id)byId.set(m.id,m);
  for(const m of clean)byId.set(m.id,m);
