@@ -244,21 +244,31 @@ function startMedia(){
 ipcMain.handle('media:get',()=>({...media,age:Date.now()-mediaAt}));
 function mediaCmdWrite(c){if(!['toggle','next','prev','play','pause'].includes(c))return {ok:false};if(!mediaProcess||!mediaProcess.stdin.writable)return {ok:false,error:'רכיב המדיה אינו זמין'};mediaProcess.stdin.write(c+'\n');return {ok:true}}
 ipcMain.handle('media:cmd',(_,c)=>mediaCmdWrite(c));
-// ---- user feedback to the fixes center (Avi Music Cloudflare worker, separate path/table)
-const FEEDBACK_URL='https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/report';
-// chat widget: messages go to the fixes-center worker; Chaim replies by poll.
-const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||'https://avi-music-account-staging.avi-music.workers.dev/glasswidgets/chat';
-const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||'__GW_CHAT_KEY__'; // CI replaces the placeholder from the GW_CHAT_KEY secret; env override is for local tests
+// ---- chat + user feedback: both live on the LOCAL own-server now (no external worker)
+// chat widget: messages go to OUR local own-server (no external worker). The URL+token live in
+// the server data dir (chat-auth.json, ACL-hardened) - never in the build, never in a repo secret.
+// env overrides are for local tests only. When no local server is provisioned the chat surfaces
+// an honest 'server not provisioned' error instead of silently depending on anyone's worker.
+function localChatConf(){
+ const dirs=[process.env.GLASSWIDGETS_SERVER_DATA,process.env.USERPROFILE&&path.join(process.env.USERPROFILE,'gw-server','data'),path.join(os.homedir(),'.glasswidgets-server')].filter(Boolean);
+ for(const d of dirs){try{const j=JSON.parse(fs.readFileSync(path.join(d,'chat-auth.json'),'utf8'));if(j&&j.port&&j.token)return{url:'http://127.0.0.1:'+ (+j.port) +'/chat',key:String(j.token)}}catch{}}
+ return null;
+}
+const localChat=localChatConf();
+const CHAT_URL=process.env.GLASSWIDGETS_CHAT_URL||(localChat&&localChat.url)||'';
+const CHAT_KEY=process.env.GLASSWIDGETS_CHAT_KEY||(localChat&&localChat.key)||'';
+const CHAT_URL_KEYED=CHAT_URL?CHAT_URL+'?key='+encodeURIComponent(CHAT_KEY):'';
+const CHAT_DOWN={ok:false,error:'השרת המקומי לא מוגדר עדיין - צריך להפעיל את השרת העצמי'};
 const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastCard,chatUrl:CHAT_URL,chatKey:CHAT_KEY});
 ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https?:\/\/\S+$/i.test(u))return {ok:false};shell.openExternal(u);return {ok:true}});
-ipcMain.handle('chat:send',async(_,text,replyTo)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
+ipcMain.handle('chat:send',async(_,text,replyTo)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(!CHAT_URL)return CHAT_DOWN;if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
  const fc=filelink.parseFileCommand(text);if(fc){filelink.handle(fc);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
- try{const r=await fetch(CHAT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80)}),signal:AbortSignal.timeout(20000)});
+ try{const r=await fetch(CHAT_URL_KEYED,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80)}),signal:AbortSignal.timeout(20000)});
   if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע. ההודעה לא נשלחה'}}});
-const SHOT_URL=process.env.GLASSWIDGETS_SHOT_URL||CHAT_URL.replace(/\/chat$/,'/screenshot');
+const SHOT_URL=process.env.GLASSWIDGETS_SHOT_URL||(CHAT_URL?CHAT_URL+'/screenshot?key='+encodeURIComponent(CHAT_KEY):'');
 ipcMain.handle('shot:list',async(e)=>{try{const srcs=await desktopCapturer.getSources({types:['screen']});
  const screens=srcs.map((sc,i)=>({index:i,name:sc.name||('מסך '+(i+1)),displayId:String(sc.display_id||'')}));
  let current=0;const w=[...Object.values(wins),...chatCompanions.values()].find(x=>x&&!x.isDestroyed()&&x.webContents===e.sender);
@@ -271,7 +281,7 @@ function hideChatWins(){const hidden=[]; // hide the island (and companions) so 
  for(const w of chatCompanions.values()){if(!w.isDestroyed()&&w.isVisible()){w.hide();hidden.push({w,top:true})}}
  return hidden}
 function showChatWins(hidden){for(const h of hidden){if(!h.w.isDestroyed()){h.w.show();if(h.top)h.w.setAlwaysOnTop(true,'screen-saver')}}}
-ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));const id=crypto.randomUUID();
+ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));if(!SHOT_URL)return CHAT_DOWN;const id=crypto.randomUUID();
  const hidden=hideChatWins();
  if(hidden.length)await new Promise(r=>setTimeout(r,150)); // let the compositor repaint behind the island
  let img,src;
@@ -292,7 +302,7 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
   return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע'}}});
-async function chatPage(after){const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('v',app.getVersion());if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')})),
+async function chatPage(after){if(!CHAT_URL)return CHAT_DOWN;const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('v',app.getVersion());if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(20000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'')})),
  cards:(Array.isArray(j.cards)?j.cards:[]).slice(0,50).filter(c=>c&&c.id).map(cleanCard)}}
 ipcMain.handle('chat:poll',async(_,after)=>{try{return await chatPage(after)}catch{return {ok:false,error:'אין חיבור כרגע'}}});
 // live push: one SSE stream in main, rows broadcast to every chat window; a catch-up page closes any gap on (re)connect
@@ -300,7 +310,7 @@ const CHAT_STREAM_URL=process.env.GLASSWIDGETS_CHAT_STREAM_URL||CHAT_URL.replace
 const chatStream={started:false,cursor:0,thread:'chat',stop:false};
 function broadcastChat(row){for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}}
 async function chatCatchup(){for(let n=0;n<10;n++){const r=await chatPage(Math.max(0,chatStream.cursor-1));if(!r.ok)throw new Error('catchup');for(const m of r.messages){if(m.received_at>chatStream.cursor)chatStream.cursor=m.received_at;broadcastChat(m)}for(const c of r.cards||[])broadcastCard(c);if(r.messages.length<50&&(!r.cards||r.cards.length<50))break}}
-async function runChatStream(){let backoff=1000;
+async function runChatStream(){if(!CHAT_URL)return;let backoff=1000;
  while(!chatStream.stop){
   let idleT=null;const ctl=new AbortController();
   try{
@@ -398,7 +408,8 @@ ipcMain.handle('chat:passthrough',(e,on)=>{try{const id=callerInstance(e);const 
   if(passthroughApplied.get(k)!==target){passthroughApplied.set(k,target);agentAudit({kind:'island_passthrough',on:target,instance:islandId||null,source:islandId?'island':'other',wid:k,src:role})}}); // one audited line per successfully transitioned window, with its identity
  return {ok:true}}catch{return {ok:false}}});
 ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(text.length<5)return {ok:false,error:'כתוב לפחות כמה מילים (5 תווים ומעלה)'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};
- try{const r=await fetch(FEEDBACK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({app:'glasswidgets',version:app.getVersion(),text,at:Date.now()}),signal:AbortSignal.timeout(15000)});
+ if(!CHAT_URL)return CHAT_DOWN;
+ try{const r=await fetch(CHAT_URL_KEYED,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id:crypto.randomUUID(),text:'📝 משוב (v'+app.getVersion()+'): '+text,at:Date.now()}),signal:AbortSignal.timeout(15000)});
   if(!r.ok)return {ok:false,error:'השרת לא קיבל את הדיווח ('+r.status+'). נסה שוב מאוחר יותר'};return {ok:true}}
  catch{return {ok:false,error:'אין חיבור כרגע. הדיווח לא נשלח'}}});
 // Official web apps share one persistent login. Remote content gets no application preload.
@@ -553,7 +564,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   try{startMedia()}catch(e){bootLog('media '+(e&&e.message))}
   try{startScan()}catch(e){bootLog('scan '+(e&&e.message))}
   try{batTok=startBatteryServer()}catch(e){bootLog('battery '+(e&&e.message))}
-  try{require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,broadcastSettle,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite,
+  try{if(process.env.GLASSWIDGETS_AGENT==='1')require('./lib/agent')({app,rd,wr,chatKey:CHAT_KEY,broadcastCard,broadcastSettle,updateApp:updateAppSilent,mediaCmd:mediaCmdWrite,
    islandCtl:async action=>{
     if(!['open','close'].includes(String(action)))return {ok:false,error:'bad action'};
     const id=chatIslandInstance();if(!id)return {ok:false,error:'no island'};
@@ -578,7 +589,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
      }
      return {ok:false,error:'renderer did not reach '+action};
     }catch(e){return {ok:false,error:String(e&&e.message||e)}}
-   }})}catch(e){bootLog('agent '+(e&&e.message))}
+   }});else bootLog('agent disabled - own-server leg only')}catch(e){bootLog('agent '+(e&&e.message))}
   try{wireUpdater()}catch(e){bootLog('updater '+(e&&e.message))} // check on launch + every 10 min, quiet
   try{const fi=require('./lib/fileindex');fi.init({dir:app.getPath('userData')});fi.startAuto(m=>bootLog(m))}catch(e){bootLog('fileindex '+(e&&e.message))} // whole-PC index: full scan when stale + nightly, home refresh every 30 min
   try{clips=rd('clips.json',[]);lastClip=clips[0]||'';setInterval(pollClip,800)}catch(e){bootLog('clips '+(e&&e.message))}
