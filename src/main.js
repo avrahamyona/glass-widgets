@@ -251,7 +251,7 @@ ipcMain.handle('media:cmd',(_,c)=>mediaCmdWrite(c));
 // an honest 'server not provisioned' error instead of silently depending on anyone's worker.
 function localChatConf(){
  const dirs=[process.env.GLASSWIDGETS_SERVER_DATA,process.env.USERPROFILE&&path.join(process.env.USERPROFILE,'gw-server','data'),path.join(os.homedir(),'.glasswidgets-server')].filter(Boolean);
- for(const d of dirs){try{const j=JSON.parse(fs.readFileSync(path.join(d,'chat-auth.json'),'utf8'));if(j&&j.port&&j.token)return{url:'http://127.0.0.1:'+ (+j.port) +'/chat',key:String(j.token)}}catch{}}
+ for(const d of dirs){try{const j=JSON.parse(fs.readFileSync(path.join(d,'chat-auth.json'),'utf8'));if(j&&j.port&&j.token){const h=(typeof j.host==='string'&&/^[A-Za-z0-9.-]{1,100}$/.test(j.host))?j.host:'127.0.0.1';return{url:'http://'+h+':'+(+j.port)+'/chat',key:String(j.token)}}}catch{}} // optional host field: a second machine's island (laptop) points at the PC server over the LAN
  return null;
 }
 const localChat=localChatConf();

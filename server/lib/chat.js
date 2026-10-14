@@ -12,7 +12,8 @@ const CAP=2000;              // messages retained on disk
 const SEND_WINDOW_MS=60e3, SEND_MAX=120; // light local flood guard (per process)
 const SHOT_MAX=4000000;      // decoded bytes, mirrors the old client-side cap
 
-function createChat({dir,log}){
+function createChat({dir,log,onUserRow}){
+ const notifyUserRow=row=>{if(onUserRow){try{onUserRow(row)}catch{}}}; // island->agent wake: fires ONLY on rows a user originated (never on agent replies, never on dedupes)
  const file=path.join(dir,'chat-log.json');
  const shotsDir=path.join(dir,'shots');
  let rows=[];
@@ -41,6 +42,7 @@ function createChat({dir,log}){
   const row={id,text,at:+o.at||now,received_at:now,in_reply_to:String(o.in_reply_to||'').slice(0,80),from:String(from||'user').slice(0,20)};
   rows.push(row);if(rows.length>CAP*2)rows=rows.slice(-CAP);
   save();broadcast(row);
+  if(row.from!=='agent')notifyUserRow(row);
   return{ok:true,id:row.id};
  }
  function history(after,limit){
@@ -65,6 +67,7 @@ function createChat({dir,log}){
    const row={id,text:'📷 צילום מסך',at:+o.at||Date.now(),received_at:Date.now(),in_reply_to:'',from:'user',
     file:{name:id+'.jpg',size:buf.length,mime:'image/jpeg',path:path.join(shotsDir,id+'.jpg')}};
    rows.push(row);save();broadcast(row);
+   notifyUserRow(row);
   }
   return{ok:true,id};
  }
