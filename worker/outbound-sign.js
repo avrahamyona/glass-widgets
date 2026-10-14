@@ -7,8 +7,9 @@
 // user consent are verified by the owner backend BEFORE this helper is ever called.
 const CMD_TTL_MS = 60000; // command envelope validity: short - replay windows stay small
 const { signerId, assertKind, assertNoReserved, assertTtl } = require('../src/lib/command-contract.js');
-const READ_PATHS = new Set(['/task', '/info']); // exact paths only - the signing oracle never signs arbitrary routes
+const READ_PATHS = new Set(['/task', '/info', '/file']); // exact paths only - the signing oracle never signs arbitrary routes
 const READ_QUERY_CAP = 200; // bytes
+const FILE_QUERY_CAP = 900; // /file?path= carries an encoded absolute path
 const DATA_BYTES_CAP = 8192; // max serialized data payload - the helper must never emit an unbounded wire body for a late network reject
 const DATA_DEPTH_CAP = 8; // max nesting depth of the serialized data object
 
@@ -26,7 +27,8 @@ async function signCanon(key, fields) {
 // A2: read signer. Authorizes ONE read on ONE device: the caller (owner backend / sender client)
 // attaches the returned headers to its request to the device's tunnel URL. The six canonical
 // fields are [method, path, query, ts, nonce, device] - exactly what verifyReadAuth checks.
-// GET only; /task?id=<strict id> or /info with an empty query; nothing else is signable.
+// GET only; /task?id=<strict id>, /info with an empty query, or /file?path=<encoded> (stage-3
+// streaming route; the server still enforces its own roots/deny policy per request).
 async function signReadRequest(env, { device, method, path, query }) {
   const key = await signerKey(env);
   method = String(method || 'GET').toUpperCase(); path = String(path || ''); query = String(query || '');
@@ -34,12 +36,15 @@ async function signReadRequest(env, { device, method, path, query }) {
   if (!/^[0-9a-f]{16}$/.test(device) && device !== '-') throw new Error('bad device id'); // '-' is the documented not-yet-enrolled address (preEnroll reads) - the PC verifier accepts exactly that literal
   if (method !== 'GET') throw new Error('read signer signs GET only');
   if (!READ_PATHS.has(path)) throw new Error('read path not allowed');
-  if (new TextEncoder().encode(query).length > READ_QUERY_CAP) throw new Error('query too long'); // TextEncoder, not Buffer: the live Worker is ESM with NO node-compat flag
+  const queryCap = path === '/file' ? FILE_QUERY_CAP : READ_QUERY_CAP;
+  if (new TextEncoder().encode(query).length > queryCap) throw new Error('query too long'); // TextEncoder, not Buffer: the live Worker is ESM with NO node-compat flag
   const parts = query ? query.split('&') : [];
   if (new Set(parts.map(p => p.split('=')[0])).size !== parts.length) throw new Error('duplicate query param');
   if (path === '/task') {
     const m = /^id=([\w-]{1,80})$/.exec(query); // exactly one id param, strict ledger shape
     if (!m || !signerId(m[1])) throw new Error('/task requires id=<strict id>');
+  } else if (path === '/file') {
+    if (!/^path=[^&]{1,600}$/.test(query)) throw new Error('/file requires exactly path=<encoded>');
   } else if (query !== '') throw new Error('/info takes no query');
   const ts = Date.now();
   const nonceBytes = new Uint8Array(12); crypto.getRandomValues(nonceBytes);
