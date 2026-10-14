@@ -104,6 +104,40 @@ let b1=null,b2=null,bS=null,b4=null,bE=null,dir2=null;
  await post(U,{id:'w4',kind:'write_file',ts,exp,sig:sign('w4','write_file',ts,exp,JSON.stringify(dW4)),data:dW4});
  const recW4=await task(U,'w4',dev.id);
  assert(recW4.status==='failed'&&/outside_roots/.test(recW4.note||''),'write outside roots refused: '+JSON.stringify(recW4));
+ // --- stage-2: sys_info + run_command + open_path ---
+ ts=Date.now();exp=ts+300000;
+ await post(U,{id:'i1',kind:'sys_info',ts,exp,sig:sign('i1','sys_info',ts,exp,'{}'),data:{}});
+ const recI=await task(U,'i1',dev.id);
+ assert(recI.status==='done'&&recI.result.hostname&&recI.result.cpus>=1,'sys_info: '+JSON.stringify(recI).slice(0,200));
+ // run_command wait: args array (no shell), captured stdout, exit code
+ ts=Date.now();exp=ts+300000;const dR1={exe:process.execPath,args:['-e','console.log("marker-"+21*2)']};
+ await post(U,{id:'r1',kind:'run_command',ts,exp,sig:sign('r1','run_command',ts,exp,JSON.stringify(dR1)),data:dR1});
+ const recR1=await task(U,'r1',dev.id);
+ assert(recR1.status==='done'&&recR1.result.exitCode===0&&recR1.result.stdout.trim()==='marker-42','run_command wait: '+JSON.stringify(recR1).slice(0,250));
+ // missing exe -> loud failure, never a hang
+ ts=Date.now();exp=ts+300000;const dR2={exe:'definitely-not-a-real-exe-xyz',args:[]};
+ await post(U,{id:'r2',kind:'run_command',ts,exp,sig:sign('r2','run_command',ts,exp,JSON.stringify(dR2)),data:dR2});
+ const recR2=await task(U,'r2',dev.id);
+ assert(recR2.status==='failed'&&/spawn_failed/.test(recR2.note||''),'bad exe -> failed: '+JSON.stringify(recR2));
+ // cwd outside roots refused
+ ts=Date.now();exp=ts+300000;const dR3={exe:process.execPath,args:['-e','1'],cwd:'/etc'};
+ await post(U,{id:'r3',kind:'run_command',ts,exp,sig:sign('r3','run_command',ts,exp,JSON.stringify(dR3)),data:dR3});
+ const recR3=await task(U,'r3',dev.id);
+ assert(recR3.status==='failed'&&/outside_roots/.test(recR3.note||''),'cwd outside roots refused: '+JSON.stringify(recR3));
+ // detached: started with a pid, no waiting
+ ts=Date.now();exp=ts+300000;const dR4={exe:process.execPath,args:['-e','setTimeout(()=>{},200)'],wait:false};
+ await post(U,{id:'r4',kind:'run_command',ts,exp,sig:sign('r4','run_command',ts,exp,JSON.stringify(dR4)),data:dR4});
+ const recR4=await task(U,'r4',dev.id);
+ assert(recR4.status==='done'&&recR4.result.started===true&&recR4.result.pid>0,'detached start: '+JSON.stringify(recR4));
+ // open_path outside roots refused; a URL opens (detached, no assertion on the app)
+ ts=Date.now();exp=ts+300000;const dO1={path:'/etc/hostname'};
+ await post(U,{id:'o1',kind:'open_path',ts,exp,sig:sign('o1','open_path',ts,exp,JSON.stringify(dO1)),data:dO1});
+ const recO1=await task(U,'o1',dev.id);
+ assert(recO1.status==='failed'&&/outside_roots/.test(recO1.note||''),'open outside roots refused: '+JSON.stringify(recO1));
+ ts=Date.now();exp=ts+300000;const dO2={path:path.join(fold,'presentation-dad.txt')};
+ await post(U,{id:'o2',kind:'open_path',ts,exp,sig:sign('o2','open_path',ts,exp,JSON.stringify(dO2)),data:dO2});
+ const recO2=await task(U,'o2',dev.id);
+ assert(recO2.status==='done','open under roots: '+JSON.stringify(recO2));
  // replay -> 409
  ts=Date.now();exp=ts+300000;
  assert((await post(U,{id:'c2',kind:'find_files',ts,exp,sig:sign('c2','find_files',ts,exp,JSON.stringify(data)),data})).status===409,'replay -> 409');

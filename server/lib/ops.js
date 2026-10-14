@@ -1,6 +1,7 @@
 // Named, allowlisted ops for the standalone server ("החיים שלי השרתי").
-// Electron-free. Every op: input validation, hard bounds, no generic exec.
+// Electron-free. Every op: input validation, hard bounds, signed-envelope gated at intake.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),os=require('os');
+const{spawn}=require('child_process');
 
 const{RESULT_CAP}=require('../../src/lib/ledger');
 const READ_CAP=512*1024; // hard refusal above this size
@@ -128,7 +129,74 @@ function writeFile(data,ctx){
  return {ok:true,result:{path:tp,bytes:buf.length,sha256:crypto.createHash('sha256').update(buf).digest('hex'),mode}};
 }
 
-// closed kind allowlist - the skeleton's op registry (no run_command, no generic execute).
+
+// --- stage 2: process launch (whole-PC operation, user-approved 2026-10-14) ---
+// spawn with an args ARRAY (shell:false) - no shell-string interpolation, ever. window hide
+// by default (background work is invisible); foreground only when the caller asks for 'show'.
+const RUN_TIMEOUT_CAP_MS=120000, RUN_OUTPUT_CAP=64*1024;
+
+function sysInfo(){
+ return {ok:true,result:{hostname:os.hostname(),platform:os.platform(),release:os.release(),arch:os.arch(),
+  uptimeSec:Math.floor(os.uptime()),totalMem:os.totalmem(),freeMem:os.freemem(),cpus:os.cpus().length,
+  user:(os.userInfo()||{}).username}};
+}
+
+function runCommand(data,ctx){
+ const exe=String(data.exe||'');
+ if(!exe||exe.length>500)return {ok:false,error:'bad_exe'};
+ const args=Array.isArray(data.args)?data.args.slice(0,50).map(String):[];
+ const wait=data.wait===undefined?true:!!data.wait;
+ const windowMode=data.window==='show'?'show':'hide';
+ let timeoutMs=+(data.timeoutMs||30000);
+ if(!Number.isFinite(timeoutMs)||timeoutMs<1000)timeoutMs=30000;
+ timeoutMs=Math.min(timeoutMs,RUN_TIMEOUT_CAP_MS);
+ let cwd=ctx.scratch;
+ if(data.cwd!=null){
+  const rp=underRoots(String(data.cwd),ctx.roots,ctx.deny);
+  if(!rp)return {ok:false,error:'outside_roots'};
+  cwd=rp;
+ }
+ return new Promise(res=>{
+  let child;
+  try{child=spawn(exe,args,{cwd,windowsHide:windowMode==='hide',shell:false,detached:!wait,
+    stdio:wait?['ignore','pipe','pipe']:['ignore','ignore','ignore']})}
+  catch(e){return res({ok:false,error:'spawn_failed'})}
+  if(!wait){
+   child.unref();
+   return res({ok:true,result:{started:true,pid:child.pid,window:windowMode}});
+  }
+  let out='',err='',done=false,killed=false;
+  const cap=s=>s.length>RUN_OUTPUT_CAP?s.slice(0,RUN_OUTPUT_CAP):s;
+  child.stdout.on('data',d=>{out=cap(out+d)});
+  child.stderr.on('data',d=>{err=cap(err+d)});
+  const t0=Date.now();
+  const to=setTimeout(()=>{killed=true;try{child.kill()}catch{}},timeoutMs);
+  if(to.unref)to.unref();
+  child.on('error',()=>{if(done)return;done=true;clearTimeout(to);res({ok:false,error:'spawn_failed'})});
+  child.on('close',code=>{if(done)return;done=true;clearTimeout(to);
+   res({ok:!killed,error:killed?'timeout':undefined,
+    result:{exitCode:code,stdout:out,stderr:err,durationMs:Date.now()-t0,window:windowMode,timedOut:killed}});
+  });
+ });
+}
+
+// open a file (under roots, never denied) or an https URL with its associated app - detached, fire-and-forget
+function openPath(data,ctx){
+ const p=String(data.path||'');
+ if(!p||p.length>1000)return {ok:false,error:'bad_path'};
+ let target;
+ if(/^https:\/\//i.test(p)){target=p}
+ else{target=underRoots(p,ctx.roots,ctx.deny);if(!target)return {ok:false,error:'outside_roots'}}
+ try{
+  const c=process.platform==='win32'
+   ?spawn('cmd.exe',['/c','start','','""',target],{detached:true,stdio:'ignore',windowsHide:true})
+   :spawn('xdg-open',[target],{detached:true,stdio:'ignore'});
+  c.unref();
+  return {ok:true,result:{opened:target}};
+ }catch(e){return {ok:false,error:'spawn_failed'}}
+}
+
+// closed kind allowlist - the op registry. Every kind still passes the signed-envelope gate.
 // null-prototype object: prototype names (constructor, toString, ...) are NOT ops.
-const OPS=Object.assign(Object.create(null),{find_files:findFiles,read_file:readFile,write_file:writeFile});
+const OPS=Object.assign(Object.create(null),{find_files:findFiles,read_file:readFile,write_file:writeFile,sys_info:sysInfo,run_command:runCommand,open_path:openPath});
 module.exports={OPS,READ_CAP,WRITE_CAP,defaultDenyDirs};
