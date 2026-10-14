@@ -71,7 +71,26 @@ const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().
 // The token ships to the island via chat-auth.json inside this ACL-hardened data dir - it never
 // appears in a repo, a backup, or the app's build secrets.
 const chatToken=process.env.GW_CHAT_LOCAL_TOKEN||cfg.chatToken||'';
-const chatMod=chatToken?require('./lib/chat').createChat({dir:dataDir,log}):null;
+// island -> agent wake (0.4.65): a user-originated island row mails a tiny ASCII notice to the
+// agent mailbox (same cfg.mailer as the pointer rendezvous; subject GW-CHAT <deviceId>), so the
+// agent answers without polling. Throttled to one mail a minute - the agent pages all recent
+// rows anyway. OFF unless GW_MAILER=1 and cfg.mailer is complete; a mail failure never breaks a send.
+let chatNotify=null;
+const chatMod=chatToken?require('./lib/chat').createChat({dir:dataDir,log,onUserRow:row=>{if(chatNotify)chatNotify(row)}}):null;
+if(chatMod&&process.env.GW_MAILER==='1'){
+ const mc=cfg.mailer||{};
+ if(mc.host&&mc.user&&mc.pass&&mc.from&&mc.to){
+  const{sendMailRetry}=require('./lib/pointer-mailer');
+  let lastNotice=0;
+  chatNotify=row=>{
+   const now=Date.now();if(now-lastNotice<60e3)return;lastNotice=now; // one wake a minute; the agent pages every recent row
+   sendMailRetry({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
+    subject:'GW-CHAT '+device.id,text:JSON.stringify({kind:'chat-notify',id:String(row.id||'').slice(0,80),received_at:+row.received_at||0})})
+    .then(r=>log(r.ok?'info':'warn',{kind:'chat-notify',stage:r.ok?'sent':'send_fail',mailStage:r.stage,attempt:r.attempt}))
+    .catch(()=>{});
+  };
+ }else log('warn',{kind:'chat-notify',stage:'config_incomplete'});
+}
 
 const{createVerifier}=require('./lib/verify');
 const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
@@ -108,6 +127,13 @@ async function main(){
   try{fs.writeFileSync(path.join(dataDir,'chat-auth.json'),JSON.stringify({port:r.port,token:chatToken}),{mode:0o600})}catch(e){log('warn',{stage:'chat_auth_file',err:String(e&&e.code||e)})}
   const imp=chatMod.importOnce([path.join(os.homedir(),'AppData','Roaming','glasswidgets')]);
   log('info',{kind:'chat',stage:'ready',port:r.port,imported:imp.imported});
+ }
+ if(chatMod&&(process.env.GW_CHAT_LAN==='1'||cfg.chatLan===true)){
+  try{ // chat routes ONLY on the LAN (two-machine island chat) - the command API never leaves loopback
+   const{createChatLan}=require('./lib/chat-lan');
+   const lan=await createChatLan({port:+(process.env.GW_CHAT_LAN_PORT||cfg.chatLanPort||47712),host:'0.0.0.0',token:chatToken,handle:(req,res,reply)=>chatMod.handle(req,res,reply),log});
+   log(lan.started?'info':'warn',{kind:'chat_lan',stage:lan.started?'ready':'listen_fail',port:lan.started?lan.port:undefined,reason:lan.started?undefined:String(lan.reason||'').slice(0,60)});
+  }catch(e){log('warn',{kind:'chat_lan',stage:'error',err:String(e&&e.message||e).slice(0,80)})}
  }
  console.log('server up on 127.0.0.1:'+r.port,'device',device.id,'fingerprint',fingerprint(device.pub),'roots',roots.length); // the fingerprint is the LOCAL source of truth for pairing comparison
  // Efi-pattern reachability (opt-in, default OFF): outbound cloudflared quick tunnel + respawn

@@ -95,6 +95,18 @@ async function main(){
   const imp2=chat3.importOnce([roam]);
   assert(imp2.skipped===true&&imp2.imported===0,'import runs once');}
 
+ // 10) onUserRow (island->agent wake, 0.4.65): fires on user rows (message + screenshot),
+ // never on agent replies, never on dedupes
+ {const dir3=fs.mkdtempSync(path.join(os.tmpdir(),'gwchat3-'));
+  const fired=[];
+  const chat4=createChat({dir:dir3,log:()=>{},onUserRow:row=>fired.push(row.id)});
+  chat4.send({id:'u1',text:'הודעה',at:1},'user');
+  chat4.send({id:'a1',text:'תשובה',at:2},'agent');
+  chat4.send({id:'u1',text:'הודעה',at:3},'user'); // duplicate id
+  const png=Buffer.alloc(10).toString('base64');
+  chat4.storeShot({id:'shot1',image:png,at:4});
+  assert(fired.length===2&&fired[0]==='u1'&&fired[1]==='shot1','onUserRow fires on user rows only: '+JSON.stringify(fired));}
+
  await r.stop();
  console.log('server-chat-unit: all OK');
 }

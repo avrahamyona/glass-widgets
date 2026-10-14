@@ -55,4 +55,4 @@ jobs:
         run: |
           V=$(node -p "require('./package.json').version")
           TAG="v$V" # tag matches the version baked into latest.yml, so the updater, the tag and the UI never disagree
-          gh release create "$TAG" dist/*.exe dist/latest.yml --latest --title "GlassWidgets $TAG" --notes "$(git log -1 --pretty=%B)"
+          gh release create "$TAG" dist/*.exe dist/latest.yml --latest --title "GlassWidgets $TAG" --notes "$(git log -1 --pretty=%s)"
