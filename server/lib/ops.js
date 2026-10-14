@@ -196,7 +196,136 @@ function openPath(data,ctx){
  }catch(e){return {ok:false,error:'spawn_failed'}}
 }
 
+
+// readFileBytes: the streaming /file route's scope-checked fetch (same underRoots+deny as the
+// ops, same READ_CAP). Returns {buf,sha256,size,rp} or null - null is indistinguishable refusal.
+function readFileBytes(p,ctx){
+ const rp=underRoots(String(p||''),ctx.roots,ctx.deny);
+ if(!rp)return null;
+ let st;try{st=fs.statSync(rp)}catch{return null}
+ if(!st.isFile()||st.size>READ_CAP)return null;
+ const buf=fs.readFileSync(rp);
+ return{buf,sha256:crypto.createHash('sha256').update(buf).digest('hex'),size:st.size,rp};
+}
+
+// --- stage 3: screenshot + UI input via inbox Windows components (zero-dep, user-approved) ---
+// PowerShell is invoked with -EncodedCommand (UTF-16LE base64) - no script files are written.
+// These act on the USER'S LIVE interactive session: clicks/typing are visible by nature.
+let psRunImpl=null; // tests inject a stub via __setPsRunForTests; production spawns powershell.exe
+function psRun(script,timeoutMs){
+ if(psRunImpl)return Promise.resolve(psRunImpl(script,timeoutMs));
+ const enc=Buffer.from(script,'utf16le').toString('base64');
+ return new Promise(res=>{
+  let child;try{child=spawn('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand',enc],{windowsHide:true,stdio:['ignore','pipe','pipe']})}
+  catch(e){return res({ok:false,error:'spawn_failed'})}
+  let out='',err='';
+  child.stdout.on('data',d=>out+=d);child.stderr.on('data',d=>err+=d);
+  const to=setTimeout(()=>{try{child.kill()}catch{}},timeoutMs||45000);if(to.unref)to.unref();
+  child.on('error',()=>{clearTimeout(to);res({ok:false,error:'spawn_failed'})});
+  child.on('close',code=>{clearTimeout(to);res({ok:code===0,exitCode:code,stdout:String(out).slice(0,60000),stderr:String(err).slice(0,20000)})});
+ });
+}
+
+const UI_CSHARP=[
+ 'using System;',
+ 'using System.Runtime.InteropServices;',
+ 'public class GWUI {',
+ ' [DllImport("user32.dll")] public static extern bool SetCursorPos(int X,int Y);',
+ ' [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);',
+ ' [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,IntPtr extra);',
+ ' [DllImport("user32.dll")] public static extern uint SendInput(uint n,INPUT[] inputs,int size);',
+ ' public struct POINT{public int X;public int Y;}',
+ ' [StructLayout(LayoutKind.Sequential)] public struct INPUT{public uint type;public IO u;}',
+ ' [StructLayout(LayoutKind.Explicit)] public struct IO{[FieldOffset(0)]public KEYBDINPUT k;[FieldOffset(0)]public MOUSEINPUT m;}',
+ ' [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT{public ushort vk;public ushort scan;public uint flags;public uint time;public IntPtr extra;}',
+ ' [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT{public int dx;public int dy;public uint data;public uint flags;public uint time;public IntPtr extra;}',
+ ' public static void TypeText(string s){',
+ '  foreach(char c in s){',
+ '   INPUT[] dn=new INPUT[]{new INPUT{type=1,u=new IO{k=new KEYBDINPUT{vk=0,scan=c,flags=4,time=0,extra=IntPtr.Zero}}}};',
+ '   INPUT[] up=new INPUT[]{new INPUT{type=1,u=new IO{k=new KEYBDINPUT{vk=0,scan=c,flags=6,time=0,extra=IntPtr.Zero}}}};',
+ '   SendInput(1,dn,Marshal.SizeOf(typeof(INPUT)));',
+ '   SendInput(1,up,Marshal.SizeOf(typeof(INPUT)));',
+ '  }',
+ ' }',
+ ' public static void Key(ushort vk,bool down){',
+ '  INPUT[] i=new INPUT[]{new INPUT{type=1,u=new IO{k=new KEYBDINPUT{vk=vk,scan=0,flags=(uint)(down?0:2),time=0,extra=IntPtr.Zero}}}};',
+ '  SendInput(1,i,Marshal.SizeOf(typeof(INPUT)));',
+ ' }',
+ '}',
+ 'Add-Type -TypeDefinition $GWCS -ReferencedAssemblies System.Drawing,System.Windows.Forms'].join('\n');
+// the script preamble carries the C# in a PS here-string
+const UI_PREAMBLE='$GWCS=@"\n'+UI_CSHARP.split('\n').slice(0,-1).join('\n')+'\n"@\n'+UI_CSHARP.split('\n').slice(-1)[0];
+
+async function screenshot(data,ctx){
+ const scale=data.scale==null?1:+data.scale;
+ if(!Number.isFinite(scale)||scale<0.1||scale>1)return{ok:false,error:'bad_scale'};
+ const quality=Math.min(95,Math.max(20,+(data.quality||70)||70));
+ const dir=ctx.workDir||ctx.roots[0];
+ try{fs.mkdirSync(dir,{recursive:true})}catch{}
+ const tp=writeTarget(path.join(dir,'shot-'+Date.now()+'.jpg'),ctx.roots,ctx.deny);
+ if(!tp)return{ok:false,error:'outside_roots'};
+ const lines=[
+  'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+  '$b=[System.Windows.Forms.SystemInformation]::VirtualScreen',
+  '$bmp=New-Object System.Drawing.Bitmap ($b.Width),($b.Height)',
+  '$g=[System.Drawing.Graphics]::FromImage($bmp)',
+  '$g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size)'];
+ if(scale!==1)lines.push('$w=[int]($bmp.Width*'+scale+');$h=[int]($bmp.Height*'+scale+')','$nb=New-Object System.Drawing.Bitmap $bmp,$w,$h','$g.Dispose();$bmp.Dispose()','$bmp=$nb','$g=[System.Drawing.Graphics]::FromImage($bmp)');
+ lines.push(
+  "$enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|?{$_.MimeType-eq'image/jpeg'}",
+  '$ep=New-Object System.Drawing.Imaging.EncoderParameters(1)',
+  '$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[long]'+quality+')',
+  "$bmp.Save('"+tp.replace(/'/g,"''")+"',$enc,$ep)",
+  '$g.Dispose();$bmp.Dispose()',
+  "Write-Host ('SHOT '+$b.Width+'x'+$b.Height)");
+ const r=await psRun(lines.join('; '),45000);
+ if(!r.ok)return{ok:false,error:'ui_failed',detail:String(r.stderr||r.stdout||'').slice(0,300)};
+ const m=/SHOT (\d+)x(\d+)/.exec(r.stdout||'');
+ let st;try{st=fs.statSync(tp)}catch{return{ok:false,error:'no_capture'}};
+ const buf=fs.readFileSync(tp);
+ return{ok:true,result:{path:tp,screenWidth:m?+m[1]:0,screenHeight:m?+m[2]:0,bytes:st.size,scale,quality,sha256:crypto.createHash('sha256').update(buf).digest('hex'),note:'fetch the bytes via signed GET /file?path=...'}};
+}
+
+const VK={enter:13,return:13,tab:9,esc:27,escape:27,backspace:8,del:46,delete:46,up:38,down:40,left:37,right:39,home:36,end:35,space:32,pgup:33,pgdn:34};
+const MODVK={ctrl:17,control:17,shift:16,alt:18,win:91};
+async function uiAutomation(data,ctx){
+ const action=String(data.action||'');
+ const body=[];
+ if(action==='click'||action==='move'){
+  const x=Math.round(+data.x),y=Math.round(+data.y);
+  if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>10000||y>10000)return{ok:false,error:'bad_coords'};
+  body.push('[GWUI]::SetCursorPos('+x+','+y+')|Out-Null');
+  if(action==='click'){
+   const button=String(data.button||'left');
+   let seq;
+   if(button==='right')seq=['[GWUI]::mouse_event(8,0,0,0,[IntPtr]::Zero)','[GWUI]::mouse_event(16,0,0,0,[IntPtr]::Zero)'];
+   else seq=['[GWUI]::mouse_event(2,0,0,0,[IntPtr]::Zero)','[GWUI]::mouse_event(4,0,0,0,[IntPtr]::Zero)'];
+   body.push(seq[0],'Start-Sleep -Milliseconds 40',seq[1]);
+   if(button==='double')body.push('Start-Sleep -Milliseconds 90',seq[0],'Start-Sleep -Milliseconds 40',seq[1]);
+  }
+ }else if(action==='type'){
+  const text=String(data.text||'');
+  if(!text||text.length>2000)return{ok:false,error:'bad_text'};
+  body.push("[GWUI]::TypeText('"+text.replace(/'/g,"''")+"')");
+ }else if(action==='key'){
+  const key=String(data.key||'').toLowerCase();
+  const vk=VK[key];if(!vk)return{ok:false,error:'bad_key'};
+  const mods=Array.isArray(data.modifiers)?data.modifiers.map(m=>MODVK[String(m).toLowerCase()]).filter(Boolean):[];
+  for(const mv of mods)body.push('[GWUI]::Key('+mv+',$true)');
+  body.push('[GWUI]::Key('+vk+',$true)','Start-Sleep -Milliseconds 40','[GWUI]::Key('+vk+',$false)');
+  for(const mv of mods.slice().reverse())body.push('[GWUI]::Key('+mv+',$false)');
+ }else if(action==='position'){
+  // just report the cursor position below
+ }else return{ok:false,error:'bad_action'};
+ body.push('$p=New-Object GWUI+POINT','[GWUI]::GetCursorPos([ref]$p)|Out-Null',"Write-Host ('POS '+$p.X+','+$p.Y)");
+ const r=await psRun(UI_PREAMBLE+'\n'+body.join('\n'),45000);
+ if(!r.ok)return{ok:false,error:'ui_failed',detail:String(r.stderr||r.stdout||'').slice(0,300)};
+ const m=/POS (\d+),(\d+)/.exec(r.stdout||'');
+ return{ok:true,result:{action,pos:m?{x:+m[1],y:+m[2]}:null}};
+}
+
 // closed kind allowlist - the op registry. Every kind still passes the signed-envelope gate.
 // null-prototype object: prototype names (constructor, toString, ...) are NOT ops.
-const OPS=Object.assign(Object.create(null),{find_files:findFiles,read_file:readFile,write_file:writeFile,sys_info:sysInfo,run_command:runCommand,open_path:openPath});
-module.exports={OPS,READ_CAP,WRITE_CAP,defaultDenyDirs};
+const OPS=Object.assign(Object.create(null),{find_files:findFiles,read_file:readFile,write_file:writeFile,sys_info:sysInfo,run_command:runCommand,open_path:openPath,screenshot:screenshot,ui_automation:uiAutomation});
+function __setPsRunForTests(fn){psRunImpl=fn}
+module.exports={OPS,READ_CAP,WRITE_CAP,defaultDenyDirs,readFileBytes,__setPsRunForTests};

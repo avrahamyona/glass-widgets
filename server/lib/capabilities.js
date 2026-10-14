@@ -11,6 +11,8 @@ const KIND_CAP=Object.freeze({ // command kind -> the capability that covers it
  sys_info:'sys',
  run_command:'exec',
  open_path:'exec',
+ screenshot:'ui',
+ ui_automation:'ui',
  enroll_device:'enroll', // the bootstrap op - always pre-enrollment capable
 });
 // deriveCaps(OPS) -> sorted unique csv of capabilities the registry can actually serve.

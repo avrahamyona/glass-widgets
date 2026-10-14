@@ -9,7 +9,7 @@
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),os=require('os');
 const{startLocalServer}=require('../src/lib/localserver');
 const{createLedger,RESULT_TTL_MS}=require('../src/lib/ledger');
-const{OPS,defaultDenyDirs}=require('./lib/ops');
+const{OPS,defaultDenyDirs,readFileBytes}=require('./lib/ops');
 const{deriveCaps}=require('./lib/capabilities'); // A4: caps derive from the registry, never a hand-edited banner
 const{fingerprint}=require('../src/lib/fingerprint'); // the PC-side fingerprint source the user compares against the approval request
 const{RESERVED}=require('../src/lib/command-contract'); // shared reserved-field list
@@ -71,11 +71,11 @@ const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().
 const{createVerifier}=require('./lib/verify');
 const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
 async function main(){
- const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.2.0',caps:deriveCaps(OPS),
+ const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.4.0',caps:deriveCaps(OPS),
   getDevice:()=>({deviceId:device.id,deviceSign}),
   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
   getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub,fingerprint:fingerprint(device.pub)}),
-  verifyReadAuth,log,
+  verifyReadAuth,log,getFile:p=>readFileBytes(p,{roots,deny}),
   onCommand:(m)=>{
    if(!Object.prototype.hasOwnProperty.call(OPS,String(m.kind)))return {accepted:false,status:400,reason:'unknown_kind'};
    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
@@ -90,7 +90,7 @@ async function main(){
    if(putR!==true)return {accepted:false,status:503,reason:'ledger'};
    (async()=>{ // dispatch AFTER the durable commit; the running gate decides before any effect
     if(ledger.transition(m.id,'running')!==true){log('warn',{stage:'running_gate_fail',id:String(m.id).slice(0,40)});try{ledger.put(m.id,{status:'failed',note:'running gate failed'})}catch{}return}
-    try{const out=await OPS[m.kind](data,{roots,deny});
+    try{const out=await OPS[m.kind](data,{roots,deny,workDir:path.join(dataDir,'..','scratch')});
      const w=ledger.put(m.id,out.ok?{status:'done',note:m.kind+' ok',result:out.result}:{status:'failed',note:String(out.error||'failed')});
      if(w!==true)log('error',{stage:'terminal_put_failed',id:String(m.id).slice(0,40),reason:String(w)});
     }catch(e){let w2='thrown';try{w2=ledger.put(m.id,{status:'failed',note:'op error'})}catch{}if(w2!==true)log('error',{stage:'terminal_put_failed',id:String(m.id).slice(0,40),reason:String(w2)})}

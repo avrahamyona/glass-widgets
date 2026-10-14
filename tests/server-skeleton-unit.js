@@ -138,6 +138,37 @@ let b1=null,b2=null,bS=null,b4=null,bE=null,dir2=null;
  await post(U,{id:'o2',kind:'open_path',ts,exp,sig:sign('o2','open_path',ts,exp,JSON.stringify(dO2)),data:dO2});
  const recO2=await task(U,'o2',dev.id);
  assert(recO2.status==='done','open under roots: '+JSON.stringify(recO2));
+ // --- stage-3: /file streaming route (signed read + device-signed body) ---
+ const target=path.join(fold,'presentation-dad.txt');
+ const fq='path='+encodeURIComponent(target);
+ const fr=await fetch(U+'/file?'+fq,{headers:signRead('/file',fq,dev.id)});
+ assert(fr.status===200,'/file 200, got '+fr.status);
+ const fsha=fr.headers.get('x-gw-sha256');
+ const fbuf=Buffer.from(await fr.arrayBuffer());
+ assert(fbuf.toString()==='deck contents','/file body bytes');
+ assert(fsha===crypto.createHash('sha256').update(fbuf).digest('hex'),'/file sha256 header matches body');
+ const fsig=fr.headers.get('x-gw-device-sig');
+ // verify the device signature binds this exact body to this exact request - send again with
+ // explicit ts/nonce so the signed tuple is deterministic here
+ const rq={ts:Date.now(),nonce:crypto.randomBytes(12).toString('base64url')};
+ const rh={'X-GW-Key':'srv-key','X-GW-Read-Ts':String(rq.ts),'X-GW-Read-Nonce':rq.nonce,'X-GW-Read-Device':dev.id,
+  'X-GW-Read-Sig':crypto.sign(null,Buffer.from(['GET','/file',fq,String(rq.ts),rq.nonce,dev.id].join('\n'),'utf8'),PRIV).toString('hex')};
+ const fr2=await fetch(U+'/file?'+fq,{headers:rh});
+ assert(fr2.status===200,'/file 200 (explicit headers)');
+ const fbuf2=Buffer.from(await fr2.arrayBuffer());
+ const fsha2=crypto.createHash('sha256').update(fbuf2).digest('hex');
+ const expectSig=crypto.sign(null,Buffer.from([dev.id,'GET','/file',fq,String(rq.ts),rq.nonce,'200',fsha2].join('\n'),'utf8'),PRIV).toString('hex');
+ // the device signs with the DEVICE key - verify against device pubkey (not the sender key)
+ const okSig=crypto.verify(null,Buffer.from([dev.id,'GET','/file',fq,String(rq.ts),rq.nonce,'200',fsha2].join('\n'),'utf8'),
+  crypto.createPublicKey({key:Buffer.from(dev.pub,'base64'),format:'der',type:'spki'}),Buffer.from(fr2.headers.get('x-gw-device-sig'),'hex'));
+ assert(okSig,'/file device signature verifies against device pubkey');
+ // denied basename -> same refusal as ops (no oracle)
+ const dq='path='+encodeURIComponent(path.join(fold,'Login Data'));
+ const fr3=await fetch(U+'/file?'+dq,{headers:signRead('/file',dq,dev.id)});
+ assert(fr3.status===403,'/file denied basename -> 403');
+ // no read auth -> 403
+ const fr4=await fetch(U+'/file?'+fq,{headers:{'X-GW-Key':'srv-key'}});
+ assert(fr4.status===403,'/file without read auth -> 403');
  // replay -> 409
  ts=Date.now();exp=ts+300000;
  assert((await post(U,{id:'c2',kind:'find_files',ts,exp,sig:sign('c2','find_files',ts,exp,JSON.stringify(data)),data})).status===409,'replay -> 409');

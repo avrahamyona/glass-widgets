@@ -8,7 +8,7 @@ const http=require('http'),crypto=require('crypto');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth,host}){
+function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth,host,getFile}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
@@ -63,6 +63,24 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
    const t=id&&getTask?getTask(id):null;
    if(!t)return reply(404,{ok:false,error:'unknown_task'},true);
    return reply(200,{ok:true,id,status:t.status,note:t.note,result:t.result,at:t.at,terminal:!!t.terminal},true)}
+  if(req.method==='GET'&&req.url.split('?')[0]==='/file'){
+   // full-file transfer (screenshots, larger reads) - the result channel's RESULT_CAP is for
+   // metadata. Signed-read auth + enrolled device key required; the response carries the device
+   // signature over the sha256 of the exact body (same request-binding recipe as JSON replies).
+   // getFile applies the SAME roots+deny scope as the ops - a refusal is indistinguishable.
+   if(!readOk())return reply(403,{ok:false,error:'read_auth'},true);
+   const d=getDevice&&getDevice();
+   if(!d||!d.deviceId||!d.deviceSign)return reply(503,{ok:false,error:'no_device_key'},true);
+   if(!getFile)return reply(404,{ok:false,error:'not_found'});
+   const q=req.url.split('?')[1]||'';
+   let p='';for(const part of q.split('&')){const i=part.indexOf('=');if(part.slice(0,i===-1?part.length:i)==='path'){p=decodeURIComponent(i===-1?'':part.slice(i+1));break}}
+   const f=getFile(p);
+   if(!f)return reply(403,{ok:false,error:'outside_roots'},true);
+   const h={'content-type':'application/octet-stream','content-length':f.buf.length,
+    'x-gw-sha256':f.sha256,'x-gw-size':String(f.size),'x-gw-device':d.deviceId,
+    'x-gw-device-sig':String(d.deviceSign([d.deviceId,req.method,'/file',q,String(req.headers['x-gw-read-ts']||''),String(req.headers['x-gw-read-nonce']||''),String(200),f.sha256].join('\n'))).replace(/[\r\n]/g,'')};
+   res.writeHead(200,h);res.end(f.buf);
+   return}
   if(req.method==='POST'&&req.url==='/cmd'){
    let n=0,chunks=[];
    req.on('data',c=>{n+=c.length;if(n>BODY_CAP){say('warn',{kind:'server',stage:'body_cap',bytes:n});reply(413,{ok:false,error:'too_large'});req.destroy()}else chunks.push(c)});
