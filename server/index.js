@@ -67,15 +67,21 @@ const deviceSign=t=>crypto.sign(null,Buffer.from(t,'utf8'),privK).toString('hex'
 const ledger=createLedger(path.join(dataDir,'ledger.json'));
 const logFile=path.join(dataDir,'server-audit.log');
 const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().toISOString(),lvl,...o})+'\n')}catch{}};
+// local island chat (own-server leg): separate token, chat-only routes, durable local store.
+// The token ships to the island via chat-auth.json inside this ACL-hardened data dir - it never
+// appears in a repo, a backup, or the app's build secrets.
+const chatToken=process.env.GW_CHAT_LOCAL_TOKEN||cfg.chatToken||'';
+const chatMod=chatToken?require('./lib/chat').createChat({dir:dataDir,log}):null;
 
 const{createVerifier}=require('./lib/verify');
 const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
 async function main(){
- const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.4.0',caps:deriveCaps(OPS),
+ const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.4.0',caps:deriveCaps(OPS)+(chatMod?',chat':''),
   getDevice:()=>({deviceId:device.id,deviceSign}),
   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
   getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub,fingerprint:fingerprint(device.pub)}),
   verifyReadAuth,log,getFile:p=>readFileBytes(p,{roots,deny}),
+  chat:chatMod?{token:chatToken,handle:(req,res,reply)=>chatMod.handle(req,res,reply)}:undefined,
   onCommand:(m)=>{
    if(!Object.prototype.hasOwnProperty.call(OPS,String(m.kind)))return {accepted:false,status:400,reason:'unknown_kind'};
    const data=(m.data&&typeof m.data==='object'&&!Array.isArray(m.data))?m.data:{};
@@ -98,6 +104,11 @@ async function main(){
    return {accepted:true};
   }});
  if(!r.started){console.error('not started:',r.reason);process.exit(1)}
+ if(chatMod){
+  try{fs.writeFileSync(path.join(dataDir,'chat-auth.json'),JSON.stringify({port:r.port,token:chatToken}),{mode:0o600})}catch(e){log('warn',{stage:'chat_auth_file',err:String(e&&e.code||e)})}
+  const imp=chatMod.importOnce([path.join(os.homedir(),'AppData','Roaming','glasswidgets')]);
+  log('info',{kind:'chat',stage:'ready',port:r.port,imported:imp.imported});
+ }
  console.log('server up on 127.0.0.1:'+r.port,'device',device.id,'fingerprint',fingerprint(device.pub),'roots',roots.length); // the fingerprint is the LOCAL source of truth for pairing comparison
  // Efi-pattern reachability (opt-in, default OFF): outbound cloudflared quick tunnel + respawn
  // supervisor + local state-file pointer (tunnel-state.json). No router/firewall changes - the

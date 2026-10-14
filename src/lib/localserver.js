@@ -8,7 +8,7 @@ const http=require('http'),crypto=require('crypto');
 
 const BODY_CAP=256*1024; // generous vs the worker envelope (4000) - the point of the own server; still bounded so a broken client cannot exhaust memory
 
-function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth,host,getFile}){
+function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTask,tasksOk,getInfo,verifyReadAuth,host,getFile,chat}){
  if(!token)return {started:false,reason:'no-token'};
  const say=(lvl,obj)=>{try{if(log)log(lvl,obj)}catch{}};
  const server=http.createServer((req,res)=>{
@@ -33,6 +33,17 @@ function startLocalServer({port,token,version,caps,onCommand,log,getDevice,getTa
    const ok=verifyReadAuth(req.method,req.url.split('?')[0],q,req.headers);
    if(!ok)say('warn',{kind:'server',stage:'read_auth_fail',method:req.method,url:String(req.url).slice(0,60)});
    return ok};
+  if(chat&&chat.token&&chat.handle){
+   const u0=req.url.split('?')[0];
+   if(u0==='/chat'||u0.startsWith('/chat/')){
+    const q0=req.url.split('?')[1]||'';
+    let k=String(req.headers['x-gw-chat-key']||'');
+    if(!k)for(const part of q0.split('&')){const i=part.indexOf('=');if(part.slice(0,i===-1?part.length:i)==='key'){k=decodeURIComponent(i===-1?'':part.slice(i+1));break}}
+    const ab=Buffer.from(k),bb=Buffer.from(String(chat.token));
+    if(ab.length!==bb.length||!crypto.timingSafeEqual(ab,bb)){say('warn',{kind:'server',stage:'chat_auth_fail',method:req.method,url:u0.slice(0,60)});return reply(403,{ok:false,error:'auth'})}
+    return chat.handle(req,res,reply);
+   }
+  }
   if(req.headers['x-gw-key']!==token){say('warn',{kind:'server',stage:'auth_fail',method:req.method,url:String(req.url).slice(0,60)});return reply(403,{ok:false,error:'auth'})}
   if(req.method==='GET'&&req.url.startsWith('/health')){
    // sender-side identity proof: with ?nonce= the server signs deviceId+nonce with the per-device
