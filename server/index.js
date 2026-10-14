@@ -9,7 +9,7 @@
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),os=require('os');
 const{startLocalServer}=require('../src/lib/localserver');
 const{createLedger,RESULT_TTL_MS}=require('../src/lib/ledger');
-const{OPS}=require('./lib/ops');
+const{OPS,defaultDenyDirs}=require('./lib/ops');
 const{deriveCaps}=require('./lib/capabilities'); // A4: caps derive from the registry, never a hand-edited banner
 const{fingerprint}=require('../src/lib/fingerprint'); // the PC-side fingerprint source the user compares against the approval request
 const{RESERVED}=require('../src/lib/command-contract'); // shared reserved-field list
@@ -24,6 +24,7 @@ cfg.token=process.env.GW_SERVER_TOKEN||cfg.token;
 cfg.senderPub=process.env.GW_SENDER_PUB||cfg.senderPub;
 if(!cfg.token||!cfg.senderPub)throw new Error('config requires token + senderPub (base64 SPKI)');
 const roots=Array.isArray(cfg.roots)&&cfg.roots.length?cfg.roots:[path.join(os.homedir(),'Documents'),path.join(os.homedir(),'Desktop'),path.join(os.homedir(),'Downloads')].filter(p=>{try{return fs.statSync(p).isDirectory()}catch{return false}});
+const deny=defaultDenyDirs(dataDir).concat(Array.isArray(cfg.deny)?cfg.deny.map(String):[]); // always-on secret denylist (data dir, key dirs, browser credential stores) + config additions - can only grow
 
 // device identity: generated ON this machine on first boot, private key never leaves
 const devFile=path.join(dataDir,'device.json');
@@ -70,7 +71,7 @@ const log=(lvl,o)=>{try{fs.appendFileSync(logFile,JSON.stringify({at:new Date().
 const{createVerifier}=require('./lib/verify');
 const{verifyReadAuth,validEnvelope}=createVerifier({deviceId:device.id,senderPubB64:cfg.senderPub});
 async function main(){
- const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.1.0',caps:deriveCaps(OPS),
+ const r=await startLocalServer({port:+(process.env.GW_SERVER_PORT||cfg.port||47700),host:process.env.GW_SERVER_HOST||cfg.host||'127.0.0.1',token:cfg.token,version:'server-0.2.0',caps:deriveCaps(OPS),
   getDevice:()=>({deviceId:device.id,deviceSign}),
   getTask:id=>ledger.get(id),tasksOk:()=>ledger.ok(),
   getInfo:()=>({envelopeVersions:['v1','v2'],deviceId:device.id,pubkey:device.pub,fingerprint:fingerprint(device.pub)}),
@@ -89,7 +90,7 @@ async function main(){
    if(putR!==true)return {accepted:false,status:503,reason:'ledger'};
    (async()=>{ // dispatch AFTER the durable commit; the running gate decides before any effect
     if(ledger.transition(m.id,'running')!==true){log('warn',{stage:'running_gate_fail',id:String(m.id).slice(0,40)});try{ledger.put(m.id,{status:'failed',note:'running gate failed'})}catch{}return}
-    try{const out=await OPS[m.kind](data,{roots});
+    try{const out=await OPS[m.kind](data,{roots,deny});
      const w=ledger.put(m.id,out.ok?{status:'done',note:m.kind+' ok',result:out.result}:{status:'failed',note:String(out.error||'failed')});
      if(w!==true)log('error',{stage:'terminal_put_failed',id:String(m.id).slice(0,40),reason:String(w)});
     }catch(e){let w2='thrown';try{w2=ledger.put(m.id,{status:'failed',note:'op error'})}catch{}if(w2!==true)log('error',{stage:'terminal_put_failed',id:String(m.id).slice(0,40),reason:String(w2)})}
@@ -112,9 +113,12 @@ async function main(){
     const mc=cfg.mailer||{};
     if(mc.host&&mc.user&&mc.pass&&mc.from&&mc.to){
      const{sendMailRetry}=require('./lib/pointer-mailer');
+     let lastMailed=null; // mail is for CHANGES only - the 45s heartbeat refresh advances the state file, never the inbox (flood guard, seen live 2026-10-14)
      onPointer=async rec=>{
+      if(lastMailed&&lastMailed.url===rec.url&&lastMailed.down===rec.down)return;
       const r=await sendMailRetry({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
        subject:'GW-POINTER '+device.id,text:JSON.stringify(rec)});
+      if(r.ok)lastMailed={url:rec.url,down:rec.down}; // a failed send retries on the next publish
       log(r.ok?'info':'warn',{kind:'mailer',stage:r.ok?'sent':'send_fail',mailStage:r.stage,attempt:r.attempt});
      };
     }else log('warn',{kind:'mailer',stage:'config_incomplete'}); // GW_MAILER=1 without a full cfg.mailer: loud skip, never a partial attempt

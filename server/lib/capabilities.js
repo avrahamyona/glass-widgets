@@ -7,6 +7,7 @@
 const KIND_CAP=Object.freeze({ // command kind -> the capability that covers it
  find_files:'files',
  read_file:'files',
+ write_file:'files',
  enroll_device:'enroll', // the bootstrap op - always pre-enrollment capable
 });
 // deriveCaps(OPS) -> sorted unique csv of capabilities the registry can actually serve.

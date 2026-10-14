@@ -2,7 +2,8 @@
 // Ephemeral port + finally cleanup: a failed assert never leaves a stray process behind.
 const assert=require('assert'),fs=require('fs'),path=require('path'),crypto=require('crypto'),{spawn}=require('child_process');
 const dir=fs.mkdtempSync('/tmp/gw-srv-');
-const fold=path.join(dir,'files');fs.mkdirSync(fold);
+const rootsBase=fs.mkdtempSync('/tmp/gw-roots-'); // roots OUTSIDE the server data dir - the data dir is denylisted (secrets never reachable via ops)
+const fold=path.join(rootsBase,'files');fs.mkdirSync(fold);
 fs.writeFileSync(path.join(fold,'presentation-dad.txt'),'deck contents');
 fs.writeFileSync(path.join(fold,'big.txt'),'x'.repeat(5000)); // over the 1KB inline cap
 const sub=path.join(fold,'sub');fs.mkdirSync(sub);fs.writeFileSync(path.join(sub,'inner-dad.txt'),'inner');
@@ -66,6 +67,43 @@ let b1=null,b2=null,bS=null,b4=null,bE=null,dir2=null;
  await post(U,{id:'c4',kind:'read_file',ts,exp,sig:sign('c4','read_file',ts,exp,JSON.stringify(d3)),data:d3});
  const rec4=await task(U,'c4',dev.id);
  assert(rec4.status==='failed'&&/outside_roots/.test(rec4.note||''),'outside roots -> failed terminal');
+ // --- stage-1: always-on denylist + write_file ---
+ // the server's own data dir is denied even though it sits next to the roots
+ ts=Date.now();exp=ts+300000;const dCfg={path:path.join(dir,'config.json')};
+ await post(U,{id:'cC',kind:'read_file',ts,exp,sig:sign('cC','read_file',ts,exp,JSON.stringify(dCfg)),data:dCfg});
+ const recC=await task(U,'cC',dev.id);
+ assert(recC.status==='failed'&&/outside_roots/.test(recC.note||''),'server config unreadable via ops (data-dir deny): '+JSON.stringify(recC));
+ // browser-credential basenames are denied anywhere under roots
+ fs.writeFileSync(path.join(fold,'Login Data'),'secret');
+ ts=Date.now();exp=ts+300000;const dLD={path:path.join(fold,'Login Data')};
+ await post(U,{id:'cL',kind:'read_file',ts,exp,sig:sign('cL','read_file',ts,exp,JSON.stringify(dLD)),data:dLD});
+ const recL=await task(U,'cL',dev.id);
+ assert(recL.status==='failed'&&/outside_roots/.test(recL.note||''),'Login Data denied anywhere: '+JSON.stringify(recL));
+ // ... and invisible to find_files
+ ts=Date.now();exp=ts+300000;const dFindDeny={query:'login'};
+ await post(U,{id:'cF',kind:'find_files',ts,exp,sig:sign('cF','find_files',ts,exp,JSON.stringify(dFindDeny)),data:dFindDeny});
+ const recF=await task(U,'cF',dev.id);
+ assert(recF.status==='done'&&recF.result.matches.length===0,'denied names invisible to find_files: '+JSON.stringify(recF));
+ // write_file: create -> content on disk -> second create REFUSED (never overwrites) -> append
+ ts=Date.now();exp=ts+300000;const dW1={path:path.join(fold,'written.txt'),content_base64:Buffer.from('hello pc').toString('base64')};
+ await post(U,{id:'w1',kind:'write_file',ts,exp,sig:sign('w1','write_file',ts,exp,JSON.stringify(dW1)),data:dW1});
+ const recW1=await task(U,'w1',dev.id);
+ assert(recW1.status==='done'&&recW1.result.bytes===8&&recW1.result.mode==='create','write_file create: '+JSON.stringify(recW1));
+ assert(fs.readFileSync(path.join(fold,'written.txt'),'utf8')==='hello pc','content landed on disk');
+ ts=Date.now();exp=ts+300000;
+ await post(U,{id:'w2',kind:'write_file',ts,exp,sig:sign('w2','write_file',ts,exp,JSON.stringify(dW1)),data:dW1});
+ const recW2=await task(U,'w2',dev.id);
+ assert(recW2.status==='failed'&&/exists/.test(recW2.note||''),'write_file NEVER overwrites: '+JSON.stringify(recW2));
+ ts=Date.now();exp=ts+300000;const dW3={path:path.join(fold,'written.txt'),content_base64:Buffer.from(' again').toString('base64'),mode:'append'};
+ await post(U,{id:'w3',kind:'write_file',ts,exp,sig:sign('w3','write_file',ts,exp,JSON.stringify(dW3)),data:dW3});
+ const recW3=await task(U,'w3',dev.id);
+ assert(recW3.status==='done'&&recW3.result.mode==='append','write_file append: '+JSON.stringify(recW3));
+ assert(fs.readFileSync(path.join(fold,'written.txt'),'utf8')==='hello pc again','append landed');
+ // write outside roots refused
+ ts=Date.now();exp=ts+300000;const dW4={path:'/tmp/outside-gw.txt',content_base64:Buffer.from('x').toString('base64')};
+ await post(U,{id:'w4',kind:'write_file',ts,exp,sig:sign('w4','write_file',ts,exp,JSON.stringify(dW4)),data:dW4});
+ const recW4=await task(U,'w4',dev.id);
+ assert(recW4.status==='failed'&&/outside_roots/.test(recW4.note||''),'write outside roots refused: '+JSON.stringify(recW4));
  // replay -> 409
  ts=Date.now();exp=ts+300000;
  assert((await post(U,{id:'c2',kind:'find_files',ts,exp,sig:sign('c2','find_files',ts,exp,JSON.stringify(data)),data})).status===409,'replay -> 409');
@@ -111,5 +149,6 @@ let b1=null,b2=null,bS=null,b4=null,bE=null,dir2=null;
 }catch(e){console.error('FAIL',e);process.exitCode=1}
 finally{for(const b of [b1,b2,bS,b4,bE])await kill(b&&b.cp);
  try{fs.rmSync(dir,{recursive:true,force:true})}catch(e){console.error('cleanup failed:',e.message)}
+ try{fs.rmSync(rootsBase,{recursive:true,force:true})}catch(e){console.error('cleanup-roots failed:',e.message)}
  if(dir2)try{fs.rmSync(dir2,{recursive:true,force:true})}catch(e){console.error('cleanup2 failed:',e.message)}
  process.exit(process.exitCode||0)}})();

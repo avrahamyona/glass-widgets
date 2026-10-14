@@ -9,16 +9,16 @@ assert(caps==='files','skeleton caps derive to files, got: '+caps);
 // every registered op has a declared capability - no orphan kinds
 for(const k of Object.keys(OPS))assert(KIND_CAP[k],'op without a capability mapping: '+k);
 // routing predicate
-assert(capsAllowKind(caps,'find_files')&&capsAllowKind(caps,'read_file'),'advertised kinds allowed');
+assert(capsAllowKind(caps,'find_files')&&capsAllowKind(caps,'read_file')&&capsAllowKind(caps,'write_file'),'advertised kinds allowed');
 assert(!capsAllowKind(caps,'run_command'),'unknown kind refused');
 assert(!capsAllowKind('', 'find_files'),'empty advertisement refuses');
 assert(!capsAllowKind('sig,ui','read_file'),'kind outside the advertised caps refused');
 // a FORGED wider advertisement widens NOTHING: the predicate is only as broad as KIND_CAP
 assert(!capsAllowKind('files,admin,shell','run_command'),'forged caps cannot conjure a kind');
 // a registry extension automatically re-derives (no hand-edited banner to forget)
-const extended=Object.assign(Object.create(null),OPS,{write_file:async()=>({ok:true})});
+const extended=Object.assign(Object.create(null),OPS,{delete_file:async()=>({ok:true})}); // delete_file is deliberately NOT in KIND_CAP (and must never be)
 KIND_CAP; // mapping lives in the shared module - an unmapped new op stays unadvertised
 assert(deriveCaps(extended)==='files','an op without a KIND_CAP entry is not advertised (fail closed)');
 // and is refused by the predicate even though it exists in the registry
-assert(!capsAllowKind(deriveCaps(extended),'write_file'),'unmapped op refused by the predicate');
+assert(!capsAllowKind(deriveCaps(extended),'delete_file'),'unmapped op refused by the predicate');
 console.log('SERVER-CAPS-UNIT: PASS');
