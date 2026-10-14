@@ -1,6 +1,6 @@
 {
   "name": "glasswidgets",
-  "version": "0.4.60",
+  "version": "0.4.64",
   "private": true,
   "description": "Rounded-card desktop widgets for Windows",
   "main": "src/main.js",
@@ -33,7 +33,7 @@
       "runAfterFinish": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "GlassWidgets",
+      "shortcutName": "חיים שלי",
       "deleteAppDataOnUninstall": false
     },
     "productName": "GlassWidgets",

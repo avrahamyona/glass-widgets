@@ -1,0 +1,75 @@
+﻿# win-watchdog-remove.txt - run on the user's PC (regular PowerShell, no admin needed)
+# Purpose: REMOVE the GlassWidgets-Watchdog scheduled task (the every-5-minutes relauncher).
+# Rationale: the app must NOT reopen itself every 5 minutes; opening stays in the owner's
+# hands. A file cannot prove authorization - it is established outside this file. This script DELETES the task and VERIFIES it is gone. It does NOT launch the app,
+# does NOT re-create the task, and does NOT touch autostart (the Run key) or the app itself.
+# Verification is exact, not exit-code-based: the Task Scheduler API (Schedule.Service) is asked
+# for the task, and ONLY the precise "not found" (0x80070002 - COMException or
+# FileNotFoundException) counts as absent. Access denied,
+# a scheduler outage, or any other failure is NOT treated as absence - the script fails closed.
+# Idempotent: a verified-absent task is a PASS. Undo (re-create) is printed at the end.
+$ErrorActionPreference='Stop'
+function Say($m){ Write-Host $m }
+$taskName='GlassWidgets-Watchdog'
+$HR_NOT_FOUND=-2147024894 # 0x80070002 - "the system cannot find the file specified" (task truly absent)
+$script:svc=$null
+function WdFolder(){
+  # Connect/GetFolder failures are SCHEDULER failures, never task facts - isolated here, and a
+  # failed Connect drops the cached service so a retry reconnects cleanly.
+  if(-not $script:svc){
+    try{ $c=New-Object -ComObject 'Schedule.Service'; $c.Connect(); $script:svc=$c }
+    catch{ $script:svc=$null; throw ('cannot connect to the Task Scheduler service ('+$_.Exception.Message+') - no task facts available') }
+  }
+  try{ return $script:svc.GetFolder('\') }
+  catch{ $script:svc=$null; throw ('cannot open the root task folder ('+$_.Exception.Message+') - no task facts available') }
+}
+function Test-WdTaskPresent(){
+  # returns $true/$false ONLY on a definitive answer. Absence is accepted EXCLUSIVELY from the
+  # precise not-found (HResult 0x80070002), surfaced by Task Scheduler interop as EITHER a typed
+  # COMException OR a System.IO.FileNotFoundException - observed both on real PS 5.1. Never from
+  # message text, and Connect/GetFolder failures (above) can never reach this branch as 'absent'.
+  try{ $null=(WdFolder).GetTask($taskName); return $true }
+  catch [System.IO.FileNotFoundException]{
+    if($_.Exception.HResult -eq $HR_NOT_FOUND){ return $false }
+    throw ('task query failed ('+$_.Exception.GetType().Name+': '+$_.Exception.Message+') - this is NOT proof of absence')
+  }
+  catch [System.Runtime.InteropServices.COMException]{
+    if($_.Exception.HResult -eq $HR_NOT_FOUND){ return $false }
+    throw ('task query failed with COM error 0x'+('{0:X8}' -f ($_.Exception.HResult -band 0xFFFFFFFF))+' - this is NOT proof of absence')
+  }
+  catch{ throw ('task query failed ('+$_.Exception.GetType().Name+': '+$_.Exception.Message+') - this is NOT proof of absence') }
+}
+try{
+  Say '== GlassWidgets watchdog removal =='
+  # PASS 1: delete the task if (and only if) it provably exists
+  if(-not (Test-WdTaskPresent)){
+    Say 'PASS 1: GlassWidgets-Watchdog is provably absent (exact not-found) - nothing to delete'
+  }else{
+    $deleted=$false
+    try{ (WdFolder).DeleteTask($taskName,0); $deleted=$true }
+    catch [System.Runtime.InteropServices.COMException]{
+      if($_.Exception.HResult -eq $HR_NOT_FOUND){
+        Say 'PASS 1: task vanished before the delete call (typed not-found) - goal reached'
+      }else{ throw ('task delete failed with COM error 0x'+('{0:X8}' -f ($_.Exception.HResult -band 0xFFFFFFFF))+' - NOT deleted, NOT assumed gone') }
+    }
+    catch{ throw ('task delete failed ('+$_.Exception.GetType().Name+': '+$_.Exception.Message+') - NOT deleted, NOT assumed gone') }
+    if($deleted){ Say 'PASS 1: delete call issued for GlassWidgets-Watchdog' }
+  }
+  # PASS 2: verify AFTER the delete with a FRESH query - only the exact not-found proves it
+  if(Test-WdTaskPresent){ throw 'task still present after the delete call - removal failed, nothing assumed' }
+  Say 'PASS 2: verified - the GlassWidgets-Watchdog task no longer exists (exact not-found on a fresh query)'
+  Say '      scope note: this proves THAT NAMED TASK is gone; it does not prove no other timer exists.'
+  Say ''
+  Say 'NOT touched (on purpose): the app itself, its data, and the login autostart (Run key).'
+  Say 'Opening the app is now in your hands as far as the named watchdog task is concerned.'
+  Say ''
+  Say '--- undo (only if you ever want the auto-relaunch back) ---'
+  Say '  re-run win-server-base, which re-creates the script and the task.'
+  Say ''
+  Say 'DONE: watchdog removed. Send this output back.'
+}catch{
+  Say ('FAIL: '+$_.Exception.Message)
+  Say 'Nothing was assumed - if the task may still exist, this says so. Send this whole output back.'
+}finally{
+  Read-Host 'Press Enter to close'
+}

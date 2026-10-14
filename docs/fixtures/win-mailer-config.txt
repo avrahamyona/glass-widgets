@@ -1,0 +1,38 @@
+# GlassWidgets email rendezvous - guided mailer config (production, step 4).
+# Prompts for the Gmail address and the app-password (MASKED input - the secret is typed on
+# the PC, never travels chat/files), merges cfg.mailer into config.json (UTF-8, no BOM),
+# verifies by reparsing, echoes only REDACTED values. -TestSend sends ONE real test mail
+# through the same pointer-mailer.js the server uses. Authorization is established outside
+# this file. Rollback: remove the "mailer" key from config.json (script prints how).
+param([string]$Base="$env:USERPROFILE\gw-server",[switch]$TestSend)
+$ErrorActionPreference='Stop'
+if(-not ($env:OS -eq 'Windows_NT')){ Write-Host 'ERROR: Windows-only fixture'; exit 2 }
+$cfgPath="$Base/data/config.json"
+if(-not (Test-Path $cfgPath)){ Write-Host "ERROR: config not found at $cfgPath - run the server setup step first"; exit 1 }
+$cfg=Get-Content $cfgPath -Raw | ConvertFrom-Json
+$gmail=Read-Host 'Your Gmail address (pointer updates will be mailed there)'
+if($gmail -notmatch '^[A-Za-z0-9._%+-]+@gmail\.com$'){ Write-Host 'ERROR: expected a gmail.com address'; exit 1 }
+$sec=Read-Host 'Gmail APP PASSWORD (myaccount.google.com/apppasswords, 16 letters) - masked' -AsSecureString
+$bstr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+$pass=[Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+$pass=($pass -replace '\s','')  # Google displays it with spaces - strip them
+if($pass.Length -ne 16){ Write-Host ('ERROR: app password must be 16 letters (got '+$pass.Length+') - NOT saved'); exit 1 }
+$mailer=[ordered]@{host='smtp.gmail.com';port=465;user=$gmail;pass=$pass;from=$gmail;to=$gmail}
+$cfg | Add-Member -NotePropertyName mailer -NotePropertyValue $mailer -Force
+$json=ConvertTo-Json $cfg -Compress -Depth 6
+[System.IO.File]::WriteAllText($cfgPath,$json)
+$pass=$null
+Write-Host "mailer config merged into $cfgPath (password never shown; file sits in the owner-only ACL data dir)"
+$back=Get-Content $cfgPath -Raw | ConvertFrom-Json
+Write-Host ('verified reparse: host='+$back.mailer.host+' port='+$back.mailer.port+' user='+$back.mailer.user+' pass=<hidden '+$back.mailer.pass.Length+' chars>')
+if($TestSend){
+  $node="$Base/node/node-current/node.exe"
+  if(-not (Test-Path $node)){ Write-Host "ERROR: node not found - run the node deploy step first"; exit 1 }
+  if(-not (Test-Path "$Base/repo/server/lib/pointer-mailer.js")){ Write-Host "ERROR: repo not found under $Base/repo"; exit 1 }
+  $env:GW_MAILCFG=$cfgPath
+  Set-Location "$Base/repo"
+  & $node -e "const fs=require('fs');const cfg=JSON.parse(fs.readFileSync(process.env.GW_MAILCFG,'utf8'));require('./server/lib/pointer-mailer').sendMailRetry({host:cfg.mailer.host,port:cfg.mailer.port,user:cfg.mailer.user,pass:cfg.mailer.pass,from:cfg.mailer.from,to:cfg.mailer.to,subject:'GW-POINTER test',text:JSON.stringify({test:true,at:new Date().toISOString()})}).then(r=>{console.log(r.ok?'TEST SEND OK - check the inbox':'TEST SEND FAILED: '+r.stage);process.exit(r.ok?0:1)})"
+  if($LASTEXITCODE -ne 0){ Write-Host 'test send failed - recheck the app password (16 letters, no spaces) and that 2FA is on'; exit 1 }
+}
+Write-Host 'OK - mailer config done. Rollback: open config.json and delete the "mailer" object (or rerun the setup step).'

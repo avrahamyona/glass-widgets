@@ -1,0 +1,47 @@
+# GlassWidgets standalone server autostart - DRAFT FOR REVIEW. NOT sent to the user yet.
+# Registers a USER-LEVEL Scheduled Task (no admin) that starts the standalone server +
+# quick tunnel at logon, with restart-on-failure (3x, 1 min). -Uninstall removes the task
+# and the wrapper. Nothing else is touched. Authorization is established outside this file.
+# Known cosmetic: a console window stays open while the server runs (hiding it breaks
+# restart tracking in v1 - documented trade-off, v2 may use a hidden host).
+# Known conflict: if the Electron app's own embedded server holds port 47700, this server's
+# bind fails loud (EADDRINUSE). Production config should set a distinct GW_SERVER_PORT.
+param([switch]$Install,[switch]$Uninstall,[string]$Base="$env:USERPROFILE\gw-server")
+$ErrorActionPreference='Stop'
+$taskName='GlassWidgetsServer'
+if(-not ($env:OS -eq 'Windows_NT')){ Write-Host 'ERROR: Windows-only fixture (Scheduled Tasks)'; exit 2 }
+if(-not $Install -and -not $Uninstall){ Write-Host 'specify -Install or -Uninstall'; exit 1 }
+if($Uninstall){
+  $t=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if($t){ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false; Write-Host "task $taskName removed" } else { Write-Host "task $taskName not present - nothing to remove" }
+  $cmd="$Base\start-server.cmd"
+  if(Test-Path $cmd){ Remove-Item $cmd -Force; Write-Host "wrapper $cmd removed" }
+  Write-Host 'UNINSTALL OK (data/config/node/repo folders are left in place - delete manually if desired)'
+  exit 0
+}
+$node="$Base/node/node-current/node.exe"
+if(-not (Test-Path $node)){ Write-Host "ERROR: node not found at $node - deploy portable node first"; exit 1 }
+if(-not (Test-Path "$Base/repo/server/index.js")){ Write-Host "ERROR: repo not found under $Base/repo"; exit 1 }
+if(-not (Test-Path "$Base/data/config.json")){ Write-Host "ERROR: config not found at $Base/data/config.json"; exit 1 }
+$cmd="$Base/start-server.cmd"
+$lines=@(
+ '@echo off',
+ 'rem GlassWidgets standalone server wrapper - sets env, then runs the server in FOREGROUND',
+ 'rem (foreground keeps the task alive so restart-on-failure can track it).',
+ "set GW_SERVER_CONFIG=$Base\data\config.json",
+ 'set GW_TUNNEL=1',
+ 'set GW_MAILER=1',
+ "cd /d $Base\repo",
+ "`"$node`" server\index.js"
+)
+[System.IO.File]::WriteAllLines($cmd,$lines)  # ASCII/ANSI .cmd - no BOM
+Write-Host "wrapper written: $cmd"
+$action=New-ScheduledTaskAction -Execute $cmd
+$trigger=New-ScheduledTaskTrigger -AtLogOn
+$settings=New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)  # Zero = never time-kill the server
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description 'GlassWidgets standalone server + quick tunnel (user-level)' -Force | Out-Null
+$t=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if(-not $t){ Write-Host 'ERROR: task registration could not be verified'; exit 1 }
+Write-Host "task registered: $taskName (at logon, restart-on-failure 3x/1min, no time limit)"
+Write-Host 'INSTALL OK - the server starts at next logon. To start now: Start-ScheduledTask -TaskName GlassWidgetsServer'
+Write-Host 'Rollback: rerun this script with -Uninstall'

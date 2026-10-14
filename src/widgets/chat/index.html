@@ -147,7 +147,7 @@ function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!==
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function linkify(escaped){return escaped.replace(/https?:\/\/[^\s<>"']+/g,u=>'<a href=# data-u="'+u+'">'+u+'</a>')}
 function wireLinks(el){for(const a of el.querySelectorAll('a[data-u]'))a.onclick=e=>{e.preventDefault();e.stopPropagation();if(window.api&&api.openExternal)api.openExternal(a.dataset.u)}}
-function statusText(m){if(m.dir!=='out')return'';if(m.status==='waiting')return'שולח…';if(m.status==='failed')return'לא נשלח · אין חיבור';const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
+function statusText(m){if(m.dir!=='out')return'';if(m.status==='waiting')return'שולח…';if(m.status==='failed'){let e=String(m.err||'').trim();if(!e||e.startsWith('אין חיבור'))e='אין חיבור';return 'לא נשלח · '+e}const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 const REACTS=['👍','❤️','😂','😮','😢','🙏'];let reactPop=null;
@@ -254,7 +254,7 @@ async function doSend(){const t=txt.value.trim();if(!t)return;
  if(!H.seenHint){H.seenHint=true;hint.style.display=''}
  const r=await api.chatSend(t,m.in_reply_to);
  const i=H.messages.findIndex(x=>x.id===tmp);if(i<0)return;
- if(r.ok)H.messages[i]={id:r.id,dir:'out',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to};else H.messages[i].status='failed';
+ if(r.ok)H.messages[i]={id:r.id,dir:'out',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to};else{H.messages[i].status='failed';H.messages[i].err=String(r&&r.error||'').slice(0,120)}
  if(api.chatSentSend)api.chatSentSend(H.messages[i]);
  save();paintChat()}
 let alertPreview='';let soundOn=true;let actx=null;
@@ -280,7 +280,7 @@ function scrCycle(){scrIdx=(scrIdx+1)%scrCount;updScrBtn()}
 async function doShot(idx){const b=document.getElementById(island?'shot2':'shot');if(b)b.disabled=true;
  const r=await api.chatScreenshot(idx);
  if(!(r&&r.ok)&&r&&r.error){toast.textContent=r.error;toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,2600)}
- const m={id:(r&&r.id)||('local-'+Date.now()),dir:'out',text:'📷 צילום מסך '+(idx+1),at:Date.now(),status:r&&r.ok?'sent':'failed'};
+ const m={id:(r&&r.id)||('local-'+Date.now()),dir:'out',text:'📷 צילום מסך '+(idx+1),at:Date.now(),status:r&&r.ok?'sent':'failed',err:r&&r.ok?'':String(r&&r.error||'').slice(0,120)};
  H.messages.push(m);if(api.chatSentSend)api.chatSentSend(m);await save();render(log);if(island&&pillMode==='open')render(pillBodyLog());
  if(b)b.disabled=false}
 /* island behavior */
