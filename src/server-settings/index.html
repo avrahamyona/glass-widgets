@@ -28,7 +28,9 @@ textarea{width:100%;border:0;border-radius:10px;background:#f2f2f7;padding:9px 1
 <div class="card">
  <div class="row"><div><div class="lbl">צליל כשמגיעה תשובה</div></div><div class="tgl" id="tSound"></div></div>
  <div class="row"><div><div class="lbl">איילנד בכל המסכים</div></div><div class="tgl" id="tMulti"></div></div>
- <div class="row"><div><div class="lbl">תמיד מעל חלונות אחרים</div></div><div class="tgl" id="tTop"></div></div>
+ <div class="row"><div><div class="lbl">ווידג׳טים תמיד מעל חלונות</div></div><div class="tgl" id="tTop"></div></div>
+ <div class="row"><div><div class="lbl">הצג את האיילנד</div><div class="hint">שכבת החיים שלי - נפרדת מהווידג׳טים</div></div><div class="tgl" id="tVis"></div></div>
+ <div class="row"><div><div class="lbl">איילנד תמיד מעל חלונות</div></div><div class="tgl" id="tTopChat"></div></div>
  <div class="row"><div><div class="lbl">הפעל עם ווינדוס</div></div><div class="tgl" id="tStart"></div></div>
 </div>
 <div class="card">
@@ -47,6 +49,8 @@ async function init(){
  const bind=(id,get,set)=>{const el=$(id);const paint=()=>el.classList.toggle('on',!!get());el.onclick=async()=>{await set(!get());paint()};paint()};
  bind('tSound',()=>s.chatSound!==false,v=>{s.chatSound=v;return api.setSave({chatSound:v})});
  bind('tMulti',()=>s.chatMultiScreen!==false,v=>{s.chatMultiScreen=v;return api.setSave({chatMultiScreen:v})});
+ bind('tVis',()=>s.chatVisible!==false,v=>{s.chatVisible=v;return api.setSave({chatVisible:v})});
+ bind('tTopChat',()=>s.chatOnTop!==false,v=>{s.chatOnTop=v;return api.setSave({chatOnTop:v})});
  bind('tTop',()=>!!s.onTop,v=>{s.onTop=v;return api.setSave({onTop:v})});
  bind('tStart',()=>!!r.autostart,v=>{s._a=v;return api.setSave({autostart:v})});
  const upd=await api.updateState();paintUpd(upd);

@@ -1,4 +1,4 @@
-const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session,desktopCapturer}=require('electron');
+const {app,BrowserWindow,Menu,Tray,nativeImage,ipcMain,clipboard,safeStorage,shell,screen,session,desktopCapturer,Notification}=require('electron');
 // --gw-runtime-paths-json <nonce>: runtime-evidence mode (the SINGLE ops-agreed way to learn
 // the packed runtime's own identity/paths). Prints ONE JSON line and exits BEFORE any other
 // import, boot step, single-instance lock, updater, agent, window, or config write. This must
@@ -40,6 +40,7 @@ const wr=(f,v)=>fs.writeFileSync(path.join(U(),f),JSON.stringify(v));
 const wins={};
 function instances(){const saved=rd('instances.json',null);if(Array.isArray(saved))return saved.filter(x=>x&&typeof x.id==='string'&&/^[a-z0-9-]+$/.test(x.id)&&WIDGETS[x.type]);const migrated=Object.keys(WIDGETS).filter(t=>t!=='timer'&&t!=='chat').map(type=>({id:type,type}));wr('instances.json',migrated);return migrated}
 function instance(id){return instances().find(x=>x.id===id)}
+function chatTop(){return getSet().chatOnTop!==false} // the island's on-top is its own layer setting, separate from the widgets' toggle
 function instanceConfig(id){const it=instance(id);if(!it)return {size:WIDGETS[id]?.w>WIDGETS[id]?.h?'rectangle':'square',style:getSet().styles[id],timezone:'Asia/Jerusalem',city:getSet().city,portfolio:getSet().portfolio};const s=getSet(),local=s.instanceConfigs?.[id]||{};return {size:s.sizes[id]||((WIDGETS[it.type].w>WIDGETS[it.type].h)?'rectangle':'square'),style:s.styles[id]||s.styles[it.type],timezone:'Asia/Jerusalem',onTop:s.onTop,city:s.city,portfolio:s.portfolio,...local}}
 function callerInstance(event){try{const u=new URL(event.sender.getURL()),id=u.searchParams.get('instance');return instance(id)?id:null}catch{return null}}
 function instanceNoteFile(event){const id=callerInstance(event);return !id||id==='notes'?'notes.json':'notes-'+id+'.json'}
@@ -57,7 +58,7 @@ function open(id){
     resizable:false,skipTaskbar:true,show:false,
     webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false,autoplayPolicy:'no-user-gesture-required'}});
   w.loadFile(path.join(__dirname,'widgets',instance(id).type,'index.html'),{query:wq(id)});
-  w.once('ready-to-show',()=>{w.show();if(instanceConfig(id).onTop||instanceConfig(id).size==='island')w.setAlwaysOnTop(true,'screen-saver')});
+  w.once('ready-to-show',()=>{w.show();if(it.type==='chat'?chatTop():instanceConfig(id).onTop)w.setAlwaysOnTop(true,'screen-saver')});
   w.on('move',saveLayout);w.on('moved',saveLayout);w.on('close',saveLayout);
   w.on('closed',()=>{delete wins[id]});
   wins[id]=w;
@@ -72,6 +73,7 @@ const chatCompanions=new Map();let reconcileT=null;
 function chatIslandInstance(){const it=instances().find(x=>x.type==='chat');return it&&instanceConfig(it.id).size==='island'?it.id:null}
 function islandBounds(wa){return {x:Math.round(wa.x+(wa.width-380)/2),y:wa.y+10,width:380,height:340}}
 function reconcileChatScreens(){clearTimeout(reconcileT);reconcileT=setTimeout(()=>{
+ if(getSet().chatVisible===false){const w0=chatIslandInstance()&&wins[chatIslandInstance()];if(w0&&!w0.isDestroyed())w0.hide();for(const w of chatCompanions.values()){if(!w.isDestroyed())w.close()}chatCompanions.clear();return}
  const id=chatIslandInstance(),multi=getSet().chatMultiScreen!==false;
  const main=id&&wins[id]&&!wins[id].isDestroyed()?wins[id]:null;
  const closeAll=()=>{for(const w of chatCompanions.values()){if(!w.isDestroyed())w.close()}chatCompanions.clear()};
@@ -84,7 +86,7 @@ function reconcileChatScreens(){clearTimeout(reconcileT);reconcileT=setTimeout((
   w=new BrowserWindow({...pb,frame:false,transparent:true,hasShadow:false,resizable:false,skipTaskbar:true,show:false,
    webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,backgroundThrottling:false,autoplayPolicy:'no-user-gesture-required'}});
   w.loadFile(path.join(__dirname,'widgets','chat','index.html'),{query:{...wq(id),companion:1}});
-  w.once('ready-to-show',()=>{if(!w.isDestroyed()){w.show();w.setAlwaysOnTop(true,'screen-saver')}});
+  w.once('ready-to-show',()=>{if(!w.isDestroyed()){w.show();if(chatTop())w.setAlwaysOnTop(true,'screen-saver')}});
   w.on('closed',()=>{for(const [k,v] of chatCompanions)if(v===w)chatCompanions.delete(k)});
   chatCompanions.set(d.id,w)}
  for(const [k,w] of [...chatCompanions]){if(!keep.has(k)){if(!w.isDestroyed())w.close();chatCompanions.delete(k)}}
@@ -117,7 +119,7 @@ ipcMain.handle('cfg:get',e=>{const id=callerInstance(e),c=id?instanceConfig(id).
 
 
 // ---- settings (theme, per-widget style, general)
-const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,chatMultiScreen:true,chatSound:true,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
+const DEF={instanceConfigs:{},sizes:{},theme:'auto',onTop:false,chatMultiScreen:true,chatSound:true,chatVisible:true,chatOnTop:true,styles:{clock:'analog',sysmon:'rings',notes:'yellow'},city:null,portfolio:[{sym:'^GSPC',qty:0},{sym:'AAPL',qty:0},{sym:'TA35.TA',qty:0}]};
 const getSet=()=>{const s=rd('settings.json',{});return {...DEF,...s,instanceConfigs:s.instanceConfigs||{},sizes:{...DEF.sizes,...(s.sizes||{})},styles:{...DEF.styles,...(s.styles||{})}}};
 function currentTheme(){const s=getSet();const city=s.city||CITY;const t=themeLib.effectiveTheme(s.theme,new Date(),city.lat,city.lon);return t==='system'?null:t}
 const pendingTimerDemo={};
@@ -157,11 +159,13 @@ ipcMain.handle('instance:remove',(_,id)=>{if(!instance(id))return {ok:false};if(
 ipcMain.handle('instance:save',(_,id,patch)=>saveInstance(id,patch));
 ipcMain.handle('instance:self',e=>{const id=callerInstance(e);return id?{id,...instanceConfig(id)}:null});
 ipcMain.handle('instance:self-save',(e,patch)=>{const id=callerInstance(e);return id?saveInstance(id,patch):{ok:false}});
-function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle','large'].includes(patch.size)||(patch.size==='island'&&instance(id)?.type==='chat'))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined||safe.size!==undefined)wins[id].setAlwaysOnTop(!!(instanceConfig(id).onTop||instanceConfig(id).size==='island'),'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}if(instance(id)?.type==='chat')reconcileChatScreens();return {ok:true,settings:getSet()}}
+function saveInstance(id,patch){if(!instance(id)||!patch||typeof patch!=='object')return {ok:false};const safe={};if(['square','rectangle','large'].includes(patch.size)||(patch.size==='island'&&instance(id)?.type==='chat'))safe.size=patch.size;if(typeof patch.style==='string')safe.style=patch.style.slice(0,20);if(typeof patch.timezone==='string'){try{new Intl.DateTimeFormat('en',{timeZone:patch.timezone});safe.timezone=patch.timezone}catch{return {ok:false,error:'אזור זמן לא מוכר'}}}if(Array.isArray(patch.portfolio))safe.portfolio=patch.portfolio.slice(0,30).filter(x=>x&&typeof x.sym==='string').map(x=>({sym:x.sym.slice(0,30),name:String(x.name||'').slice(0,150),qty:+x.qty||0}));if(patch.city&&Number.isFinite(patch.city.lat)&&Number.isFinite(patch.city.lon))safe.city={name:String(patch.city.name||'').slice(0,100),lat:patch.city.lat,lon:patch.city.lon};if(typeof patch.onTop==='boolean')safe.onTop=patch.onTop;if(typeof patch.noteId==='string')safe.noteId=patch.noteId.slice(0,200);const s=getSet();s.instanceConfigs[id]={...s.instanceConfigs[id],...safe};wr('settings.json',s);if(wins[id]){if(safe.onTop!==undefined||safe.size!==undefined)wins[id].setAlwaysOnTop(instance(id)?.type==='chat'?chatTop():!!instanceConfig(id).onTop,'screen-saver');if(safe.size){const d=dimensions(id),w=wins[id];w.setResizable(true);w.setMinimumSize(0,0);w.setMaximumSize(0,0);w.setBounds({...w.getBounds(),...d});w.setResizable(false);const [x,y]=w.getPosition();w.setPosition(...Object.values(visiblePosition(x,y,d.width,d.height)));saveLayout()}if(['size','style','timezone','city','portfolio','noteId'].some(k=>k in safe))reload(id);wins[id].show();wins[id].moveTop()}if(instance(id)?.type==='chat')reconcileChatScreens();return {ok:true,settings:getSet()}}
 ipcMain.handle('set:save',(_,patch)=>{const cur=getSet();const next={...cur,...patch,instanceConfigs:cur.instanceConfigs,sizes:{...cur.sizes,...(patch.sizes||{})},styles:{...cur.styles,...(patch.styles||{})}};wr('settings.json',next);
   const themeChanged=next.theme!==cur.theme;
   for(const id of Object.keys(wins)){if(patch.sizes&&patch.sizes[id]){next.instanceConfigs[id]={...next.instanceConfigs[id],size:patch.sizes[id]};wr('settings.json',next);const dim=dimensions(id);wins[id].setResizable(true);wins[id].setMinimumSize(0,0);wins[id].setMaximumSize(0,0);wins[id].setBounds({...wins[id].getBounds(),width:dim.width,height:dim.height});wins[id].setResizable(false);const [x,y]=wins[id].getPosition();const pos=visiblePosition(x,y,dim.width,dim.height);wins[id].setPosition(pos.x,pos.y);reload(id);wins[id].show();wins[id].moveTop()}if(patch.styles?.[id]!==undefined){next.instanceConfigs[id]={...next.instanceConfigs[id],style:patch.styles[id]};wr('settings.json',next)}if(themeChanged||patch.styles?.[id]!==undefined||(instance(id).type==='weather'&&patch.city!==undefined)||(instance(id).type==='invest'&&patch.portfolio!==undefined))reload(id)}
-  if(patch.onTop!==undefined)Object.entries(wins).forEach(([id,w])=>w.setAlwaysOnTop(!!instanceConfig(id).onTop,'screen-saver'));
+  if(patch.onTop!==undefined)Object.entries(wins).forEach(([id,w])=>{if(instance(id)?.type==='chat')return;w.setAlwaysOnTop(!!instanceConfig(id).onTop,'screen-saver')});
+  if(patch.chatOnTop!==undefined){const cid=chatIslandInstance(),t=chatTop();if(cid&&wins[cid]&&!wins[cid].isDestroyed())wins[cid].setAlwaysOnTop(t,'screen-saver');for(const w of chatCompanions.values())if(!w.isDestroyed())w.setAlwaysOnTop(t,'screen-saver')}
+  if(patch.chatVisible!==undefined)applyChatVisible();
   if(patch.autostart!==undefined)app.setLoginItemSettings({openAtLogin:!!patch.autostart});
   if(patch.chatMultiScreen!==undefined)reconcileChatScreens();
   return next});
@@ -277,7 +281,7 @@ ipcMain.handle('shot:list',async(e)=>{try{const srcs=await desktopCapturer.getSo
  return {ok:true,screens:screens.map(({index,name})=>({index,name})),current}}catch{return {ok:false,error:'לא ניתן לגשת למסכים'}}});
 function isBlackImage(img){try{const tiny=img.resize({width:16,height:9});const buf=tiny.toBitmap();let max=0;for(let i=0;i<buf.length;i+=4){const v=Math.max(buf[i],buf[i+1],buf[i+2]);if(v>max)max=v;if(max>14)return false}return true}catch{return false}}
 function hideChatWins(){const hidden=[]; // hide the island (and companions) so the AI itself is not in the frame
- for(const [id,w] of Object.entries(wins)){const it=instance(id);if(it&&it.type==='chat'&&!w.isDestroyed()&&w.isVisible()){w.hide();hidden.push({w,top:instanceConfig(id).onTop||instanceConfig(id).size==='island'})}}
+ for(const [id,w] of Object.entries(wins)){const it=instance(id);if(it&&it.type==='chat'&&!w.isDestroyed()&&w.isVisible()){w.hide();hidden.push({w,top:it.type==='chat'?chatTop():instanceConfig(id).onTop})}}
  for(const w of chatCompanions.values()){if(!w.isDestroyed()&&w.isVisible()){w.hide();hidden.push({w,top:true})}}
  return hidden}
 function showChatWins(hidden){for(const h of hidden){if(!h.w.isDestroyed()){h.w.show();if(h.top)h.w.setAlwaysOnTop(true,'screen-saver')}}}
@@ -308,7 +312,21 @@ ipcMain.handle('chat:poll',async(_,after)=>{try{return await chatPage(after)}cat
 // live push: one SSE stream in main, rows broadcast to every chat window; a catch-up page closes any gap on (re)connect
 const CHAT_STREAM_URL=process.env.GLASSWIDGETS_CHAT_STREAM_URL||CHAT_URL.replace(/\/chat$/,'/chat/stream');
 const chatStream={started:false,cursor:0,thread:'chat',stop:false};
-function broadcastChat(row){for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}}
+function applyChatVisible(){const id=chatIslandInstance();if(!id)return;const vis=getSet().chatVisible!==false;
+ if(!vis){for(const w of chatCompanions.values()){if(!w.isDestroyed())w.close()}chatCompanions.clear();const m=wins[id];if(m&&!m.isDestroyed())m.hide();return}
+ const m=wins[id];if(m&&!m.isDestroyed()){m.show();if(chatTop())m.setAlwaysOnTop(true,'screen-saver')}else open(id);
+ reconcileChatScreens()}
+function notifyChat(row){ // floating toast for incoming replies; his own rows and stale catchup never toast
+ try{
+  if(!row||row.from==='user')return;
+  if(row.received_at&&Date.now()-row.received_at>120000)return; // catchup replay after reconnect/restart
+  const ws=[...Object.values(wins),...chatCompanions.values()].filter(w=>w&&!w.isDestroyed());
+  if(ws.some(w=>w.isFocused()))return; // already looking at the island
+  const n=new Notification({title:'חיים שלי 💬',body:String(row.text||'').slice(0,140),silent:getSet().chatSound===false});
+  n.on('click',()=>{const id=chatIslandInstance();if(!id)return;const m=wins[id];if(m&&!m.isDestroyed()){m.show();if(chatTop())m.setAlwaysOnTop(true,'screen-saver');m.webContents.send('chat:pill','open')}});
+  n.show();
+ }catch{}}
+function broadcastChat(row){for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}notifyChat(row)}
 async function chatCatchup(){for(let n=0;n<10;n++){const r=await chatPage(Math.max(0,chatStream.cursor-1));if(!r.ok)throw new Error('catchup');for(const m of r.messages){if(m.received_at>chatStream.cursor)chatStream.cursor=m.received_at;broadcastChat(m)}for(const c of r.cards||[])broadcastCard(c);if(r.messages.length<50&&(!r.cards||r.cards.length<50))break}}
 async function runChatStream(){if(!CHAT_URL)return;let backoff=1000;
  while(!chatStream.stop){
@@ -554,7 +572,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
     ...instances().map(({id,type})=>({label:WIDGETS[type].label+' · '+id.slice(-6),type:'checkbox',checked:!!wins[id],click:()=>{toggle(id);tray.setContextMenu(menu())}})),
     {type:'separator'},
     {label:'העתק כתובת סוללת אייפון (ל-Shortcut)',click:()=>clipboard.writeText('http://'+require('os').hostname()+':8765/iphone-battery?t='+batTok+'&level=<Battery Level>&charging=<1 or 0>')},
-    {label:'תמיד מעל חלונות אחרים',type:'checkbox',checked:getSet().onTop,click:i=>{const s=getSet();s.onTop=i.checked;wr('settings.json',s);Object.values(wins).forEach(w=>w.setAlwaysOnTop(i.checked,'screen-saver'))}},
+    {label:'תמיד מעל חלונות אחרים',type:'checkbox',checked:getSet().onTop,click:i=>{const s=getSet();s.onTop=i.checked;wr('settings.json',s);Object.entries(wins).forEach(([id,w])=>{if(instance(id)?.type==='chat')return;w.setAlwaysOnTop(i.checked,'screen-saver')})}},
     {label:'הפעל עם ווינדוס',type:'checkbox',checked:app.getLoginItemSettings().openAtLogin,click:i=>app.setLoginItemSettings({openAtLogin:i.checked})},
     {type:'separator'},{label:'יציאה',click:()=>app.quit()}]);
   tray.setContextMenu(menu());
@@ -596,7 +614,7 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   if(!chatStream.started){chatStream.started=true;chatStream.thread='chat';runChatStream()} // the brain stays alive with no UI
   ensureChatInstance(); // the dynamic island is part of the permanent background
   const en=rd('enabled.json',null); // widgets + island always come up - after updates, after reboots, no matter what
-  instances().forEach(({id})=>{if(!en||en[id]!==false)open(id)});
+  instances().forEach(it0=>{const id=it0.id;if(it0.type==='chat'&&getSet().chatVisible===false)return;if(!en||en[id]!==false)open(id)});
   if(process.env.GLASSWIDGETS_NO_PICKER)openSettings(); // test hook: legacy straight-to-settings startup
   else if(process.argv.includes('--background'))bootLog('background start - staying in the tray, no picker'); // watchdog crash-relaunch: tray-only, no window steal (user rule 2026-10-13)
   else openPicker(); // the picker opens the chosen mode's management UI; the background keeps running either way
