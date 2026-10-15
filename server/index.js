@@ -150,13 +150,28 @@ async function main(){
     const mc=cfg.mailer||{};
     if(mc.host&&mc.user&&mc.pass&&mc.from&&mc.to){
      const{sendMailRetry}=require('./lib/pointer-mailer');
-     let lastMailed=null; // mail is for CHANGES only - the 45s heartbeat refresh advances the state file, never the inbox (flood guard, seen live 2026-10-14)
-     onPointer=async rec=>{
-      if(lastMailed&&lastMailed.url===rec.url&&lastMailed.down===rec.down)return;
-      const r=await sendMailRetry({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
-       subject:'GW-POINTER '+device.id,text:JSON.stringify(rec)});
-      if(r.ok)lastMailed={url:rec.url,down:rec.down}; // a failed send retries on the next publish
-      log(r.ok?'info':'warn',{kind:'mailer',stage:r.ok?'sent':'send_fail',mailStage:r.stage,attempt:r.attempt});
+     // user rule 2026-10-15: the inbox is a rendezvous transport, not a log. A down record carries
+     // no usable URL - never mailed (the agent's own health checks notice a dead tunnel anyway).
+     // A URL change mails only after holding STABLE_MS, so a flapping tunnel yields ONE mail with
+     // the final URL instead of one per flap (storm seen live 2026-10-14: 24 mails in 70min).
+     const STABLE_MS=120000;
+     let lastMailedUrl=null,pendingUrl=null,pendingTimer=null;
+     onPointer=rec=>{
+      if(!rec||rec.down||!rec.url)return;
+      if(rec.url===lastMailedUrl)return; // already mailed this URL
+      if(pendingTimer&&rec.url===pendingUrl)return; // heartbeat republish of the stabilizing candidate - keep its original clock
+      pendingUrl=rec.url;
+      if(pendingTimer)clearTimeout(pendingTimer); // a newer candidate restarts the stability clock
+      pendingTimer=setTimeout(async()=>{
+       pendingTimer=null;
+       const url=pendingUrl;
+       if(!url||url===lastMailedUrl)return;
+       const r=await sendMailRetry({host:mc.host,port:mc.port,user:mc.user,pass:mc.pass,from:mc.from,to:mc.to,
+        subject:'GW-POINTER '+device.id,text:JSON.stringify({url,deviceId:device.id,since:new Date().toISOString(),down:false})});
+       if(r.ok)lastMailedUrl=url; // a failed send retries on the next publish
+       log(r.ok?'info':'warn',{kind:'mailer',stage:r.ok?'sent':'send_fail',mailStage:r.stage,attempt:r.attempt});
+      },STABLE_MS);
+      if(pendingTimer.unref)pendingTimer.unref(); // a pending pointer mail must never hold the process open
      };
     }else log('warn',{kind:'mailer',stage:'config_incomplete'}); // GW_MAILER=1 without a full cfg.mailer: loud skip, never a partial attempt
    }
