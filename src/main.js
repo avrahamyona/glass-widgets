@@ -267,7 +267,7 @@ const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastC
 ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https?:\/\/\S+$/i.test(u))return {ok:false};shell.openExternal(u);return {ok:true}});
 ipcMain.handle('chat:send',async(_,text,replyTo)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(!CHAT_URL)return CHAT_DOWN;if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
  const fc=filelink.parseFileCommand(text);if(fc){filelink.handle(fc);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
- try{const r=await fetch(CHAT_URL_KEYED,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80)}),signal:AbortSignal.timeout(20000)});
+ try{const r=await fetch(CHAT_URL_KEYED,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80),from:'user'}),signal:AbortSignal.timeout(20000)});
   if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
@@ -352,11 +352,11 @@ ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  return {ok:true}});
 ipcMain.handle('chat:history',e=>{const id=callerInstance(e);if(!id)return {messages:[],seenHint:false,lastReceived:0};const h=rd('chat-'+id+'.json',null);return h&&Array.isArray(h.messages)?h:{messages:[],cards:[],seenHint:false,lastReceived:0}});
 ipcMain.handle('chat:save',(e,h)=>{const id=callerInstance(e);if(!id||!h||!Array.isArray(h.messages))return {ok:false};
- const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',err:String(m.err||'').slice(0,120),in_reply_to:String(m.in_reply_to||'').slice(0,80),myReaction:String(m.myReaction||'').slice(0,8)}));
+ const clean=h.messages.filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),dir:m.dir==='in'?'in':'out',text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,status:['sent','failed','waiting','replied'].includes(m.status)?m.status:'sent',err:String(m.err||'').slice(0,120),in_reply_to:String(m.in_reply_to||'').slice(0,80),myReaction:String(m.myReaction||'').slice(0,8),from:String(m.from||'').slice(0,20)}));
  const prev=rd('chat-'+id+'.json',null),byId=new Map();
  if(prev&&Array.isArray(prev.messages))for(const m of prev.messages)if(m&&m.id)byId.set(m.id,m);
  for(const m of clean)byId.set(m.id,m);
- const messages=[...byId.values()].sort((a,b)=>(a.at||a.received_at)-(b.at||b.received_at)).slice(-200);
+ const messages=[...byId.values()].filter(m=>!(String(m.id).startsWith('local-')&&Date.now()-(+m.at||+m.received_at||0)>600000)).sort((a,b)=>(a.at||a.received_at)-(b.at||b.received_at)).slice(-200);
  const cards=(Array.isArray(h.cards)?h.cards:[]).filter(c=>c&&c.id).map(c=>({...cleanCard(c),acted:!!c.acted,actedButton:String(c.actedButton||'').slice(0,40),settled:String(c.settled||'').slice(0,20)}));
  const prevCards=prev&&Array.isArray(prev.cards)?prev.cards:[];
  const byCard=new Map();for(const c of prevCards)if(c&&c.id)byCard.set(c.id,c);for(const c of cards)byCard.set(c.id,c);

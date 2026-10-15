@@ -126,7 +126,7 @@ document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-col
 const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
-function incoming(m){if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;
+function incoming(m){if(!m||!m.id)return;const _ex=H.messages.find(x=>x.id===m.id);if(_ex){const _nd=m.from==='user'?'out':'in';if(_ex.dir!==_nd){_ex.dir=_nd;_ex.from=String(m.from||'');save();paintChat()}return}
  const mine=m.from==='user'; // his own row (any of his machines, echoed via stream/poll) belongs on the SENT side and must never alert like a reply
  H.messages.push({id:m.id,dir:mine?'out':'in',text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
@@ -255,7 +255,7 @@ async function doSend(){const t=txt.value.trim();if(!t)return;
  if(!H.seenHint){H.seenHint=true;hint.style.display=''}
  const r=await api.chatSend(t,m.in_reply_to);
  const i=H.messages.findIndex(x=>x.id===tmp);if(i<0)return;
- if(r.ok)H.messages[i]={id:r.id,dir:'out',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to};else{H.messages[i].status='failed';H.messages[i].err=String(r&&r.error||'').slice(0,120)}
+ if(r.ok)H.messages[i]={id:r.id,dir:'out',from:'user',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to};else{H.messages[i].status='failed';H.messages[i].err=String(r&&r.error||'').slice(0,120)}
  if(api.chatSentSend)api.chatSentSend(H.messages[i]);
  save();paintChat()}
 let alertPreview='';let soundOn=true;let actx=null;
@@ -307,7 +307,7 @@ if(window.api&&api.pillCmd)api.pillCmd(a=>{if(a==='open'&&pillMode!=='open')open
  window.addEventListener('blur',()=>{if(pillMode==='open')closePill()});
  window.addEventListener('focus',()=>{if(pillMode==='open'&&unread){setUnread(false);markRead()}});
 }else{pill.style.display='none';card.style.display='flex';send.onclick=doSend;shot.onclick=()=>doShot(scrIdx);scr.onclick=scrCycle;wireComposer(txt,()=>doSend())}
-(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;if(!Array.isArray(H.cards))H.cards=[];scheduleSettleScan();readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
+(async()=>{if(!window.api)return;try{const r=await api.setGet();soundOn=r.settings.chatSound!==false}catch{}H=await api.chatHistory()||H;H.messages=(H.messages||[]).filter(m=>m&&!(String(m.id||'').startsWith('local-')&&Date.now()-(+m.at||0)>300000));for(const m of H.messages){if(m.from){const nd=m.from==='user'?'out':'in';if(nd!==m.dir)m.dir=nd}}if(!Array.isArray(H.cards))H.cards=[];scheduleSettleScan();readUpTo=+H.readUpTo||0;if(H.seenHint)hint.style.display='none';else if(H.messages.length)H.seenHint=true;
  if(api.onChatSent)api.onChatSent(m=>{if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;H.messages.push(m);save();render(log);if(island&&pillMode==='open')render(pillBodyLog());updatePillSt()});
  if(api.onChatMsg)api.onChatMsg(incoming);
  if(api.onChatCard)api.onChatCard(incomingCard);
