@@ -127,9 +127,10 @@ const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
 function incoming(m){if(!m||!m.id||H.messages.some(x=>x.id===m.id))return;
- H.messages.push({id:m.id,dir:'in',text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
+ const mine=m.from==='user'; // his own row (any of his machines, echoed via stream/poll) belongs on the SENT side and must never alert like a reply
+ H.messages.push({id:m.id,dir:mine?'out':'in',text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
- save();render(log);if(island&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
+ save();render(log);if(island&&!mine&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
 function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return;
  H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,expiresAt:+c.expiresAt||0,file:c.file&&typeof c.file==='object'?{name:String(c.file.name||''),size:+c.file.size||0,mime:String(c.file.mime||''),url:String(c.file.url||''),path:String(c.file.path||'')}:undefined,at:+c.at||Date.now(),acted:false,actedButton:'',settled:''});
  save();render(log);
