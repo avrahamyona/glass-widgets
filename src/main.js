@@ -561,6 +561,12 @@ function boot(){if(booted||!lock||!app.isReady())return;booted=true;bootLog('boo
   ipcMain.handle('picker:choose',(_,m)=>{if(m==='server')openServerSettings();else openSettings();return {ok:true}}); // navigate inside the one management window
   ipcMain.handle('picker:open',()=>{openPicker();return {ok:true}});
   ipcMain.handle('server-settings:open',()=>{openServerSettings();return {ok:true}});
+  // local server control ("פתח שרת"): status probe + manual hidden start. The launcher VBS lives next
+  // to the server data dir; starting is a no-op when the server already answers.
+  const serverLauncherPath=()=>{const dirs=[process.env.GLASSWIDGETS_SERVER_DATA,process.env.USERPROFILE&&path.join(process.env.USERPROFILE,'gw-server','data'),path.join(os.homedir(),'.glasswidgets-server')].filter(Boolean);for(const d of dirs){try{const vbs=path.join(d,'..','launch-hidden.vbs');if(fs.existsSync(vbs))return vbs}catch{}}return null};
+  const serverUp=async()=>{if(!CHAT_URL_KEYED)return false;try{const r=await fetch(CHAT_URL_KEYED+'&limit=1',{signal:AbortSignal.timeout(3000)});return r.ok}catch{return false}};
+  ipcMain.handle('server:status',async()=>({ok:true,provisioned:!!CHAT_URL,launcher:!serverLauncherPath()?false:true,running:await serverUp()}));
+  ipcMain.handle('server:start',async()=>{const vbs=serverLauncherPath();if(!vbs)return {ok:false,error:'לא נמצא מריץ שרת על המחשב'};if(await serverUp())return {ok:true,already:true};try{const cp=spawn('wscript.exe',[vbs],{detached:true,stdio:'ignore'});cp.unref();return {ok:true,started:true}}catch(e){return {ok:false,error:'ההפעלה נכשלה'}}});
   showPickerRef=openPicker;
   const tray=new Tray(nativeImage.createFromPath(path.join(__dirname,'..','build','tray.png'))); // tray first: access survives any later startup failure
   tray.setToolTip('החיים שלי המחשבי');

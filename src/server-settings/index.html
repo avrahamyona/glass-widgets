@@ -34,6 +34,9 @@ textarea{width:100%;border:0;border-radius:10px;background:#f2f2f7;padding:9px 1
  <div class="row"><div><div class="lbl">הפעל עם ווינדוס</div></div><div class="tgl" id="tStart"></div></div>
 </div>
 <div class="card">
+ <div class="row"><div><div class="lbl">שרת מקומי</div><div class="hint" id="srvSt">בודק...</div></div><button class="act" id="srvBtn">פתח שרת</button></div>
+</div>
+<div class="card">
  <div class="row"><div><div class="lbl">עדכונים</div><div class="hint" id="updSt"></div></div><button class="act" id="updBtn">בדוק עדכון</button></div>
 </div>
 <div class="card">
@@ -53,6 +56,9 @@ async function init(){
  bind('tTopChat',()=>s.chatOnTop!==false,v=>{s.chatOnTop=v;return api.setSave({chatOnTop:v})});
  bind('tTop',()=>!!s.onTop,v=>{s.onTop=v;return api.setSave({onTop:v})});
  bind('tStart',()=>!!r.autostart,v=>{s._a=v;return api.setSave({autostart:v})});
+ const paintSrv=async()=>{const st=await api.serverStatus();$('srvSt').textContent=!st.provisioned?'השרת לא הוגדר עדיין':st.running?'השרת פעיל':'השרת כבוי'};
+ paintSrv();
+ $('srvBtn').onclick=async()=>{$('srvBtn').disabled=true;$('srvSt').textContent='מפעיל...';const r4=await api.serverStart();if(r4&&!r4.ok){$('srvSt').textContent=r4.error||'נכשל';$('srvBtn').disabled=false;return}setTimeout(()=>{paintSrv();$('srvBtn').disabled=false},8000)};
  const upd=await api.updateState();paintUpd(upd);
  $('updBtn').onclick=async()=>{$('updBtn').disabled=true;const r2=await api.updateCheck();paintUpd(r2);$('updBtn').disabled=false};
  $('fbBtn').onclick=async()=>{const t=$('fb').value.trim();if(!t)return;$('fbBtn').disabled=true;const r3=await api.feedbackSend(t);$('fbSt').textContent=r3.ok?'נשלח, תודה!':(r3.error||'נכשל');if(r3.ok)$('fb').value='';$('fbBtn').disabled=false};
