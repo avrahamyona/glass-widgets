@@ -265,7 +265,7 @@ const CHAT_URL_KEYED=CHAT_URL?CHAT_URL+'?key='+encodeURIComponent(CHAT_KEY):'';
 const CHAT_DOWN={ok:false,error:'השרת המקומי לא מוגדר עדיין - צריך להפעיל את השרת העצמי'};
 const filelink=require('./lib/filelink');filelink.init({broadcastChat,broadcastCard,chatUrl:CHAT_URL,chatKey:CHAT_KEY});
 ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https?:\/\/\S+$/i.test(u))return {ok:false};shell.openExternal(u);return {ok:true}});
-ipcMain.handle('chat:send',async(_,text,replyTo)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(!CHAT_URL)return CHAT_DOWN;if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const id=crypto.randomUUID();
+ipcMain.handle('chat:send',async(_,text,replyTo,reqId)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(!CHAT_URL)return CHAT_DOWN;if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const rid=String(reqId||'').slice(0,80);const id=/^[0-9a-f-]{36}$/.test(rid)?rid:crypto.randomUUID();
  const fc=filelink.parseFileCommand(text);if(fc){filelink.handle(fc);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
  try{const r=await fetch(CHAT_URL_KEYED,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80),from:'user'}),signal:AbortSignal.timeout(20000)});
   if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
