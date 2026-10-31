@@ -126,7 +126,13 @@ document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-col
 const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
-function incoming(m){if(!m||!m.id)return;const _ex=H.messages.find(x=>x.id===m.id);if(_ex){const _nd=m.from==='user'?'out':'in';if(_ex.dir!==_nd){_ex.dir=_nd;_ex.from=String(m.from||'');save();paintChat()}return}
+function incoming(m){if(!m||!m.id)return;const _ex=H.messages.find(x=>x.id===m.id);if(_ex){
+ // An optimistic send can be echoed before POST resolves. Keep the server receipt/cursor even when the bubble already exists.
+ const _nd=m.from==='user'?'out':'in';let changed=false;
+ if(_ex.dir!==_nd||_ex.from!==String(m.from||'')){_ex.dir=_nd;_ex.from=String(m.from||'');changed=true}
+ if(+m.received_at>0){if(+m.received_at>(+_ex.received_at||0)){_ex.received_at=+m.received_at;changed=true}if(+m.received_at>(H.lastReceived||0)){H.lastReceived=+m.received_at;changed=true}}
+ if(m.from==='user'&&_ex.status==='waiting'){_ex.status='sent';changed=true}
+ if(changed){save();paintChat()}return}
  const mine=m.from==='user'; // his own row (any of his machines, echoed via stream/poll) belongs on the SENT side and must never alert like a reply
  H.messages.push({id:m.id,dir:mine?'out':'in',from:String(m.from||''),text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
  if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
@@ -254,8 +260,8 @@ async function doSend(){const t=txt.value.trim();if(!t)return;
  H.messages.push(m);txt.value='';grow(txt);paintChat();save();txt.focus(); // optimistic: the bubble lands before the network does
  if(!H.seenHint){H.seenHint=true;hint.style.display=''}
  const r=await api.chatSend(t,m.in_reply_to,tmp);
- const i=H.messages.findIndex(x=>x.id===tmp);if(i<0)return;
- if(r.ok){const dup=H.messages.findIndex((x,j)=>x.id===r.id&&j!==i);if(dup>=0)H.messages.splice(dup,1);H.messages[i]={id:r.id,dir:'out',from:'user',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to}}else{H.messages[i].status='failed';H.messages[i].err=String(r&&r.error||'').slice(0,120)}
+ let i=H.messages.findIndex(x=>x.id===tmp);if(i<0)return;
+ if(r.ok){const dup=H.messages.findIndex((x,j)=>x.id===r.id&&j!==i);if(dup>=0){const echoed=H.messages[dup];H.messages[i].received_at=Math.max(+H.messages[i].received_at||0,+echoed.received_at||0);H.messages.splice(dup,1);if(dup<i)i--}H.messages[i]={...H.messages[i],id:r.id,dir:'out',from:'user',text:t,at:m.at,status:'sent',in_reply_to:m.in_reply_to}}else{H.messages[i].status='failed';H.messages[i].err=String(r&&r.error||'').slice(0,120)}
  if(api.chatSentSend)api.chatSentSend(H.messages[i]);
  save();paintChat()}
 let alertPreview='';let soundOn=true;let actx=null;

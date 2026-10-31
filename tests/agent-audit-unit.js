@@ -34,17 +34,18 @@ const evW=w=>({sender:w.webContents}); // e.sender IS the webContents object in 
  r=w.h.pt(evW(w.primary),true); // retry: setter now works
  assert(r&&r.ok===true,'retry succeeds');
  const lines=w.audit.filter(l=>l.kind==='island_passthrough');
- assert(lines.length===2,'retry logs BOTH window transitions (the poisoned-cache bug would log zero)');
+ assert(lines.length===1,'retry logs sender transition (the poisoned-cache bug would log zero)');
  const pl=lines.find(l=>l.wid===7);
  assert(pl&&pl.src==='primary'&&pl.on===true&&pl.source==='island'&&pl.instance==='chat','line carries window identity/role/validated provenance');
- assert(lines.some(l=>l.wid===9&&l.src==='companion'),'companion transition logged with its own identity');
+ assert(!lines.some(l=>l.wid===9),'primary retry must not change companion pointer state');
  w.audit.length=0;
  w.h.pt(evW(w.primary),true);w.h.pt(evW(w.primary),true);
  assert(w.audit.length===0,'same-state repeats add zero lines');
  w.h.pt(evW(w.primary),false);
  const off=w.audit.filter(l=>l.kind==='island_passthrough'&&l.on===false);
- assert(off.length===2,'transition off logs one line per window');
- assert(off.some(l=>l.src==='primary'&&l.wid===7)&&off.some(l=>l.src==='companion'&&l.wid===9),'per-window identity on both');
+ assert(off.length===1,'transition off logs only sender window');
+ assert(off.some(l=>l.src==='primary'&&l.wid===7),'sender identity retained');
+ w.h.pt(evW(w.comp),false);assert(w.audit.some(l=>l.kind==='island_passthrough'&&l.src==='companion'&&l.wid===9),'companion own transition has its identity');
 }
 
 // B) strict move validation: no coercion (ops reproduction: x:"12",y:null must be rejected)

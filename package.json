@@ -1,6 +1,6 @@
 {
   "name": "glasswidgets",
-  "version": "0.4.71",
+  "version": "0.4.72",
   "private": true,
   "description": "Rounded-card desktop widgets for Windows",
   "main": "src/main.js",

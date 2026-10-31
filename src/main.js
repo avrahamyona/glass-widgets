@@ -297,8 +297,8 @@ ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.r
    if(d){srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:d.size.width,height:d.size.height}});
     src=srcs[idx];img=src&&src.thumbnail}
    if(!img||img.isEmpty()||isBlackImage(img))return {ok:false,error:'הצילום יצא שחור - המסך כבוי או לא נגיש כרגע'}}}
- catch{showChatWins(hidden);return {ok:false,error:'אין חיבור כרגע'}}
- showChatWins(hidden);
+ catch{return {ok:false,error:'אין חיבור כרגע'}}
+ finally{showChatWins(hidden)} // restore on every capture path, including early failure returns
  try{const jpeg=img.toJPEG(82),sz=img.getSize();
   if(jpeg.length>3500000)return {ok:false,error:'התמונה גדולה מדי'};
   const r=await fetch(SHOT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,image:jpeg.toString('base64'),at:Date.now(),width:sz.width,height:sz.height}),signal:AbortSignal.timeout(20000)});
@@ -326,14 +326,16 @@ function notifyChat(row){ // floating toast for incoming replies; his own rows a
   n.on('click',()=>{const id=chatIslandInstance();if(!id)return;const m=wins[id];if(m&&!m.isDestroyed()){m.show();if(chatTop())m.setAlwaysOnTop(true,'screen-saver');m.webContents.send('chat:pill','open')}});
   n.show();
  }catch{}}
-function broadcastChat(row){for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}notifyChat(row)}
+const chatDeliverySeen=new Map(); // bounded dedupe across reconnect catch-up and SSE replay
+function broadcastChat(row){if(row&&row.id){if(chatDeliverySeen.has(row.id))return;chatDeliverySeen.set(row.id,true);if(chatDeliverySeen.size>512)chatDeliverySeen.delete(chatDeliverySeen.keys().next().value)}for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}notifyChat(row)}
 async function chatCatchup(){for(let n=0;n<10;n++){const r=await chatPage(Math.max(0,chatStream.cursor-1));if(!r.ok)throw new Error('catchup');for(const m of r.messages){if(m.received_at>chatStream.cursor)chatStream.cursor=m.received_at;broadcastChat(m)}for(const c of r.cards||[])broadcastCard(c);if(r.messages.length<50&&(!r.cards||r.cards.length<50))break}}
 async function runChatStream(){if(!CHAT_URL)return;let backoff=1000;
  while(!chatStream.stop){
   let idleT=null;const ctl=new AbortController();
   try{
    await chatCatchup().catch(()=>{}); // best-effort: a failing GET must not block the live stream (0.4.64)
-   const u=new URL(CHAT_STREAM_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('thread',chatStream.thread);u.searchParams.set('v',app.getVersion());
+   const u=new URL(CHAT_STREAM_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('thread',chatStream.thread);u.searchParams.set('v',app.getVersion());if(chatStream.cursor)u.searchParams.set('after',String(chatStream.cursor)); // resume after catch-up, never replay only the oldest 50
+   idleT=setTimeout(()=>ctl.abort(),8000); // bound connection/header wait, not only idle established streams
    const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
    if(!r.ok||!r.body)throw new Error('stream '+r.status);
    backoff=1000;
@@ -421,9 +423,12 @@ ipcMain.on('chat:move',(e,p)=>{try{const id=islandAuditId(e);if(!id)return;if(!p
  if((moveLogCount[wid]||0)>=MOVE_PROBE_MAX){if(!moveCapLogged[wid]){moveCapLogged[wid]=1;agentAudit({kind:'island_move_cap',instance:id,src:role,wid})}return} // exhausted: absence from here on means sampling STOPPED, said out loud once
  const now=Date.now();if(now-(moveLogLast[wid]||0)<250)return;moveLogLast[wid]=now;const used=(moveLogCount[wid]=(moveLogCount[wid]||0)+1);agentAudit({kind:'island_move',x:Math.round(p.x),y:Math.round(p.y),mode:'mini',over:p.over,instance:id,src:role,wid,budget:MOVE_PROBE_MAX-used})}catch{}}); // raw delivery probe, strictly validated (no coercion): an observed renderer move. Absence (with budget>0) = no renderer delivery observed for sampled moves, not proof of where it was lost
 const passthroughApplied=new Map(); // webContents.id -> last SUCCESSFULLY applied ignore state: audit TRANSITIONS only, never per-invocation spam
-ipcMain.handle('chat:passthrough',(e,on)=>{try{const id=callerInstance(e);const ws=[];if(id&&wins[id])ws.push(wins[id]);for(const w of chatCompanions.values())ws.push(w);if(!ws.length)return {ok:false};const target=!!on;const islandId=islandAuditId(e);
- ws.forEach(w=>{if(w.isDestroyed())return;const k=w.webContents.id;const role=(id&&w===wins[id])?'primary':'companion';w.setIgnoreMouseEvents(target,{forward:true}); // apply FIRST: a throwing setter must not poison the cache
-  if(passthroughApplied.get(k)!==target){passthroughApplied.set(k,target);agentAudit({kind:'island_passthrough',on:target,instance:islandId||null,source:islandId?'island':'other',wid:k,src:role})}}); // one audited line per successfully transitioned window, with its identity
+ipcMain.handle('chat:passthrough',(e,on)=>{try{const islandId=islandAuditId(e);if(!islandId)return {ok:false};
+ // Hover state belongs to its own screen. A collapsed companion must never make an open island on another screen click-through.
+ const w=[wins[islandId],...chatCompanions.values()].find(w=>w&&!w.isDestroyed()&&w.webContents===e.sender);if(!w)return {ok:false};
+ const target=!!on,k=w.webContents.id,role=w===wins[islandId]?'primary':'companion';
+ w.setIgnoreMouseEvents(target,{forward:true}); // apply FIRST: a throwing setter must not poison the cache
+ if(passthroughApplied.get(k)!==target){passthroughApplied.set(k,target);agentAudit({kind:'island_passthrough',on:target,instance:islandId,source:'island',wid:k,src:role})}
  return {ok:true}}catch{return {ok:false}}});
 ipcMain.handle('feedback:send',async(_,text)=>{text=String(text||'').trim();if(text.length<5)return {ok:false,error:'כתוב לפחות כמה מילים (5 תווים ומעלה)'};if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};
  if(!CHAT_URL)return CHAT_DOWN;
