@@ -53,7 +53,8 @@ const launch=async()=>{
  await waitAck('s1','done');
  // 1b) replay in-session: the SAME signed message again -> duplicate refusal
  ACK=ACK.filter(x=>x.id!=='s1');pushCmd({id:'s1',kind:'run_command',command:'touch '+m1,ts,exp,sig:sign('s1','run_command',ts,exp,'touch '+m1)});
- await sleep(1500);assert(!ACK.some(x=>x.id==='s1'),'replay: audit-only, no ack (a dup ack would clobber the real result)');
+ let aR=null;for(let i=0;i<50;i++){aR=ACK.find(x=>x.id==='s1');if(aR)break;await sleep(200)}
+ assert(aR&&aR.status==='done'&&aR.note==='ok','terminal replay re-acks the CACHED result (idempotent, no re-run): '+JSON.stringify(aR));
  const seen=JSON.parse(fs.readFileSync(cfg+'/glasswidgets/agent-seen.json','utf8'));
  assert(seen.s1&&seen.s1.decision==='executed'&&seen.s1.exp===exp,'seen store persisted decision+exp: '+JSON.stringify(seen.s1));
  // 1c) replay after RESTART: relaunch with the same profile, same signed message -> still duplicate
@@ -61,7 +62,8 @@ const launch=async()=>{
  ({a,A}=await launch());
  ACK=ACK.filter(x=>x.id!=='s1');
  pushCmd({id:'s1',kind:'run_command',command:'touch '+m1,ts,exp,sig:sign('s1','run_command',ts,exp,'touch '+m1)});
- await sleep(1500);assert(!ACK.some(x=>x.id==='s1'),'replay after restart: no ack, original result stands');
+ let aR2=null;for(let i=0;i<50;i++){aR2=ACK.find(x=>x.id==='s1');if(aR2)break;await sleep(200)}
+ assert(aR2&&aR2.status==='done'&&aR2.note==='ok','replay after restart: CACHED result re-acked from the durable ledger, no re-run: '+JSON.stringify(aR2));
  // 2) signed but cancelled in time: no execution, decision persisted
  ts=Date.now();exp=EX();pushCmd({id:'s2',kind:'run_command',command:'sleep 2 && touch '+m2,ts,exp,sig:sign('s2','run_command',ts,exp,'sleep 2 && touch '+m2)});
  c=await card('sleep 2 && touch '+m2);
@@ -82,21 +84,20 @@ const launch=async()=>{
  await clickBtn('touch '+m3,'דחה');await clickBtn('touch '+m3,'דחה');await clickBtn('touch '+m3,'דחה');
  // 4) expired exp: blocking card
  ts=Date.now();exp=Date.now()-1000;pushCmd({id:'s4',kind:'run_command',command:'touch '+m4,ts,exp,sig:sign('s4','run_command',ts,exp,'touch '+m4)});
- c=await card('touch '+m4);
- assert(/אישור הרצת פקודה/.test(c.title),'expired exp -> blocking card: '+c.title);
- await sleep(1500);assert(!fs.existsSync(m4),'expired sig never auto-executes');
- await clickBtn('touch '+m4,'דחה');
+ const aS4=await waitAck('s4','failed'); // expired transport authority is refused at intake - no card, no user prompt
+ assert(/expired/.test(aS4.note||''),'expired sig refused at intake: '+aS4.note);
+ assert(!fs.existsSync(m4),'expired sig never executes');
  // 6) ts too far in the FUTURE: blocking card
  ts=Date.now()+120000;exp=ts+60000;pushCmd({id:'s6',kind:'run_command',command:'touch '+m5,ts,exp,sig:sign('s6','run_command',ts,exp,'touch '+m5)});
  c=await card('touch '+m5);
  assert(/אישור הרצת פקודה/.test(c.title),'future ts -> blocking card: '+c.title);
  await sleep(1500);assert(!fs.existsSync(m5),'future-ts never auto-executes');
  await clickBtn('touch '+m5,'דחה');
- // 7) exp<=ts: blocking card
+ // 7) exp<=ts: expired transport authority - refused at intake, no card
  ts=Date.now();exp=ts-1000;pushCmd({id:'s7',kind:'run_command',command:'touch '+m5,ts,exp,sig:sign('s7','run_command',ts,exp,'touch '+m5)});
- c=await card('touch '+m5);
- assert(/אישור הרצת פקודה/.test(c.title),'exp<=ts -> blocking card: '+c.title);
- await clickBtn('touch '+m5,'דחה');
+ const aS7=await waitAck('s7','failed');
+ assert(/expired/.test(aS7.note||''),'exp<=ts refused at intake: '+aS7.note);
+ assert(!fs.existsSync(m5),'exp<=ts never executes');
  // 8) unsigned duplicate id: second push with a parked id refused, original card intact and approvable
  pushCmd({id:'s8',kind:'run_command',command:'touch '+m6});
  c=await card('touch '+m6);

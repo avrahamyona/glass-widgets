@@ -2,6 +2,9 @@
 const{startLocalServer,BODY_CAP}=require('../src/lib/localserver');
 const assert=(c,msg)=>{if(!c){console.error('FAIL:',msg);process.exit(1)}};
 const TOKEN='test-key-123';
+const crypto=require('crypto');
+// device-signed responses bind the response to the REQUEST: deviceId,method,path,query,readTs,readNonce,status,sha256(body)
+const canon=(dev,method,path,q,ts,nonce,status,body)=>Buffer.from('sig:'+[dev,method,path,q,ts,nonce,String(status),crypto.createHash('sha256').update(body,'utf8').digest('hex')].join('\n')).toString('base64url');
 
 async function main(){
  // 1) refuses to start without a token
@@ -82,6 +85,67 @@ async function main(){
   const h=await fetch('http://127.0.0.1:'+r2.port+'/health',{headers:{'X-GW-Key':TOKEN}});
   assert(h.status===200,'serves after restart');
   await r2.stop()}
+
+ // 9) /info + /task are PRIVATE READS: no verifyReadAuth -> 403 even with the right key
+ {const r4=await startLocalServer({port:0,token:TOKEN,version:'0.4.62',caps:'approve,update',onCommand:()=>({accepted:true}),
+   log:(l,o)=>logs.push({l,...o}),getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'}),getTask:()=>null,tasksOk:()=>true});
+  const U4='http://127.0.0.1:'+r4.port;
+  assert((await fetch(U4+'/info',{headers:{'X-GW-Key':TOKEN}})).status===403,'/info without signed-read auth -> 403 (public key is NOT enough)');
+  assert((await fetch(U4+'/task?id=x',{headers:{'X-GW-Key':TOKEN}})).status===403,'/task without signed-read auth -> 403');
+  assert(logs.some(l=>l.stage==='read_auth_fail'),'read auth failure audited');
+  await r4.stop()}
+
+ // 10) /info: signed-read auth passes; device-signed response when enrolled, deviceless marker else
+ {const r5=await startLocalServer({port:0,token:TOKEN,version:'0.4.62',caps:'approve,update',onCommand:()=>({accepted:true}),
+   verifyReadAuth:()=>true,getInfo:()=>({deviceId:'dev-9',pubkey:'cHVi'}),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>Buffer.from('sig:'+t).toString('base64url')})});
+  const U5='http://127.0.0.1:'+r5.port,H={headers:{'X-GW-Key':TOKEN}};
+  const res=await fetch(U5+'/info',H);const txt=await res.text();const i=JSON.parse(txt);
+  assert(i.ok&&i.v==='0.4.62'&&i.deviceId==='dev-9'&&i.pubkey==='cHVi','info body: '+txt);
+  assert(res.headers.get('x-gw-device')==='dev-9'&&res.headers.get('x-gw-device-sig')===canon('dev-9','GET','/info','','','',200,txt),'info response signed over the request-bound canonical (not the bare body)');
+  assert(res.headers.get('x-gw-device-sig')!==txt&&res.headers.get('x-gw-device-sig')!=='sig('+txt+')','the old body-only replayable scheme is gone');
+  await r5.stop()}
+ {const r5b=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),verifyReadAuth:()=>true}); // not enrolled
+  const res=await fetch('http://127.0.0.1:'+r5b.port+'/info',{headers:{'X-GW-Key':TOKEN}});const i=await res.json();
+  assert(i.ok&&i.deviceless===true&&!res.headers.get('x-gw-device-sig'),'unenrolled /info -> base shape with deviceless marker, unsigned');
+  await r5b.stop()}
+
+ // 11) /task: ledger-backed idempotent polling, device key REQUIRED (results are private)
+ {const{createLedger}=require('../src/lib/ledger');
+  const fs2=require('fs'),path2=require('path');
+  const tf=path2.join(fs2.mkdtempSync('/tmp/gw-ledger-'),'ledger.json');
+  const store=createLedger(tf);
+  const H={headers:{'X-GW-Key':TOKEN}};
+  {const r6=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+    verifyReadAuth:()=>true,getTask:id=>store.get(id),tasksOk:()=>store.ok(),getDevice:()=>null});
+   assert((await fetch('http://127.0.0.1:'+r6.port+'/task?id=t1',H)).status===503,'no enrolled device -> /task closed (503 no_device_key)');
+   await r6.stop()}
+  const r7=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+   verifyReadAuth:()=>true,getTask:id=>store.get(id),tasksOk:()=>store.ok(),getDevice:()=>({deviceId:'dev-9',deviceSign:t=>Buffer.from('sig:'+t).toString('base64url')})});
+  const U7='http://127.0.0.1:'+r7.port;
+  {const resE=await fetch(U7+'/task?id=nope',H);const txtE=await resE.text();
+   assert(resE.status===404,'unknown task -> 404');
+   assert(resE.headers.get('x-gw-device-sig')===canon('dev-9','GET','/task','id=nope','','',404,txtE),'ERROR responses are device-signed too (a 404 cannot be replayed onto another task)');}
+  store.put('t1',{status:'accepted',exp:Date.now()+300000});
+  let res=await fetch(U7+'/task?id=t1',H);let j=await res.json();
+  assert(j.status==='accepted'&&j.terminal===false,'accepted record visible');
+  store.put('t1',{status:'done',note:'2 matches',result:{matches:2}});
+  res=await fetch(U7+'/task?id=t1',H);const txt=await res.text();j=JSON.parse(txt);
+  assert(j.status==='done'&&j.terminal===true&&j.result.matches===2,'terminal record served');
+  assert(res.headers.get('x-gw-device-sig')===canon('dev-9','GET','/task','id=t1','','',200,txt),'task response signed over the request-bound canonical');
+  store.put('t1',{status:'failed',note:'late'});
+  j=await (await fetch(U7+'/task?id=t1',H)).json();
+  assert(j.status==='done','terminal record idempotent (a late write cannot clobber)');
+  const store2=createLedger(tf);
+  assert(store2.get('t1').status==='done','record durable across reload');
+  await r7.stop();
+  fs2.writeFileSync(tf,'{corrupt');
+  const store3=createLedger(tf);
+  assert(store3.ok()===false,'corrupt ledger -> ok() false');
+  assert(store3.put('t9',{status:'accepted',exp:Date.now()+1000})===false,'put on a down ledger REFUSES (never wipes evidence)');
+  const r8=await startLocalServer({port:0,token:TOKEN,version:'x',caps:'',onCommand:()=>({accepted:true}),
+   verifyReadAuth:()=>true,getTask:id=>store3.get(id),tasksOk:()=>store3.ok(),getDevice:()=>({deviceId:'d',deviceSign:t=>'s'})});
+  assert((await fetch('http://127.0.0.1:'+r8.port+'/task?id=t1',H)).status===503,'broken ledger -> 503');
+  await r8.stop()}
 
  console.log('AGENT-SERVER-UNIT: PASS');
 }

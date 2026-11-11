@@ -47,9 +47,10 @@ const check=(body,label)=>{
  globalThis.__ackSrc=src.slice(aStart,i+1);
 }
 const mkAck=(onSend)=>{let sent=null;const audits=[];
- const fn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch',globalThis.__ackSrc+';return ack;')
+ const {capResult,RESULT_CAP}=require('../src/lib/ledger.js');
+ const fn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch','capResult','RESULT_CAP','ledger',globalThis.__ackSrc+';return ack;')
  ('k',{noteLen:2000,resultLen:3000},o=>audits.push(o),fit,'http://x/ack',
-  async(u,o)=>{sent=o.body;return {ok:true,text:async()=>'{"updated":1}'}});
+  async(u,o)=>{sent=o.body;return {ok:true,text:async()=>'{"updated":1}' }},capResult,RESULT_CAP,{has:()=>false,put:()=>true});
  return {fn,getSent:()=>sent,audits}};
 
 
@@ -64,9 +65,10 @@ const mkAck=(onSend)=>{let sent=null;const audits=[];
 // 9) extracted ack integration: on an unfittable body the fetch is NEVER called
 {
  let fetches=0;const audits2=[];
- const ackFn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch',
+ const {capResult,RESULT_CAP}=require('../src/lib/ledger.js');
+ const ackFn=new Function('cmdKey','CAPS','audit','fitAckBody','ackUrl','fetch','capResult','RESULT_CAP','ledger',
   globalThis.__ackSrc+';return ack;')('k',{noteLen:2000,resultLen:3000},o=>audits2.push(o),fit,'http://x/ack',
-  async()=>{fetches++;return {ok:true,text:async()=>'{"updated":1}'}});
+  async()=>{fetches++;return {ok:true,text:async()=>'{"updated":1}'}},capResult,RESULT_CAP,{has:()=>false,put:()=>true});
  (async()=>{
   await ackFn('i'.repeat(5000),'done','n'.repeat(5000),{blob:'b'.repeat(5000)});
   assert(fetches===0,'unfittable body: fetch NOT called, got '+fetches);
@@ -81,6 +83,15 @@ const mkAck=(onSend)=>{let sent=null;const audits=[];
   const wire=JSON.parse(cap.getSent());
   assert(wire.result.matches.length<50,'matches shrunk on the ack path');
   assert(wire.result.truncated===true&&wire.result.matches_full===50,'matches loss marked: '+JSON.stringify({t:wire.result.truncated,f:wire.result.matches_full}));
+  // 6c) shape-safe canonical: null / primitive / cyclic / function results never crash the ack path
+  const sN=mkAck();await sN.fn('n1','done','ok',null);
+  assert(JSON.parse(sN.getSent()).result.value===null,'null result wrapped into a stable shape');
+  const sP=mkAck();await sP.fn('p1','done','ok',42);
+  assert(JSON.parse(sP.getSent()).result.value===42,'primitive result wrapped');
+  const cyc={a:1};cyc.self=cyc;const sC=mkAck();await sC.fn('c1','done','ok',cyc);
+  assert(JSON.parse(sC.getSent()).result.unserializable===true,'cyclic result marked unserializable');
+  const sF=mkAck();await sF.fn('f1','done','ok',function(){return 1});
+  assert(JSON.parse(sF.getSent()).result.unserializable===true,'function result marked unserializable');
   console.log('AGENT-ACK-UNIT: PASS');
  })().catch(e=>{console.error('FAIL',e);process.exit(1)});
 }
