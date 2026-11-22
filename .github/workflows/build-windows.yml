@@ -7,10 +7,10 @@ concurrency:
   group: receive-native-validation-20261122
   cancel-in-progress: false
 jobs:
-  validate:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122'
+  compile-and-open-runtime-gate:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122' && github.event.repository.private == false
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,12 +25,42 @@ jobs:
         run: node tests/chat-transport-unit.js
       - name: Transport recovery tests
         run: node tests/chat-transport-recovery-unit.js
-      - name: Compile and test native source in Windows PowerShell
+      - name: Compile native source only in Windows PowerShell
         shell: powershell
-        run: ./native/ServerControlPrep/Test-CI-OwnedDummy.ps1
-      - name: Compile and test native source in PowerShell 7
+        run: |
+          $ErrorActionPreference='Stop'
+          $p='native/ServerControlPrep/VerifiedProcessHandle.cs'
+          if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'acc1783f6d54cdb4385918fdb9faa93252e6298460525b925a12bcd33e0588f0'){throw 'reviewed_source_hash_required'}
+          Add-Type -Path $p -ErrorAction Stop
+          Write-Output 'PASS compilation only; native runtime behavior remains unverified.'
+      - name: Compile native source only in PowerShell 7
+        if: ${{ !cancelled() }}
         shell: pwsh
-        run: ./native/ServerControlPrep/Test-CI-OwnedDummy.ps1
+        run: |
+          $ErrorActionPreference='Stop'
+          $p='native/ServerControlPrep/VerifiedProcessHandle.cs'
+          if((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'acc1783f6d54cdb4385918fdb9faa93252e6298460525b925a12bcd33e0588f0'){throw 'reviewed_source_hash_required'}
+          Add-Type -Path $p -ErrorAction Stop
+          Write-Output 'PASS compilation only; native runtime behavior remains unverified.'
+      - name: Keep native behavioral verification gate open
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          throw 'Native behavior is NOT validated. Run 44999012756 stopped before dummy creation because the current-session logon SID prerequisite was not satisfied. That safety check is unchanged and the runtime attempt is not retried here. This explicit open gate keeps the workflow red, even if independent package checks pass.'
+  receive-package-only:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122' && github.event.repository.private == false
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify reviewed source hashes before independent packaging
+        run: node validation/test-candidate.cjs
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x

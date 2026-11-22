@@ -6,8 +6,9 @@ This branch tests the prepared desktop receive fix and an isolated native proces
 - Standard Windows runner, read-only repository contents permission, no stored checkout credentials.
 - No repository secret injection, release, tag, updater upload, repository cache or retained build artifact.
 - Transport tests use synthetic fixtures and loopback or fake network only.
-- Native tests create their own new child process and accept no existing PID or user computer connection.
-- Native source hash is checked before compilation. The library is tested under Windows PowerShell and PowerShell 7 separately.
+- The dummy-only harness remains available as reviewed source, but is not invoked by the current workflow. Run 44999012756 stopped before dummy creation because the current-session logon SID prerequisite was not satisfied. That check has not been removed or relaxed.
+- Native source hashes are checked before compilation-only checks under Windows PowerShell and PowerShell 7. Neither compilation check invokes the native process-control methods.
+- A separately named runtime-verification gate intentionally stays red to record the missing behavioral proof. It is not a new runtime attempt. Independent receive-package checks can run without concealing that open gate.
 - Existing media and cloud helper sources are built only to support the package recipe. No cloud account is connected.
 - Package verification checks candidate hashes inside ASAR and the transient installer. It does not install or run the desktop application.
 
