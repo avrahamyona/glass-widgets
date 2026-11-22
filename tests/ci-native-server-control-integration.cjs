@@ -17,7 +17,9 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
 const hostHash=hash(host),fixtureHash=hash(fixture),nativeHash=hash(path.join(root,'native','ServerControlPrep','VerifiedProcessHandle.cs'));
 assert.equal(nativeHash,'acc1783f6d54cdb4385918fdb9faa93252e6298460525b925a12bcd33e0588f0');
 const ps=path.win32.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),icacls=path.win32.join(process.env.SystemRoot,'System32','icacls.exe');
-const exec=(exe,args,extra={})=>new Promise((resolve,reject)=>cp.execFile(exe,args,{windowsHide:true,shell:false,encoding:'utf8',timeout:5000,maxBuffer:2*1024*1024,...extra},(error,out)=>error?reject(Error('ci_read_command_failed')):resolve(String(out))));
+const ciReadTimeoutMs=15000;
+const exec=(exe,args,extra={})=>new Promise((resolve,reject)=>{const started=Date.now();cp.execFile(exe,args,{windowsHide:true,shell:false,encoding:'utf8',timeout:ciReadTimeoutMs,maxBuffer:2*1024*1024,...extra},(error,out,stderr)=>{if(error){console.log(JSON.stringify({ciReadFailed:true,elapsedMs:Date.now()-started,killed:error.killed===true,exitCode:Number.isInteger(error.code)?error.code:null,moduleLoadReported:/CouldNotAutoloadMatchingModule|could not be loaded/i.test(String(stderr))}));reject(Error('ci_read_command_failed'))}else resolve(String(out))})});
+const sessionExec=(exe,args,options,done)=>{const started=Date.now(),query=path.win32.basename(exe).toLowerCase()==='whoami.exe'?'logon':'boot';return cp.execFile(exe,args,{...options,timeout:ciReadTimeoutMs},(error,out,stderr)=>{console.log(JSON.stringify({sessionQuery:query,elapsedMs:Date.now()-started,ok:!error,killed:error?.killed===true,exitCode:Number.isInteger(error?.code)?error.code:null,moduleLoadReported:/CouldNotAutoloadMatchingModule|could not be loaded/i.test(String(stderr))}));done(error,out,stderr)})};
 const psJson=async(script,extraEnv={})=>JSON.parse(await exec(ps,['-NoProfile','-NonInteractive','-Command',script],{env:{...process.env,...extraEnv}}));
 const parentScript="@(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId | Where-Object { $_.ProcessId -gt 0 } | ForEach-Object { @{pid=[uint32]$_.ProcessId;parentPid=[uint32]$_.ParentProcessId} }) | ConvertTo-Json -Compress";
 const commandHashScript="$ErrorActionPreference='Stop';$id=[uint32]$env:GW_CI_PID;$rows=@(Get-CimInstance Win32_Process -Filter ('ProcessId='+$id) -Property CommandLine);if($rows.Count -ne 1 -or [string]::IsNullOrWhiteSpace($rows[0].CommandLine)){throw 'fixture_command_unavailable'};$sha=[Security.Cryptography.SHA256]::Create();try{([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$rows[0].CommandLine))).Replace('-','').ToLowerInvariant()) | ConvertTo-Json -Compress}finally{$sha.Dispose()}";
@@ -106,7 +108,7 @@ async function cleanup(){
 (async()=>{
  let result,cleanupVerified=false;
  try{
-  mark('native-handshake');client=clientFactory();await client.ready();session=await createWindowsSessionReader()();
+  mark('native-handshake');client=clientFactory();await client.ready();mark('windows-session-observation');session=await createWindowsSessionReader({execFile:sessionExec})();
   mark('actor-observation');const self=await client.captureObservation({pid:process.pid,logonSid:session.sessionId.slice(0,session.sessionId.lastIndexOf(':'))});ownerSid=self.ownerSid;
   mark('private-directory');assert(process.env.RUNNER_TEMP&&path.isAbsolute(process.env.RUNNER_TEMP));dir=fs.mkdtempSync(path.join(process.env.RUNNER_TEMP,'gw-owned-integration-'));
   cp.execFileSync(icacls,[dir,'/inheritance:r','/grant:r','*'+ownerSid+':(OI)(CI)F','*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F'],{windowsHide:true,shell:false,stdio:'pipe',timeout:5000});
