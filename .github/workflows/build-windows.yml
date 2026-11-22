@@ -29,7 +29,7 @@ jobs:
         shell: pwsh
         run: |
           $archive = 'validation/source-holding-inheritance-tests.zip'
-          $expected = '5afde1ff1996627119dfb59a4c9b915ce348103062a6a5650c5ff1cbccc43cb1'
+          $expected = '9892406aa4dfb7537a042b339e97838e497d2d639c48be7a9b95585f90d2432b'
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'source_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/source-fixture' -Force
@@ -58,4 +58,19 @@ jobs:
         shell: pwsh
         run: |
           & '.ci/source-inheritance/NativeSourceInheritanceWindows.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build abrupt original holder failure acceptance
+        shell: pwsh
+        run: |
+          dotnet publish .ci/source-fixture/tests/native-source-holder-failure-windows/NativeSourceHolderFailureWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-holder-failure --disable-build-servers -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify portable holder-plan serialization
+        shell: pwsh
+        run: |
+          & '.ci/source-holder-failure/NativeSourceHolderFailureWindows.exe' '--portable-plan-check'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify source protection through abrupt original helper death
+        shell: pwsh
+        run: |
+          & '.ci/source-holder-failure/NativeSourceHolderFailureWindows.exe'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
