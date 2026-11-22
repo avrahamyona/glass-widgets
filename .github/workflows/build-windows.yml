@@ -1,4 +1,4 @@
-name: Native CAS fixed failure-phase diagnostic
+name: Native CAS private scratch fixture
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $archive='validation/native-launch-policy-fixture.zip'
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '83255e4d3b5106d0b21e7a923890a7f5c24ae982f87af0582d510efccdc7c4c8') { throw 'fixture_archive_hash_mismatch' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3152f7ef065d54f7b998a1f2a0ec05bff29148b46e222b01663735d16bbbb349') { throw 'fixture_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
       - name: Build exact native test candidate, framework-dependent
         shell: pwsh
