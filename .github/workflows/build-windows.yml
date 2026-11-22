@@ -20,6 +20,8 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
       MSBUILDDISABLENODEREUSE: '1'
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,7 +31,7 @@ jobs:
         shell: pwsh
         run: |
           $archive = 'validation/source-holding-inheritance-tests.zip'
-          $expected = '9892406aa4dfb7537a042b339e97838e497d2d639c48be7a9b95585f90d2432b'
+          $expected = '0237bdded66bbd039d29c78e49ca8b4b9411aaba2149825eb39199bbf49b6124'
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) { throw 'source_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/source-fixture' -Force
@@ -73,4 +75,27 @@ jobs:
         shell: pwsh
         run: |
           & '.ci/source-holder-failure/NativeSourceHolderFailureWindows.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Download only the pinned official standalone Node dummy runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path '.ci/node-runtime'
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v20.18.3/win-x64/node.exe' -OutFile '.ci/node-runtime/node.exe'
+          $actual = (Get-FileHash -LiteralPath '.ci/node-runtime/node.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne '528a9aa64888a2a3ba71c6aea89434dd5ab5cb3caa9f0f31345cf5facf685ab0') { throw 'node_fixture_binary_hash_mismatch' }
+      - name: Build Node source inheritance acceptance with the unchanged native runtime
+        shell: pwsh
+        run: |
+          dotnet publish .ci/source-fixture/tests/native-source-node-windows/NativeSourceNodeWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-node --disable-build-servers -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify portable Node fixture plan serialization
+        shell: pwsh
+        run: |
+          & '.ci/source-node/NativeSourceNodeWindows.exe' '--portable-plan-check'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify delayed Node require after abrupt original holder death
+        shell: pwsh
+        run: |
+          $env:GW_NODE_SOURCE_FIXTURE_PATH = (Resolve-Path '.ci/node-runtime/node.exe').Path
+          & '.ci/source-node/NativeSourceNodeWindows.exe'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
