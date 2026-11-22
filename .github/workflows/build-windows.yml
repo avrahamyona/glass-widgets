@@ -1,4 +1,4 @@
-name: Native launch policy normal-user fixture
+name: Fixed boot query phase diagnostic
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $archive='validation/native-launch-policy-fixture.zip'
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '240930923924599c216d71bad7167ee16dfa6e8692731bed2a1d4c3127487bdc') { throw 'fixture_archive_hash_mismatch' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'e27f321c735df0a5b26311e95abbbd82ba15ae0df4da100164dfca3110dc9971') { throw 'fixture_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
       - name: Build exact native test candidate, framework-dependent
         shell: pwsh
@@ -47,7 +47,7 @@ jobs:
         run: |
           Invoke-WebRequest -Uri 'https://nodejs.org/dist/v20.18.3/win-x64/node.exe' -OutFile '.ci/native-cas/node.exe'
           if ((Get-FileHash -LiteralPath '.ci/native-cas/node.exe' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '528a9aa64888a2a3ba71c6aea89434dd5ab5cb3caa9f0f31345cf5facf685ab0') { throw 'node_fixture_binary_hash_mismatch' }
-      - name: Execute only as disposable non-administrator
+      - name: Execute one cold five-second phase probe as disposable non-administrator
         shell: pwsh
         run: |
           & '.ci/native-cas/Run-DisposableNormalUser.ps1'
