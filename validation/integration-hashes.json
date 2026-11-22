@@ -113,8 +113,8 @@
     },
     {
       "path": "tests/ci-native-server-control-integration.cjs",
-      "bytes": 16260,
-      "sha256": "e0dace3386daf1738e0c68520492aaeb08e39aa066c3c5d665a93071363acea9"
+      "bytes": 18243,
+      "sha256": "e6c58b745fa329c32b780d0c8ae66cfd9d2a008cdbd8ab90b230581f96afc3f0"
     },
     {
       "path": "tests/fixtures/ci-owned-server-graph.cjs",

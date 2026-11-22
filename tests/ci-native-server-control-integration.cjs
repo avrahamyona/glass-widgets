@@ -43,8 +43,8 @@ async function actual(){
 async function snapshot(){
  const rows=await psJson(parentScript);if(!Array.isArray(rows)||rows.some(r=>!Number.isInteger(r.pid)||!Number.isInteger(r.parentPid)))throw Error('parent_snapshot_unverified');
  const ids=new Map();
- for(let index=0;index<graph.identities.length;index++){
-  const id=graph.identities[index],observer=graph.observers[index],before=await observer.inspect();
+ for(let index=0,all=[...graph.identities,...graph.auxiliaries],observers=[...graph.observers,...graph.auxObservers];index<all.length;index++){
+  const id=all[index],observer=observers[index],before=await observer.inspect();
   if(before.exited)continue;
   const commandHash=await psJson(commandHashScript,{GW_CI_PID:String(id.pid)});
   const after=await observer.inspect();if(after.exited||!/^[a-f0-9]{64}$/.test(commandHash))throw Error('fixture_snapshot_changed');
@@ -57,7 +57,7 @@ async function startGraph(){
  assert.equal(hash(fixture),fixtureHash);
  const child=cp.spawn(process.execPath,[fixture,'supervisor'],{stdio:['ignore','ignore','pipe','ipc'],windowsHide:true,shell:false,env:{...process.env,GW_OWNED_FIXTURE_NONCE:nonce}});
  child.stderr.resume();
- const record={child,identities:[],observers:[],metadata:null};graphs.push(record);
+ const record={child,identities:[],observers:[],auxiliaries:[],auxObservers:[],metadata:null};graphs.push(record);
  mark('graph-handshake');const metadata=await new Promise((resolve,reject)=>{
   const timer=setTimeout(()=>reject(Error('fixture_handshake_timeout')),10000);
   child.once('error',()=>{clearTimeout(timer);reject(Error('fixture_spawn_failed'))});
@@ -73,7 +73,21 @@ async function startGraph(){
   const observer=await client.openReadOnlyProcess(id);record.observers.push(observer);
   assert.equal(observer.requestStop,undefined);
  }
- graph=record;mark('initial-parent-snapshot');const rows=await snapshot();
+ graph=record;mark('capture-console-auxiliaries');
+ const raw=await psJson(parentScript),stopIds=new Set(record.identities.map(id=>id.pid));
+ const candidates=raw.filter(row=>stopIds.has(row.parentPid)&&!stopIds.has(row.pid));assert(candidates.length<=4);
+ const consolePath=path.win32.join(process.env.SystemRoot,'System32','conhost.exe');
+ for(const candidate of candidates){
+  const captured=await client.captureObservation({pid:candidate.pid,logonSid:session.sessionId.slice(0,session.sessionId.lastIndexOf(':'))});
+  assert.equal(captured.ownerSid,ownerSid);assert.equal(captured.exe.toLowerCase(),consolePath.toLowerCase());
+  const parent=record.identities.find(id=>id.pid===candidate.parentPid);assert(parent);assert(BigInt(parent.nativeCreatedFileTimeUtc)<=BigInt(captured.nativeCreatedFileTimeUtc));
+  const commandHash=await psJson(commandHashScript,{GW_CI_PID:String(candidate.pid)});assert.match(commandHash,/^[a-f0-9]{64}$/);
+  const id={...captured,parentPid:candidate.parentPid,sessionId:session.sessionId,commandHash,role:'observe-only',reason:'Windows console host of a CI-owned dummy process'};
+  const observer=await client.openReadOnlyProcess(id);assert.equal(observer.requestStop,undefined);assert.equal(observer.waitExit,undefined);
+  record.auxiliaries.push(id);record.auxObservers.push(observer);
+ }
+ mark('initial-parent-snapshot');const rows=await snapshot();
+ for(const auxiliary of record.auxiliaries){const fresh=rows.find(row=>row.pid===auxiliary.pid);assert(fresh);assert.equal(fresh.parentPid,auxiliary.parentPid)}
  for(const id of record.identities){const row=rows.find(p=>p.pid===id.pid);assert(row);id.parentPid=row.parentPid}
  assert.equal(record.identities[1].parentPid,record.identities[0].pid);
  return {accepted:true};
@@ -98,7 +112,8 @@ async function cleanup(){
     h=await client.openProcess(id);await h.requestStop();if(!(await h.waitExit()).exited)verified=false;
    }catch{verified=false}finally{if(h)try{await h.close()}catch{verified=false}}
   }
-  for(const observer of record.observers)try{await observer.close()}catch{verified=false}
+  for(const observer of record.auxObservers){try{let ended=false;for(let attempt=0;attempt<20;attempt++){if((await observer.inspect()).exited){ended=true;break}await new Promise(resolve=>setTimeout(resolve,50))}if(!ended)verified=false}catch{verified=false}}
+  for(const observer of [...record.observers,...record.auxObservers])try{await observer.close()}catch{verified=false}
   if(record.child.exitCode===null&&record.child.signalCode===null)verified=false;
  }
  if(control){const closed=await control.dispose();if(!closed.verified)verified=false}
@@ -121,7 +136,7 @@ async function cleanup(){
    const h=await client.openProcess(id,options);return {...h,requestStop:async args=>{assert.equal(store.read().intent,'stopped');trace.push({kind:'stop',pid:id.pid});return h.requestStop(args)}};
   }};
   control=createIntegratedServerControl({store,journal,nativeClient:nativeProxy,installationId:'ci-owned-'+nonce,getSession:async()=>session,readActualState:actual,
-   getReviewedStopPlan:async()=>{const rows=await snapshot(),plan=planWithAuxiliaries({processes:rows,reviewed:graph.identities,auxiliaries:[],ownerSid,sessionId:session.sessionId}),ids=new Set(graph.identities.map(id=>id.pid));console.log(JSON.stringify({ownedStopPlan:plan.ok===true,error:/^[a-z_]{1,100}$/.test(plan.error||'')?plan.error:null,stepCount:plan.steps?.length||0,directUnreviewedChildren:rows.filter(row=>ids.has(row.parentPid)&&!ids.has(row.pid)).length}));for(const child of rows.filter(row=>ids.has(row.parentPid)&&!ids.has(row.pid)).slice(0,4)){try{const name=String(await psJson(childNameScript,{GW_CI_PID:String(child.pid)})).toLowerCase();console.log(JSON.stringify({unreviewedDirectChildKind:['conhost.exe','openconsole.exe'].includes(name)?name:'other'}))}catch{console.log(JSON.stringify({unreviewedChildDiagnosticUnavailable:true}))}}return {...plan,installationId:'ci-owned-'+nonce}},
+   getReviewedStopPlan:async()=>{const rows=await snapshot(),plan=planWithAuxiliaries({processes:rows,reviewed:graph.identities,auxiliaries:graph.auxiliaries,ownerSid,sessionId:session.sessionId}),ids=new Set([...graph.identities,...graph.auxiliaries].map(id=>id.pid));console.log(JSON.stringify({ownedStopPlan:plan.ok===true,error:/^[a-z_]{1,100}$/.test(plan.error||'')?plan.error:null,stepCount:plan.steps?.length||0,directUnreviewedChildren:rows.filter(row=>ids.has(row.parentPid)&&!ids.has(row.pid)).length}));for(const child of rows.filter(row=>ids.has(row.parentPid)&&!ids.has(row.pid)).slice(0,4)){try{const name=String(await psJson(childNameScript,{GW_CI_PID:String(child.pid)})).toLowerCase();console.log(JSON.stringify({unreviewedDirectChildKind:['conhost.exe','openconsole.exe'].includes(name)?name:'other'}))}catch{console.log(JSON.stringify({unreviewedChildDiagnosticUnavailable:true}))}}return {...plan,installationId:'ci-owned-'+nonce}},
    getReviewedStartPlan:async()=>({verified:true,policyAware:true,installationId:'ci-owned-'+nonce,sessionId:session.sessionId,launcherHash:fixtureHash}),
    startManagedServer:async({plan,revision,signal})=>{assert(!signal.aborted);assert.equal(plan.launcherHash,hash(fixture));assert.equal(store.read().revision,revision);assert.equal(store.read().intent,'running');return startGraph()},
    readSnapshot:snapshot,localRecoveryReady:async()=>true,deadlineMs:30000});
@@ -138,7 +153,7 @@ async function cleanup(){
   assert.deepEqual(trace.filter(e=>e.kind==='stop').map(e=>e.pid),graph.identities.map(p=>p.pid));
   assert((await graph.observers[0].inspect()).exited);assert((await graph.observers[1].inspect()).exited);
   const count=trace.length;assert((await control.appOpen()).verified);assert.equal(trace.length,count);assert.equal((await invoke('status')).running,false);
-  result={nativeHostCompiled:true,privateWindowsDirectoryVerified:true,exactNativeIdentityCaptured:true,wrongNativeTickRefused:true,cancellationDeliveredDuringRealWait:true,ownedStartObserved:true,stopIntentPersistedBeforeControllerHandleOpen:true,ownedGraphStoppedInOrder:true,manualStopSurvivedAppReopen:true,scope:'CI-owned Node dummy graph and real native held handles; IPC origin harness only',productionLauncher:false,installedUi:false,realAnswerEndToEnd:false};
+  result={nativeHostCompiled:true,privateWindowsDirectoryVerified:true,exactNativeIdentityCaptured:true,wrongNativeTickRefused:true,cancellationDeliveredDuringRealWait:true,ownedStartObserved:true,stopIntentPersistedBeforeControllerHandleOpen:true,ownedGraphStoppedInOrder:true,consoleHelpersObserveOnly:true,observedConsoleHelperCount:graph.auxiliaries.length,manualStopSurvivedAppReopen:true,scope:'CI-owned Node dummy graph and real native held handles; IPC origin harness only',productionLauncher:false,installedUi:false,realAnswerEndToEnd:false};
  }finally{cleanupVerified=await cleanup();console.log(JSON.stringify({ownedCleanupVerified:cleanupVerified}))}
  assert(cleanupVerified,'owned_fixture_cleanup_unverified');
  console.log(JSON.stringify({...result,cleanupVerified}));
