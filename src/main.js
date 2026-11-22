@@ -268,7 +268,7 @@ ipcMain.handle('open-external',(_,u)=>{u=String(u||'').slice(0,2000);if(!/^https
 ipcMain.handle('chat:send',async(_,text,replyTo,reqId)=>{text=String(text||'').trim();if(!text)return {ok:false,error:'כתוב הודעה קודם'};if(!CHAT_URL)return CHAT_DOWN;if(text.length>2000)return {ok:false,error:'ההודעה ארוכה מדי (עד 2000 תווים)'};const rid=String(reqId||'').slice(0,80);const id=/^[0-9a-f-]{36}$/.test(rid)?rid:crypto.randomUUID();
  const fc=filelink.parseFileCommand(text);if(fc){filelink.handle(fc);return {ok:true,id:'local-cmd-'+id}} // local command: never forwarded to the worker
  try{const r=await fetch(CHAT_URL_KEYED,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,text,at:Date.now(),in_reply_to:String(replyTo||'').slice(0,80),from:'user'}),signal:AbortSignal.timeout(20000)});
-  if(r.status===429)return {ok:false,error:'חריגה ממכסת 30 ההודעות לשעה. נסה שוב בעוד כשעה'};
+  if(r.status===429)return {ok:false,error:'השרת מגביל כרגע את קצב ההודעות. נסה שוב מאוחר יותר'};
   if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
   const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,duplicate:!!j.duplicate};return {ok:false,error:'השרת דחה את ההודעה ('+r.status+')'}}
  catch{return {ok:false,error:'אין חיבור כרגע. ההודעה לא נשלחה'}}});
@@ -285,27 +285,27 @@ function hideChatWins(){const hidden=[]; // hide the island (and companions) so 
  for(const w of chatCompanions.values()){if(!w.isDestroyed()&&w.isVisible()){w.hide();hidden.push({w,top:true})}}
  return hidden}
 function showChatWins(hidden){for(const h of hidden){if(!h.w.isDestroyed()){h.w.show();if(h.top)h.w.setAlwaysOnTop(true,'screen-saver')}}}
-ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));if(!SHOT_URL)return CHAT_DOWN;const id=crypto.randomUUID();
+ipcMain.handle('chat:screenshot',async(_,idx)=>{idx=Math.max(0,Math.min(7,Math.round(+idx||0)));if(!SHOT_URL)return {...CHAT_DOWN,stage:'configuration'};const id=crypto.randomUUID();
  const hidden=hideChatWins();
  if(hidden.length)await new Promise(r=>setTimeout(r,150)); // let the compositor repaint behind the island
  let img,src;
  try{let srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:1920,height:1080}});
-  src=srcs[idx];if(!src)return {ok:false,error:'המסך לא נמצא'};
-  img=src.thumbnail;if(!img||img.isEmpty())return {ok:false,error:'הצילום נכשל'};
+  src=srcs[idx];if(!src)return {ok:false,stage:'source',error:'המסך לא נמצא'};
+  img=src.thumbnail;if(!img||img.isEmpty())return {ok:false,stage:'capture',error:'הצילום נכשל'};
   if(isBlackImage(img)){ // secondary-GPU displays can yield solid-black thumbnails: retry at the display's native size
    const d=screen.getAllDisplays().find(x=>String(x.id)===String(src.display_id));
    if(d){srcs=await desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:d.size.width,height:d.size.height}});
     src=srcs[idx];img=src&&src.thumbnail}
-   if(!img||img.isEmpty()||isBlackImage(img))return {ok:false,error:'הצילום יצא שחור - המסך כבוי או לא נגיש כרגע'}}}
- catch{return {ok:false,error:'אין חיבור כרגע'}}
+   if(!img||img.isEmpty()||isBlackImage(img))return {ok:false,stage:'capture',error:'הצילום יצא שחור - המסך כבוי או לא נגיש כרגע'}}}
+ catch{return {ok:false,stage:'capture',error:'לא ניתן לצלם את המסך כרגע'}}
  finally{showChatWins(hidden)} // restore on every capture path, including early failure returns
  try{const jpeg=img.toJPEG(82),sz=img.getSize();
-  if(jpeg.length>3500000)return {ok:false,error:'התמונה גדולה מדי'};
+  if(jpeg.length>3500000)return {ok:false,stage:'encode',error:'התמונה גדולה מדי'};
   const r=await fetch(SHOT_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:CHAT_KEY,id,image:jpeg.toString('base64'),at:Date.now(),width:sz.width,height:sz.height}),signal:AbortSignal.timeout(20000)});
-  if(r.status===403)return {ok:false,error:'שגיאת מפתח מול השרת'};
-  const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id};
-  return {ok:false,error:'השרת דחה את הצילום ('+r.status+')'}}
- catch{return {ok:false,error:'אין חיבור כרגע'}}});
+  if(r.status===403)return {ok:false,stage:'upload',error:'שגיאת מפתח מול השרת'};
+  const j=await r.json().catch(()=>({}));if(r.ok&&j.ok)return {ok:true,id,stage:'stored'};
+  return {ok:false,stage:'upload',error:'השרת דחה את הצילום ('+r.status+')'}}
+ catch{return {ok:false,stage:'upload',error:'הצילום לא נשמר בשרת - בדוק את החיבור'}}});
 async function chatPage(after){if(!CHAT_URL)return CHAT_DOWN;const u=new URL(CHAT_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('v',app.getVersion());if(after)u.searchParams.set('after',String(after));const r=await fetch(u,{signal:AbortSignal.timeout(8000)});if(!r.ok)return {ok:false,error:'שרת לא ענה ('+r.status+')'};const j=await r.json();if(+j.read_upto>0)broadcastRead(+j.read_upto);return {ok:true,messages:(Array.isArray(j.messages)?j.messages:[]).slice(0,50).filter(m=>m&&typeof m.text==='string').map(m=>({id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||''),from:String(m.from||'').slice(0,20)})),
  cards:(Array.isArray(j.cards)?j.cards:[]).slice(0,50).filter(c=>c&&c.id).map(cleanCard)}}
 ipcMain.handle('chat:poll',async(_,after)=>{try{return await chatPage(after)}catch{return {ok:false,error:'אין חיבור כרגע'}}});
@@ -327,26 +327,28 @@ function notifyChat(row){ // floating toast for incoming replies; his own rows a
   n.show();
  }catch{}}
 const chatDeliverySeen=new Map(); // bounded dedupe across reconnect catch-up and SSE replay
-function broadcastChat(row){if(row&&row.id){if(chatDeliverySeen.has(row.id))return;chatDeliverySeen.set(row.id,true);if(chatDeliverySeen.size>512)chatDeliverySeen.delete(chatDeliverySeen.keys().next().value)}for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}notifyChat(row)}
-async function chatCatchup(){for(let n=0;n<10;n++){const r=await chatPage(Math.max(0,chatStream.cursor-1));if(!r.ok)throw new Error('catchup');for(const m of r.messages){if(m.received_at>chatStream.cursor)chatStream.cursor=m.received_at;broadcastChat(m)}for(const c of r.cards||[])broadcastCard(c);if(r.messages.length<50&&(!r.cards||r.cards.length<50))break}}
-async function runChatStream(){if(!CHAT_URL)return;let backoff=1000;
- while(!chatStream.stop){
-  let idleT=null;const ctl=new AbortController();
-  try{
-   await chatCatchup().catch(()=>{}); // best-effort: a failing GET must not block the live stream (0.4.64)
-   const u=new URL(CHAT_STREAM_URL);u.searchParams.set('key',CHAT_KEY);u.searchParams.set('thread',chatStream.thread);u.searchParams.set('v',app.getVersion());if(chatStream.cursor)u.searchParams.set('after',String(chatStream.cursor)); // resume after catch-up, never replay only the oldest 50
-   idleT=setTimeout(()=>ctl.abort(),8000); // bound connection/header wait, not only idle established streams
-   const r=await fetch(u,{signal:ctl.signal,headers:{accept:'text/event-stream'}});
-   if(!r.ok||!r.body)throw new Error('stream '+r.status);
-   backoff=1000;
-   const poke=()=>{clearTimeout(idleT);idleT=setTimeout(()=>ctl.abort(),120000)};poke();
-   const reader=r.body.getReader(),dec=new TextDecoder();let buf='';
-   while(true){const{done,value}=await reader.read();if(done)break;poke();buf+=dec.decode(value,{stream:true});
-    let i;while((i=buf.indexOf('\n\n'))>=0){const chunk=buf.slice(0,i);buf=buf.slice(i+2);
-     const line=chunk.split('\n').find(l=>l.startsWith('data:'));if(!line)continue;
-     try{const m=JSON.parse(line.slice(5).trim());if(m&&m.type==='card'&&m.card&&typeof m.card==='object')broadcastCard(m.card);else if(m&&m.type==='read')broadcastRead(m.upto);else if(m&&typeof m.text==='string'){const row={id:String(m.id||'').slice(0,80),text:String(m.text).slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||''),from:String(m.from||'').slice(0,20)};if(row.received_at>chatStream.cursor)chatStream.cursor=row.received_at;broadcastChat(row)}}catch{}}}
-   throw new Error('stream closed');
-  }catch(e){clearTimeout(idleT);if(chatStream.stop)break;await new Promise(r=>setTimeout(r,backoff));backoff=Math.min(backoff*2,5000)}}}
+function broadcastChat(row){
+ if(row&&row.id&&chatDeliverySeen.has(row.id))return;
+ for(const w of [...Object.values(wins),...chatCompanions.values()]){if(!w.isDestroyed())w.webContents.send('chat:msg',row)}
+ if(row&&row.id){chatDeliverySeen.set(row.id,true);if(chatDeliverySeen.size>512)chatDeliverySeen.delete(chatDeliverySeen.keys().next().value)}
+ notifyChat(row);
+}
+const {createChatTransport}=require('./lib/chat-transport');
+let desktopChatTransport=null;
+function runChatStream(){
+ if(desktopChatTransport||!CHAT_URL)return;
+ desktopChatTransport=createChatTransport({
+  getConfig:()=>({url:CHAT_URL,streamUrl:CHAT_STREAM_URL,key:CHAT_KEY,thread:chatStream.thread,version:app.getVersion()}),
+  onRow:m=>{
+   const row={id:String(m.id||'').slice(0,80),text:String(m.text||'').slice(0,4000),at:+m.at||0,received_at:+m.received_at||0,in_reply_to:String(m.in_reply_to||'').slice(0,80),from:String(m.from||'').slice(0,20)};
+   broadcastChat(row);chatStream.cursor=Math.max(chatStream.cursor,row.received_at);
+  },
+  onCard:broadcastCard,onRead:broadcastRead,
+  onMetric:m=>bootLog('chat_transport '+JSON.stringify(m))
+ });
+ desktopChatTransport.start(chatStream.cursor);
+ app.once('before-quit',()=>{desktopChatTransport.stop().catch(()=>{})});
+}
 ipcMain.handle('chat:stream',(e,after)=>{const c=+after||0;
  if(!chatStream.started){chatStream.started=true;chatStream.cursor=c;chatStream.thread=callerInstance(e)||'chat';runChatStream()}
  else{if(c&&c>chatStream.cursor)chatStream.cursor=c;

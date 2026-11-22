@@ -1,0 +1,6 @@
+{
+  "src/main.js": "99f82be9269f1a1c96c6227c88a4932fdf7661dfcc5b41fe4d896339185405c3",
+  "src/widgets/chat/index.html": "ff861200703ddb28b029604bf90ba0551e298e481132cdb99df6247c6f7c2398",
+  "src/lib/chat-transport.js": "a15030b1b00565e4a18c09cb1892b9576909de9e951e232d6d2eba5fb5a1bce1",
+  "native/ServerControlPrep/VerifiedProcessHandle.cs": "acc1783f6d54cdb4385918fdb9faa93252e6298460525b925a12bcd33e0588f0"
+}

@@ -126,17 +126,22 @@ document.documentElement.dataset.theme=q.get('theme')||(matchMedia('(prefers-col
 const island=q.get('size')==='island';
 const $=i=>document.getElementById(i);
 let H={messages:[],seenHint:false,lastReceived:0};
-function incoming(m){if(!m||!m.id)return;const _ex=H.messages.find(x=>x.id===m.id);if(_ex){
- // An optimistic send can be echoed before POST resolves. Keep the server receipt/cursor even when the bubble already exists.
- const _nd=m.from==='user'?'out':'in';let changed=false;
- if(_ex.dir!==_nd||_ex.from!==String(m.from||'')){_ex.dir=_nd;_ex.from=String(m.from||'');changed=true}
- if(+m.received_at>0){if(+m.received_at>(+_ex.received_at||0)){_ex.received_at=+m.received_at;changed=true}if(+m.received_at>(H.lastReceived||0)){H.lastReceived=+m.received_at;changed=true}}
- if(m.from==='user'&&_ex.status==='waiting'){_ex.status='sent';changed=true}
- if(changed){save();paintChat()}return}
- const mine=m.from==='user'; // his own row (any of his machines, echoed via stream/poll) belongs on the SENT side and must never alert like a reply
- H.messages.push({id:m.id,dir:mine?'out':'in',from:String(m.from||''),text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')});
- if(m.received_at>0)H.lastReceived=Math.max(H.lastReceived||0,m.received_at);
- save();render(log);if(island&&!mine&&!(m.received_at>0&&m.received_at<=readUpTo))newReply(H.messages[H.messages.length-1])}
+function incoming(m){
+ if(!m||!m.id)return;
+ const ex=H.messages.find(x=>x.id===m.id),previous=H.lastReceived||0;
+ const order=()=>H.messages.sort((a,b)=>(+a.received_at||+a.at||0)-(+b.received_at||+b.at||0));
+ if(ex){
+  const dir=m.from==='user'?'out':'in';let changed=false;
+  if(ex.dir!==dir||ex.from!==String(m.from||'')){ex.dir=dir;ex.from=String(m.from||'');changed=true}
+  if(+m.received_at>0){if(+m.received_at>(+ex.received_at||0)){ex.received_at=+m.received_at;changed=true}if(+m.received_at>previous){H.lastReceived=+m.received_at;changed=true}}
+  if(m.from==='user'&&ex.status==='waiting'){ex.status='sent';changed=true}
+  if(changed){order();save();paintChat()}return;
+ }
+ const mine=m.from==='user',stale=+m.received_at>0&&+m.received_at<previous;
+ const row={id:m.id,dir:mine?'out':'in',from:String(m.from||''),text:String(m.text||''),at:+m.at||0,received_at:+m.received_at||0,status:'sent',in_reply_to:String(m.in_reply_to||'')};
+ H.messages.push(row);order();if(+m.received_at>0)H.lastReceived=Math.max(previous,+m.received_at);
+ save();render(log);if(island&&!mine&&!stale&&!(+m.received_at>0&&+m.received_at<=readUpTo))newReply(row);
+}
 function incomingCard(c){if(!c||!c.id||(H.cards||[]).some(x=>x.id===c.id))return;
  H.cards=H.cards||[];H.cards.push({id:String(c.id),title:String(c.title||''),body:String(c.body||''),buttons:Array.isArray(c.buttons)?c.buttons:[],graph:c.graph,expiresAt:+c.expiresAt||0,file:c.file&&typeof c.file==='object'?{name:String(c.file.name||''),size:+c.file.size||0,mime:String(c.file.mime||''),url:String(c.file.url||''),path:String(c.file.path||'')}:undefined,at:+c.at||Date.now(),acted:false,actedButton:'',settled:''});
  save();render(log);
@@ -154,7 +159,7 @@ function waitingReply(){const l=lastMsg();return !!l&&l.dir==='out'&&l.status!==
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function linkify(escaped){return escaped.replace(/https?:\/\/[^\s<>"']+/g,u=>'<a href=# data-u="'+u+'">'+u+'</a>')}
 function wireLinks(el){for(const a of el.querySelectorAll('a[data-u]'))a.onclick=e=>{e.preventDefault();e.stopPropagation();if(window.api&&api.openExternal)api.openExternal(a.dataset.u)}}
-function statusText(m){if(m.dir!=='out')return'';if(m.status==='waiting')return'שולח…';if(m.status==='failed'){let e=String(m.err||'').trim();if(!e||e.startsWith('אין חיבור'))e='אין חיבור';return 'לא נשלח · '+e}const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in')?'נענה':'נשלח'}
+function statusText(m){if(m.dir!=='out')return'';if(m.status==='waiting')return'שולח…';if(m.status==='failed'){let e=String(m.err||'').trim();if(!e||e.startsWith('אין חיבור'))e='אין חיבור';return 'לא נשלח · '+e}const i=H.messages.indexOf(m);return H.messages.slice(i+1).some(x=>x.dir==='in'&&x.in_reply_to===m.id)?'נענה':'נשמר בשרת'}
 let toastT=null;function copyMsg(t){const done=()=>{toast.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>toast.style.opacity=0,900)};if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(done).catch(done);else{const ta=document.createElement('textarea');ta.value=t;document.body.append(ta);ta.select();try{document.execCommand('copy')}catch{}ta.remove();done()}}
 function fmtT(ts){const d=new Date(+ts||0);if(isNaN(d)||!+ts)return'';return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 const REACTS=['👍','❤️','😂','😮','😢','🙏'];let reactPop=null;

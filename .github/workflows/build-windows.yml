@@ -1,58 +1,52 @@
 name: Build Windows
-on: { workflow_dispatch: {}, push: { branches: [main], paths-ignore: ['README.md'] } }
-permissions: { contents: write }
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: receive-native-validation-20261122
+  cancel-in-progress: false
 jobs:
-  win:
+  validate:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122'
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Inject agent command key
-        shell: pwsh
-        env: { GW_CMD_KEY: '${{ secrets.GW_CMD_KEY }}' }
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GW_CMD_KEY)) { Write-Host 'GW_CMD_KEY secret not set - agent module stays dormant'; exit 0 }
-          $p = 'src/lib/agent.js'
-          $s = [System.IO.File]::ReadAllText($p)
-          if (-not $s.Contains('__GW_CMD_KEY__')) { throw 'cmd key placeholder not found in src/lib/agent.js' }
-          [System.IO.File]::WriteAllText($p, $s.Replace('__GW_CMD_KEY__', $env:GW_CMD_KEY.Trim()))
-          if ([System.IO.File]::ReadAllText($p).Contains('__GW_CMD_KEY__')) { throw 'cmd key placeholder still present after injection' }
-      - name: Inject agent sign public key
-        shell: pwsh
-        env: { GW_SIGN_PUB: '${{ secrets.GW_SIGN_PUB }}' }
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:GW_SIGN_PUB)) { Write-Host 'GW_SIGN_PUB secret not set - signed pre-approval stays dormant'; exit 0 }
-          $p = 'src/lib/agent.js'
-          $s = [System.IO.File]::ReadAllText($p)
-          if (-not $s.Contains('__GW_SIGN_PUB__')) { throw 'sign pubkey placeholder not found in src/lib/agent.js' }
-          [System.IO.File]::WriteAllText($p, $s.Replace('__GW_SIGN_PUB__', $env:GW_SIGN_PUB.Trim()))
-          if ([System.IO.File]::ReadAllText($p).Contains('__GW_SIGN_PUB__')) { throw 'sign pubkey placeholder still present after injection' }
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - uses: actions/setup-dotnet@v4
-        with: { dotnet-version: '8.0.x' }
-      - run: dotnet publish native/MediaBridge/MediaBridge.csproj -c Release -r win-x64 -o native/MediaBridge/publish
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.12' }
-      - run: pip install -r native/CloudBridge/requirements.txt
-      - run: python -m PyInstaller --noconfirm --clean --onedir --name CloudBridge --collect-all pyicloud --collect-all keyrings --collect-all fido2 --collect-all tzdata --workpath native/CloudBridge/build --specpath native/CloudBridge --distpath native/CloudBridge/publish native/CloudBridge/bridge.py
-      - name: Cloud helper smoke test
+        with:
+          node-version: 22
+      - name: Verify reviewed source hashes and candidate behavior
+        run: node validation/test-candidate.cjs
+      - name: Transport loopback test
+        run: node tests/chat-transport-unit.js
+      - name: Transport recovery tests
+        run: node tests/chat-transport-recovery-unit.js
+      - name: Compile and test native source in Windows PowerShell
+        shell: powershell
+        run: ./native/ServerControlPrep/Test-CI-OwnedDummy.ps1
+      - name: Compile and test native source in PowerShell 7
         shell: pwsh
+        run: ./native/ServerControlPrep/Test-CI-OwnedDummy.ps1
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build existing media helper for package
+        run: dotnet publish native/MediaBridge/MediaBridge.csproj -c Release -r win-x64 -o native/MediaBridge/publish
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build existing cloud helper for package
         run: |
-          '{"id":1,"action":"status"}' | & native/CloudBridge/publish/CloudBridge/CloudBridge.exe
-          if ($LASTEXITCODE -ne 0) { throw 'Cloud helper failed' }
-          $env:PYTHONIOENCODING = 'cp1252'
-          $output = '{"id":2,"action":"code"}' | & native/CloudBridge/publish/CloudBridge/CloudBridge.exe
-          $parsed = $output | ConvertFrom-Json
-          if ($parsed.error -notmatch '[\u0590-\u05FF]' -or $output -match '[^\x00-\x7F]') { throw 'Unicode transport failed' }
-      - run: npm install --no-audit --no-fund
-      - run: npm run dist
-      - uses: actions/upload-artifact@v4
-        with: { name: GlassWidgets-win, path: dist/*.exe }
-      - name: Release
-        if: github.event_name == 'push' # a branch-dispatch build produces a TEST artifact only - never a published release
-        shell: bash
-        env: { GH_TOKEN: '${{ github.token }}' }
-        run: |
-          V=$(node -p "require('./package.json').version")
-          TAG="v$V" # tag matches the version baked into latest.yml, so the updater, the tag and the UI never disagree
-          gh release create "$TAG" dist/*.exe dist/latest.yml --latest --title "GlassWidgets $TAG" --notes "$(git log -1 --pretty=%s)"
+          pip install -r native/CloudBridge/requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm --clean --onedir --name CloudBridge --collect-all pyicloud --collect-all keyrings --collect-all fido2 --collect-all tzdata --workpath native/CloudBridge/build --specpath native/CloudBridge --distpath native/CloudBridge/publish native/CloudBridge/bridge.py
+      - name: Install locked application dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build test-only installer without publishing
+        run: npm run dist
+      - name: Inspect transient installer and packaged candidate
+        run: node validation/check-package.cjs
