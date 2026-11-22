@@ -1,4 +1,4 @@
-name: Fixed boot query phase diagnostic
+name: Pinned system import cold diagnostic
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $archive='validation/native-launch-policy-fixture.zip'
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'e27f321c735df0a5b26311e95abbbd82ba15ae0df4da100164dfca3110dc9971') { throw 'fixture_archive_hash_mismatch' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4a7c374edeeaedbc6cabe8e1281e296ff7c58791ec208c5dba254c6407c9f43c') { throw 'fixture_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
       - name: Build exact native test candidate, framework-dependent
         shell: pwsh
