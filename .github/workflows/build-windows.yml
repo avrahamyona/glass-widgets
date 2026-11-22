@@ -1,19 +1,19 @@
-name: Source holding and inheritance fixture validation
+name: Native launch policy normal-user fixture
 on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed source fixture commit
+        description: Exact reviewed fixture commit
         required: true
         type: string
 permissions:
   contents: read
 concurrency:
-  group: source-inheritance-fixture-20261122
+  group: native-owner-cas-fixture-20261122
   cancel-in-progress: false
 jobs:
-  source-fixture:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/source-inheritance-20261122' && github.event.repository.private == false && github.sha == inputs.expected_sha
+  native-cas-fixture:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-owner-cas-20261122' && github.event.repository.private == false && github.sha == inputs.expected_sha
     runs-on: windows-latest
     timeout-minutes: 12
     env:
@@ -27,75 +27,28 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Verify exact approved source archive and expand own fixture source
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.404'
+      - name: Verify reviewed fixture bytes and expand only test source
         shell: pwsh
         run: |
-          $archive = 'validation/source-holding-inheritance-tests.zip'
-          $expected = '0237bdded66bbd039d29c78e49ca8b4b9411aaba2149825eb39199bbf49b6124'
-          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw 'source_archive_hash_mismatch' }
-          Expand-Archive -LiteralPath $archive -DestinationPath '.ci/source-fixture' -Force
-      - name: Verify portable argument and startup-layout checks
+          $archive='validation/native-launch-policy-fixture.zip'
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '10b69d178fc0ecd6cba6cbcf43a5d7464a9e1378d85b5f16d64b9c177ab40305') { throw 'fixture_archive_hash_mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
+      - name: Build exact native test candidate, framework-dependent
         shell: pwsh
         run: |
-          dotnet --list-sdks
-          dotnet run --project .ci/source-fixture/tests/native-source-inheritance-portable/NativeSourceInheritancePortable.csproj --disable-build-servers -p:UseSharedCompilation=false
+          dotnet publish .ci/native-cas-source/tests/native-owned-cas-windows/NativeOwnedCasWindows.csproj -c Release -r win-x64 --self-contained false -o .ci/native-cas/bin --disable-build-servers -p:UseSharedCompilation=false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build source-file acceptance using the unchanged runtime
+          Copy-Item -LiteralPath '.ci/native-cas-source/tests/native-owned-cas-windows/Run-DisposableNormalUser.ps1' -Destination '.ci/native-cas/Run-DisposableNormalUser.ps1'
+      - name: Fetch and verify official pinned standalone dummy Node runtime
         shell: pwsh
         run: |
-          dotnet publish .ci/source-fixture/tests/native-source-files-windows/NativeSourceFilesWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-files --disable-build-servers -p:UseSharedCompilation=false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify own temporary source-file leases on Windows
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v20.18.3/win-x64/node.exe' -OutFile '.ci/native-cas/node.exe'
+          if ((Get-FileHash -LiteralPath '.ci/native-cas/node.exe' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '528a9aa64888a2a3ba71c6aea89434dd5ab5cb3caa9f0f31345cf5facf685ab0') { throw 'node_fixture_binary_hash_mismatch' }
+      - name: Execute only as disposable non-administrator
         shell: pwsh
         run: |
-          & '.ci/source-files/NativeSourceFilesWindows.exe'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build inherited-source acceptance using the unchanged runtime
-        shell: pwsh
-        run: |
-          dotnet publish .ci/source-fixture/tests/native-source-inheritance-windows/NativeSourceInheritanceWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-inheritance --disable-build-servers -p:UseSharedCompilation=false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify explicit source inheritance using only own child and temporary files
-        shell: pwsh
-        run: |
-          & '.ci/source-inheritance/NativeSourceInheritanceWindows.exe'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build abrupt original holder failure acceptance
-        shell: pwsh
-        run: |
-          dotnet publish .ci/source-fixture/tests/native-source-holder-failure-windows/NativeSourceHolderFailureWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-holder-failure --disable-build-servers -p:UseSharedCompilation=false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify portable holder-plan serialization
-        shell: pwsh
-        run: |
-          & '.ci/source-holder-failure/NativeSourceHolderFailureWindows.exe' '--portable-plan-check'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify source protection through abrupt original helper death
-        shell: pwsh
-        run: |
-          & '.ci/source-holder-failure/NativeSourceHolderFailureWindows.exe'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Download only the pinned official standalone Node dummy runtime
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path '.ci/node-runtime'
-          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v20.18.3/win-x64/node.exe' -OutFile '.ci/node-runtime/node.exe'
-          $actual = (Get-FileHash -LiteralPath '.ci/node-runtime/node.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne '528a9aa64888a2a3ba71c6aea89434dd5ab5cb3caa9f0f31345cf5facf685ab0') { throw 'node_fixture_binary_hash_mismatch' }
-      - name: Build Node source inheritance acceptance with the unchanged native runtime
-        shell: pwsh
-        run: |
-          dotnet publish .ci/source-fixture/tests/native-source-node-windows/NativeSourceNodeWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-node --disable-build-servers -p:UseSharedCompilation=false
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify portable Node fixture plan serialization
-        shell: pwsh
-        run: |
-          & '.ci/source-node/NativeSourceNodeWindows.exe' '--portable-plan-check'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify delayed Node require after abrupt original holder death
-        shell: pwsh
-        run: |
-          $env:GW_NODE_SOURCE_FIXTURE_PATH = (Resolve-Path '.ci/node-runtime/node.exe').Path
-          & '.ci/source-node/NativeSourceNodeWindows.exe'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '.ci/native-cas/Run-DisposableNormalUser.ps1'
+          if (!$?) { throw 'normal_user_fixture_failed' }
