@@ -19,7 +19,7 @@ function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,
   const aux=plan.observedAuxiliaries||[];
   if(!Array.isArray(aux)||aux.length>16||aux.some(a=>a.role!=='observe-only'||a.sessionId!==sessionId)||new Set([...plan.steps.map(s=>s.identity.pid),...aux.map(a=>a.pid)]).size!==plan.steps.length+aux.length||(aux.length&&(typeof openReadOnlyProcess!=='function'||plan.observationHash!==observationDigest(plan.steps,aux))))return {ok:false,error:'auxiliary_plan_unverified'};
   busy=true;lastError=null;const handles=[],stopped=[];let actionIssued=false,timer;
-  const ac=new AbortController(),abort=()=>ac.abort();if(parentSignal){parentSignal.addEventListener('abort',abort,{once:true});if(parentSignal.aborted)ac.abort()}
+  const ac=new AbortController(),abort=()=>ac.abort();let naturallyExitedCount=0;if(parentSignal){parentSignal.addEventListener('abort',abort,{once:true});if(parentSignal.aborted)ac.abort()}
   const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{ac.abort();reject(Error('operation_timeout'))},deadlineMs)});
   async function preconditions(){
    interrupted(ac.signal);
@@ -45,7 +45,14 @@ function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,
      if(state.exited!==true)throw Error('exit_verification_lost');
      // A reused PID is never an owned process. Refuse instead of following it.
      if(row)throw Error('stopped_pid_reappeared');
-    }else if(state.exited===true||!row||!revalidateStep(step,row))throw Error('process_changed');
+    }else if(state.exited===true){
+     // A verified ancestor stop can also end its owned descendants. Never send
+     // a new stop to an exited held instance. This is not admission of a missing
+     // row: exact held identity, native exit and an absent snapshot PID are all required.
+     const respawnersExited=plan.steps.filter(s=>s.role==='supervisor').every(s=>stopped.includes(s.identity.pid));
+     if(!stopped.length||row||(step.role!=='supervisor'&&!respawnersExited))throw Error('process_changed');
+     stopped.push(step.identity.pid);naturallyExitedCount++;
+    }else if(!row||!revalidateStep(step,row))throw Error('process_changed');
    }
   }
   const work=async()=>{
@@ -64,6 +71,7 @@ function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,
    await inspectAll();
    for(const {step,handle} of handles.filter(h=>!h.observeOnly)){
     await preconditions();await inspectAll();interrupted(ac.signal);
+    if(stopped.includes(step.identity.pid))continue;
     // requestStop must synchronously recheck abort and target only its held handle.
     actionIssued=true;const stop=await handle.requestStop({signal:ac.signal});interrupted(ac.signal);
     if(!stop||stop.requestAccepted!==true)throw Error('stop_request_unverified');
@@ -71,7 +79,7 @@ function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,
     if(!exit||exit.exited!==true||exit.verified!==true)throw Error('owned_exit_unverified');
     stopped.push(step.identity.pid);
    }
-   await inspectAll();return {ok:true,verified:true,stoppedCount:stopped.length,scope:'injected-handle-protocol-only'};
+   await inspectAll();return {ok:true,verified:true,stoppedCount:stopped.length,naturallyExitedCount,scope:'injected-handle-protocol-only'};
   };
   // Cleanup is inside the work promise: even a capability that returns after timeout
   // must close a late handle. Busy stays set until that work has actually settled.

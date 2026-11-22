@@ -43,8 +43,8 @@
     },
     {
       "path": "src/lib/handle-stop-executor-prep.js",
-      "bytes": 7334,
-      "sha256": "a40ece97cb4b983c04f9e173229df1e251a837b61c466699373a773f11019ea8"
+      "bytes": 7987,
+      "sha256": "8f66f1a5d41061a48b97528ca5bdad5daa985f7b7b210669fea255afcdb6257c"
     },
     {
       "path": "src/lib/integrated-server-control-prep.js",
@@ -113,8 +113,8 @@
     },
     {
       "path": "tests/ci-native-server-control-integration.cjs",
-      "bytes": 19010,
-      "sha256": "773cbace05f1316f73300b5efb7ac44e4f45d3d0166c9f37e55ff9ab0e2259fd"
+      "bytes": 19299,
+      "sha256": "40561eb0caf2a4e00666949551063d0b1a39fbbab80683988f24c4dd22e1d1e9"
     },
     {
       "path": "tests/fixtures/ci-owned-server-graph.cjs",
@@ -123,13 +123,13 @@
     },
     {
       "path": "tests/fixtures/native-host-protocol-fixture.cjs",
-      "bytes": 3153,
-      "sha256": "41741946a153328c6b333ebcd9edca8d50e79ca6d0917538f10e85a8c408c3fa"
+      "bytes": 3404,
+      "sha256": "5ab2c663292b7256d7033c9527492f7819fcef617d1e4d91ba92105e348bfc06"
     },
     {
       "path": "tests/integrated-server-control-unit.js",
-      "bytes": 10477,
-      "sha256": "359934a21c20392c264ef2d72c07caaf3d6f8fac9f2af843da7d9fa7756a84c5"
+      "bytes": 12626,
+      "sha256": "266bf8dbb400fb1c6ab4da58148746ef45137e00c4576c03a699d5174c43204f"
     },
     {
       "path": "tests/native-handle-client-unit.js",

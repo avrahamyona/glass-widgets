@@ -20,6 +20,7 @@ input.on('line',async line=>{
  if(q.op==='open-stop'||q.op==='open-observe'){
   if(mode==='late-open')await new Promise(resolve=>setTimeout(resolve,50));
   const key=(++next).toString(16).padStart(32,'0'),entry={identity:q.identity,stop:q.op==='open-stop',exited:false};open.set(key,entry);
+  if(mode==='server-exits-before-stop'&&q.op==='open-stop'&&q.identity.pid%100===1){entry.exited=true;log({op:'owned-exit',pid:entry.identity.pid})}
   let identity=entry.identity;if(mode==='wrong-ticks')identity={...identity,nativeCreatedFileTimeUtc:String(BigInt(identity.nativeCreatedFileTimeUtc)+1n)};
   log({op:'opened',handle:key,pid:entry.identity.pid});send(q.id,{handle:key,stopCapable:entry.stop,identity});return;
  }
@@ -35,7 +36,7 @@ input.on('line',async line=>{
    const timer=setInterval(()=>{if(cancelled.has(q.id)){clearInterval(timer);fail(q.id,'operation_aborted')}},5);return;
   }
   if(mode==='no-exit'){send(q.id,{exited:false,verified:false});return}
-  entry.exited=true;log({op:'owned-exit',pid:entry.identity.pid});send(q.id,{exited:true,verified:true});return;
+  for(const target of mode==='co-exit-after-first-stop'?[...open.values()]:[entry])if(!target.exited){target.exited=true;log({op:'owned-exit',pid:target.identity.pid})}send(q.id,{exited:true,verified:true});return;
  }
  if(q.op==='close'){open.delete(q.handle);log({op:'closed',handle:q.handle,pid:entry.identity.pid});send(q.id,{closed:true});return}
  fail(q.id,'unknown_operation');
