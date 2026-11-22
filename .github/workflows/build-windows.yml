@@ -1,19 +1,19 @@
-name: Server control integration validation
+name: Source holding and inheritance fixture validation
 on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed validation commit
+        description: Exact reviewed source fixture commit
         required: true
         type: string
 permissions:
   contents: read
 concurrency:
-  group: server-control-integration-20261122
+  group: source-inheritance-fixture-20261122
   cancel-in-progress: false
 jobs:
-  owned-native-integration:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122' && github.event.repository.private == false && github.sha == inputs.expected_sha
+  source-fixture:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/source-inheritance-20261122' && github.event.repository.private == false && github.sha == inputs.expected_sha
     runs-on: windows-latest
     timeout-minutes: 12
     env:
@@ -25,24 +25,37 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Verify all reviewed integration bytes
-        run: node validation/check-integration-hashes.cjs
-      - name: Preserve original receive-candidate checks
-        run: node validation/test-candidate.cjs
-      - name: Run private transport fixture checks
-        run: node tests/native-handle-client-unit.js
-      - name: Run native precision checks
-        run: node tests/native-plan-precision-unit.js
-      - name: Run integrated policy and persistence fixture checks
-        run: node tests/integrated-server-control-unit.js
-      - name: Run IPC origin and response-boundary checks
-        run: node tests/server-control-ipc-unit.js
-      - name: Build test-owned native host using the existing runner SDK
+      - name: Verify exact approved source archive and expand own fixture source
+        shell: pwsh
+        run: |
+          $archive = 'validation/source-holding-inheritance-tests.zip'
+          $expected = '5afde1ff1996627119dfb59a4c9b915ce348103062a6a5650c5ff1cbccc43cb1'
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw 'source_archive_hash_mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath '.ci/source-fixture' -Force
+      - name: Verify portable argument and startup-layout checks
+        shell: pwsh
         run: |
           dotnet --list-sdks
-          dotnet publish native/ServerControlHost/ServerControlHost.csproj -c Release -r win-x64 --self-contained true -o native/ServerControlHost/ci-publish --disable-build-servers -p:UseSharedCompilation=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-      - name: Verify the native bridge against only our own dummy graph
-        run: node tests/ci-native-server-control-integration.cjs
+          dotnet run --project .ci/source-fixture/tests/native-source-inheritance-portable/NativeSourceInheritancePortable.csproj --disable-build-servers -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build source-file acceptance using the unchanged runtime
+        shell: pwsh
+        run: |
+          dotnet publish .ci/source-fixture/tests/native-source-files-windows/NativeSourceFilesWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-files --disable-build-servers -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify own temporary source-file leases on Windows
+        shell: pwsh
+        run: |
+          & '.ci/source-files/NativeSourceFilesWindows.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build inherited-source acceptance using the unchanged runtime
+        shell: pwsh
+        run: |
+          dotnet publish .ci/source-fixture/tests/native-source-inheritance-windows/NativeSourceInheritanceWindows.csproj -c Release -r win-x64 --self-contained true -o .ci/source-inheritance --disable-build-servers -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify explicit source inheritance using only own child and temporary files
+        shell: pwsh
+        run: |
+          & '.ci/source-inheritance/NativeSourceInheritanceWindows.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
