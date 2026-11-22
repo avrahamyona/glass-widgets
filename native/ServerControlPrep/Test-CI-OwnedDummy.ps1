@@ -5,8 +5,10 @@ $library=Join-Path $PSScriptRoot 'VerifiedProcessHandle.cs'
 $expectedSourceHash='acc1783f6d54cdb4385918fdb9faa93252e6298460525b925a12bcd33e0588f0'
 if((Get-FileHash -LiteralPath $library -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedSourceHash){throw 'reviewed_library_hash_required'}
 Add-Type -Path $library -ErrorAction Stop
-$node=(Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
-if(-not [IO.File]::Exists($node)){throw 'existing_node_required'}
+$nodeLines=@(& node -p 'process.execPath')
+if($LASTEXITCODE -ne 0 -or $nodeLines.Count -ne 1){throw 'node_discovery_failed'}
+$node=([string]$nodeLines[0]).Trim()
+if(-not [IO.Path]::IsPathRooted($node) -or -not [IO.File]::Exists($node)){throw 'existing_node_required'}
 $current=[Security.Principal.WindowsIdentity]::GetCurrent()
 $owner=$current.User.Value
 $logons=@($current.Groups|ForEach-Object{$_.Value}|Where-Object{$_ -match '^S-1-5-5-\d+-\d+$'})
