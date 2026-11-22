@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $archive='validation/native-launch-policy-fixture.zip'
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '62a44e0e6062be1e51c80f9d1047b383385787e307a7ed54a8f09e810a312b72') { throw 'fixture_archive_hash_mismatch' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '9f7198b7959e3a81c9e2d36843110673b8f6fa5e8f847a1bb7372bd3be23bb7e') { throw 'fixture_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
       - name: Build exact native test candidate, framework-dependent
         shell: pwsh
