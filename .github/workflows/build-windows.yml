@@ -1,22 +1,21 @@
-name: Private Windows dummy validation
-'on':
+name: Native CAS private scratch fixture
+on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed generic launcher commit
+        description: Exact reviewed fixture commit
         required: true
         type: string
-permissions: {}
+permissions:
+  contents: read
 concurrency:
   group: native-owner-cas-fixture-20261122
   cancel-in-progress: false
 jobs:
-  private-validation:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-owner-cas-20261122' && github.event.repository.private
-      == false && github.sha == inputs.expected_sha && github.actor == 'avrahamyona'
+  native-cas-fixture:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-owner-cas-20261122' && github.event.repository.private == false && github.sha == inputs.expected_sha
     runs-on: windows-latest
-    timeout-minutes: 15
-    environment: gw-private-validation-20261122-80a9a2ab
+    timeout-minutes: 12
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
@@ -24,94 +23,32 @@ jobs:
       NODE_OPTIONS: ''
       NODE_PATH: ''
     steps:
-    - name: Prepare pinned SDK before any private payload is in a step
-      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
-      with:
-        dotnet-version: 10.0.404
-        cache: false
-    - name: Run private fixture through fixed output barrier
-      shell: pwsh
-      env:
-        GW_PRIVATE_PART_01: ${{ secrets.GW_PRIVATE_PART_01 }}
-        GW_PRIVATE_PART_02: ${{ secrets.GW_PRIVATE_PART_02 }}
-        GW_PRIVATE_PART_03: ${{ secrets.GW_PRIVATE_PART_03 }}
-        GW_PRIVATE_PART_04: ${{ secrets.GW_PRIVATE_PART_04 }}
-        GW_PRIVATE_PART_05: ${{ secrets.GW_PRIVATE_PART_05 }}
-        GW_PRIVATE_PART_06: ${{ secrets.GW_PRIVATE_PART_06 }}
-        GW_PRIVATE_PART_07: ${{ secrets.GW_PRIVATE_PART_07 }}
-        GW_PRIVATE_PART_08: ${{ secrets.GW_PRIVATE_PART_08 }}
-        GW_PRIVATE_PART_09: ${{ secrets.GW_PRIVATE_PART_09 }}
-        GW_PRIVATE_PART_10: ${{ secrets.GW_PRIVATE_PART_10 }}
-        GW_PRIVATE_PART_11: ${{ secrets.GW_PRIVATE_PART_11 }}
-        GW_CARRIER_CONTRACT: '{"payloadSha256":"98065182ae6acec98a668a6ea879631a2403f0bbceaae0fbb618e942adb55b79","sourceSha256":"131aac40c0661253434703e6f01e3e3670446830f5d61958714f141993fd9d62"}'
-      run: |
-        $ErrorActionPreference='Stop'
-        $carrier=@'
-        'use strict';
-        // Generic data carrier. It never sends child output to the public console.
-        const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto'),cp=require('node:child_process');
-        const fail=()=>{throw Error('private_validation_failed')};
-        const names=Array.from({length:11},(_,i)=>'GW_PRIVATE_PART_'+String(i+1).padStart(2,'0'));
-        function decode(env,expectedSha){
-         let parts=[];try{for(const name of names){const value=env[name];if(typeof value!=='string'||!value.length||value.length>24000||!/^[A-Za-z0-9+/=]+$/.test(value))fail();parts.push(value)}}finally{for(const name of names)delete env[name]}
-         if(parts.slice(0,-1).some(x=>x.length!==24000))fail();const text=parts.join('');if(text.length>264000||text.length%4)fail();const bytes=Buffer.from(text,'base64');if(bytes.toString('base64')!==text||!(/^[a-f0-9]{64}$/).test(expectedSha)||crypto.createHash('sha256').update(bytes).digest('hex')!==expectedSha)fail();return bytes;
-        }
-        function safeProof(text,contract){
-         if(typeof text!=='string'||Buffer.byteLength(text)>2048)fail();let p;try{p=JSON.parse(text)}catch{fail()}
-         const fields=['version','scope','sourceSha256','nativeChecks','tapPasses','bindingChecks','diagnosticChecks','wireChecks','registrationChecks','listenerChecks','normalUserWrapperPassed','installedServer','productionHostConnected'];
-         if(!p||Array.isArray(p)||Object.keys(p).sort().join(',')!==fields.sort().join(',')||p.version!==1||p.scope!=='private-windows-dummy-only'||p.sourceSha256!==contract.sourceSha256||![16,17].includes(p.nativeChecks)||p.tapPasses!==114||p.bindingChecks!==38||p.diagnosticChecks!==18||p.wireChecks!==6||p.registrationChecks!==11||p.listenerChecks!==18||p.normalUserWrapperPassed!==true||p.installedServer!==false||p.productionHostConnected!==false)fail();
-         // Rebuild, do not forward a child-owned object/string or its property order.
-         return {version:1,status:'passed',nativeChecks:p.nativeChecks,tapPasses:114,bindingChecks:38,diagnosticChecks:18,wireChecks:6,registrationChecks:11,listenerChecks:18,installedServer:false,productionHostConnected:false};
-        }
-        function quiet(exe,args,{env=process.env,cwd,timeoutMs=180000,maxBytes=4194304,allowNonzero=false}={}){
-         return new Promise((resolve,reject)=>{
-          let child,timer,done=false,size=0,out=[],err=[];
-          const stop=()=>{if(done)return;done=true;clearTimeout(timer);try{child?.kill()}catch{}reject(Error('private_validation_failed'))};
-          try{child=cp.spawn(exe,args,{env:{...env},cwd,windowsHide:true,shell:false,stdio:['ignore','pipe','pipe']});child.on('error',stop);
-           for(const [stream,collect]of [[child.stdout,out],[child.stderr,err]]){stream.on('error',stop);stream.on('data',b=>{size+=b.length;if(size>maxBytes)return stop();collect.push(b)})}
-           child.on('close',(code,signal)=>{if(done)return;done=true;clearTimeout(timer);if((code!==0&&!allowNonzero)||signal)return reject(Error('private_validation_failed'));resolve({exitCode:code,stdout:Buffer.concat(out).toString('utf8'),stderr:Buffer.concat(err).toString('utf8')})});timer=setTimeout(stop,timeoutMs);
-          }catch{stop()}
-         });
-        }
-        const EXTRACT=String.raw`$ErrorActionPreference='Stop'
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zip=[IO.Compression.ZipFile]::OpenRead($env:GW_CARRIER_ARCHIVE)
-        try {
-         if($zip.Entries.Count -ne 2){throw 'invalid_payload'}
-         $seen=@{}
-         foreach($entry in $zip.Entries){
-          if($entry.FullName -notin @('source.zip','private-run.cjs') -or $seen.ContainsKey($entry.FullName) -or $entry.Length -gt 262144){throw 'invalid_payload'}
-          $seen[$entry.FullName]=$true
-          $inputStream=$entry.Open()
-          $outputStream=[IO.File]::Open((Join-Path $env:GW_CARRIER_ROOT $entry.FullName),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-          try{$inputStream.CopyTo($outputStream)}finally{$outputStream.Dispose();$inputStream.Dispose()}
-         }
-        }finally{$zip.Dispose()}`;
-        function safeFailure(text){let p;try{if(Buffer.byteLength(text)>256)return null;p=JSON.parse(text)}catch{return null}return p&&Object.keys(p).sort().join(',')==='stage,status,version'&&p.version===1&&p.status==='failed'&&['prepare','build','tap','parsers','native'].includes(p.stage)?{version:1,status:'failed',stage:p.stage}:null}
-        async function main(contract){
-         let root,ok=false,proof,failure;
-         try{
-          if(process.platform!=='win32')fail();const bytes=decode(process.env,contract.payloadSha256);
-          root=fs.mkdtempSync(path.join(os.tmpdir(),'gw-private-proof-'));const archive=path.join(root,'payload.zip');fs.writeFileSync(archive,bytes,{flag:'wx',mode:0o600});bytes.fill(0);
-          const powershell=path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe');
-          const extracted=await quiet(powershell,['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(EXTRACT,'utf16le').toString('base64')],{env:{...process.env,GW_CARRIER_ROOT:root,GW_CARRIER_ARCHIVE:archive},cwd:root,timeoutMs:30000,maxBytes:8192});
-          if(extracted.stdout.trim()||extracted.stderr.trim())fail();
-          if(crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'source.zip'))).digest('hex')!==contract.sourceSha256)fail();
-          const run=await quiet(process.execPath,[path.join(root,'private-run.cjs')],{cwd:root,env:{...process.env,GW_CARRIER_SOURCE_SHA:contract.sourceSha256,GW_CARRIER_LIBRARY:__filename},timeoutMs:600000,allowNonzero:true});
-          if(run.exitCode!==0){failure=safeFailure(run.stdout);fail()}
-          if(run.stderr.trim())fail();proof=safeProof(run.stdout,contract);ok=true;
-         }catch{ok=false}finally{
-          for(const name of names)delete process.env[name];
-          if(root){try{fs.rmSync(root,{recursive:true,force:true,maxRetries:4,retryDelay:500});if(fs.existsSync(root))ok=false}catch{ok=false}}
-         }
-         process.stdout.write(JSON.stringify(ok?proof:(failure||{version:1,status:'failed',detailsWithheld:true}))+'\n');process.exitCode=ok?0:1;
-        }
-        module.exports={names,decode,safeProof,safeFailure,quiet,EXTRACT,main};
-        if(require.main===module){let contract;try{contract=JSON.parse(process.env.GW_CARRIER_CONTRACT||'null')}catch{};main(contract||{}).catch(()=>{process.stdout.write('{"version":1,"status":"failed","detailsWithheld":true}\n');process.exitCode=1})}
-
-        '@
-        $path=Join-Path $env:RUNNER_TEMP 'gw-generic-carrier.cjs'
-        [IO.File]::WriteAllText($path,$carrier,[Text.UTF8Encoding]::new($false))
-        $env:GW_CARRIER_PWSH=(Get-Command pwsh -ErrorAction Stop).Source
-        & node $path
-        if($LASTEXITCODE -ne 0){throw 'private_validation_failed'}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.404'
+      - name: Verify reviewed fixture bytes and expand only test source
+        shell: pwsh
+        run: |
+          $archive='validation/native-launch-policy-fixture.zip'
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '3152f7ef065d54f7b998a1f2a0ec05bff29148b46e222b01663735d16bbbb349') { throw 'fixture_archive_hash_mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
+      - name: Build exact native test candidate, framework-dependent
+        shell: pwsh
+        run: |
+          dotnet publish .ci/native-cas-source/tests/native-owned-cas-windows/NativeOwnedCasWindows.csproj -c Release -r win-x64 --self-contained false -o .ci/native-cas/bin --disable-build-servers -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath '.ci/native-cas-source/tests/native-owned-cas-windows/Run-DisposableNormalUser.ps1' -Destination '.ci/native-cas/Run-DisposableNormalUser.ps1'
+      - name: Fetch and verify official pinned standalone dummy Node runtime
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v20.18.3/win-x64/node.exe' -OutFile '.ci/native-cas/node.exe'
+          if ((Get-FileHash -LiteralPath '.ci/native-cas/node.exe' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '528a9aa64888a2a3ba71c6aea89434dd5ab5cb3caa9f0f31345cf5facf685ab0') { throw 'node_fixture_binary_hash_mismatch' }
+      - name: Execute original native CAS cases with fixed failure fields as non-administrator
+        shell: pwsh
+        run: |
+          & '.ci/native-cas/Run-DisposableNormalUser.ps1'
+          if (!$?) { throw 'normal_user_fixture_failed' }
