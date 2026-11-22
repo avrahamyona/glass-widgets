@@ -11,7 +11,11 @@ $node=([string]$nodeLines[0]).Trim()
 if(-not [IO.Path]::IsPathRooted($node) -or -not [IO.File]::Exists($node)){throw 'existing_node_required'}
 $current=[Security.Principal.WindowsIdentity]::GetCurrent()
 $owner=$current.User.Value
-$logons=@($current.Groups|ForEach-Object{$_.Value}|Where-Object{$_ -match '^S-1-5-5-\d+-\d+$'})
+# WindowsIdentity.Groups deliberately omits Logon ID groups. Query the current
+# Windows logon ID independently with the built-in OS command; never synthesize it.
+$logonLines=@(& (Join-Path $env:WINDIR 'System32\whoami.exe') /logonid)
+if($LASTEXITCODE -ne 0){throw 'current_logon_query_failed'}
+$logons=@([regex]::Matches(($logonLines -join ' '),'S-1-5-5-\d+-\d+') | ForEach-Object {$_.Value})
 if($logons.Count -ne 1){throw 'single_current_logon_sid_required'}
 $p=New-Object Diagnostics.Process
 $p.StartInfo=New-Object Diagnostics.ProcessStartInfo($node,'-e "setInterval(()=>{},1000)"')

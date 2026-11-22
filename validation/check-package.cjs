@@ -4,7 +4,7 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const asar=require('@electron/asar'),manifest=require('./source-hashes.json');
 const archive='dist/win-unpacked/resources/app.asar';assert(fs.existsSync(archive),'packaged_archive_required');
 for(const file of ['src/main.js','src/widgets/chat/index.html','src/lib/chat-transport.js']){
- const actual=crypto.createHash('sha256').update(asar.extractFile(archive,file)).digest('hex');assert.equal(actual,manifest[file],'packaged_candidate_hash:'+file);
+ const actual=crypto.createHash('sha256').update(asar.extractFile(archive,path.normalize(file))).digest('hex');assert.equal(actual,manifest[file],'packaged_candidate_hash:'+file);
 }
 const nativeExcluded=asar.listPackage(archive).every(p=>!p.includes('ServerControlPrep'));assert(nativeExcluded,'native_library_is_not_integrated_in_this_candidate');
 const installers=fs.readdirSync('dist').filter(p=>p.endsWith('.exe'));assert.equal(installers.length,1,'one_test_installer_required');
