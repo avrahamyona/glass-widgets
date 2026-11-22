@@ -6,7 +6,7 @@ const crypto=require('crypto');
 const {observationDigest}=require('./auxiliary-chain-plan-prep');
 function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,readPersistedIntent,localRecoveryReady,deadlineMs=5000}){
  if([openProcess,readSnapshot,readPersistedIntent,localRecoveryReady].some(f=>typeof f!=='function')||!Number.isInteger(deadlineMs)||deadlineMs<1)throw Error('explicit_capabilities_required');
- let busy=false,uncertain=false;
+ let busy=false,uncertain=false,lastError=null;
  function interrupted(signal){if(signal.aborted)throw Error('operation_aborted')}
  async function execute({plan,sessionId,revision,signal:parentSignal}){
   if(busy)return {ok:false,error:'executor_busy'};
@@ -18,7 +18,7 @@ function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,
   const roles=plan.steps.map(s=>s.role);if(!/^supervisor(,supervisor)?(,tunnel)?,server$/.test(roles.join(','))||plan.requiresPersistedStopIntent!==true||plan.requiresLocalRecovery!==true||plan.execute!==false||plan.planHash!==crypto.createHash('sha256').update(JSON.stringify(plan.steps)).digest('hex'))return {ok:false,error:'plan_integrity_failed'};
   const aux=plan.observedAuxiliaries||[];
   if(!Array.isArray(aux)||aux.length>16||aux.some(a=>a.role!=='observe-only'||a.sessionId!==sessionId)||new Set([...plan.steps.map(s=>s.identity.pid),...aux.map(a=>a.pid)]).size!==plan.steps.length+aux.length||(aux.length&&(typeof openReadOnlyProcess!=='function'||plan.observationHash!==observationDigest(plan.steps,aux))))return {ok:false,error:'auxiliary_plan_unverified'};
-  busy=true;const handles=[],stopped=[];let actionIssued=false,timer;
+  busy=true;lastError=null;const handles=[],stopped=[];let actionIssued=false,timer;
   const ac=new AbortController(),abort=()=>ac.abort();if(parentSignal){parentSignal.addEventListener('abort',abort,{once:true});if(parentSignal.aborted)ac.abort()}
   const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{ac.abort();reject(Error('operation_timeout'))},deadlineMs)});
   async function preconditions(){
@@ -80,9 +80,9 @@ function createHandleStopExecutor({openProcess,openReadOnlyProcess,readSnapshot,
    busy=false;
   });
   try{const result=await Promise.race([settled,deadline]);return uncertain&&result.ok?{ok:false,error:'handle_cleanup_unverified',requiresReconciliation:true,scope:'injected-handle-protocol-only'}:result}
-  catch(e){if(actionIssued)uncertain=true;return {ok:false,error:e.message,stoppedCount:stopped.length,requiresReconciliation:uncertain,scope:'injected-handle-protocol-only'}}
+  catch(e){lastError=/^[a-z_]{1,80}$/.test(e.message||'')?e.message:'stop_execution_failed';if(actionIssued)uncertain=true;return {ok:false,error:e.message,stoppedCount:stopped.length,requiresReconciliation:uncertain,scope:'injected-handle-protocol-only'}}
   finally{clearTimeout(timer);ac.abort();if(parentSignal)parentSignal.removeEventListener('abort',abort)}
  }
- return {execute,state:()=>({busy,uncertain})};
+ return {execute,state:()=>({busy,uncertain,lastError})};
 }
 module.exports={createHandleStopExecutor};
