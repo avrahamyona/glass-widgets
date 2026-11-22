@@ -1,4 +1,4 @@
-name: Pinned system import native CAS acceptance
+name: Native CAS fixed failure-phase diagnostic
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $archive='validation/native-launch-policy-fixture.zip'
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'edca7b2c911efb26bb2c272e5de14343eb62aa635146273aa0e98e869f63f22a') { throw 'fixture_archive_hash_mismatch' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '83255e4d3b5106d0b21e7a923890a7f5c24ae982f87af0582d510efccdc7c4c8') { throw 'fixture_archive_hash_mismatch' }
           Expand-Archive -LiteralPath $archive -DestinationPath '.ci/native-cas-source'
       - name: Build exact native test candidate, framework-dependent
         shell: pwsh
@@ -47,7 +47,7 @@ jobs:
         run: |
           Invoke-WebRequest -Uri 'https://nodejs.org/dist/v20.18.3/win-x64/node.exe' -OutFile '.ci/native-cas/node.exe'
           if ((Get-FileHash -LiteralPath '.ci/native-cas/node.exe' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '528a9aa64888a2a3ba71c6aea89434dd5ab5cb3caa9f0f31345cf5facf685ab0') { throw 'node_fixture_binary_hash_mismatch' }
-      - name: Execute original native CAS acceptance as disposable non-administrator
+      - name: Execute original native CAS cases with fixed failure fields as non-administrator
         shell: pwsh
         run: |
           & '.ci/native-cas/Run-DisposableNormalUser.ps1'
