@@ -3,8 +3,8 @@
   "files": [
     {
       "path": ".gitattributes",
-      "bytes": 528,
-      "sha256": "4b14d1a3a4501ff8c9779511362b79aaa4418cc2e101d53bc9748511a04a820a"
+      "bytes": 516,
+      "sha256": "1994c1ae1fdb71013edaad4cf6a12445f3db888c570fd418895150f3add83bab"
     },
     {
       "path": ".github/workflows/build-windows.yml",

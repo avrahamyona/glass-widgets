@@ -11,5 +11,5 @@
 /tests/native-handle-client-unit.js -text
 /tests/native-plan-precision-unit.js -text
 /tests/fixtures/*.cjs -text
-/validation/*integration* -text
+/validation/* -text
 /docs/SERVER-CONTROL-VALIDATION.md -text
