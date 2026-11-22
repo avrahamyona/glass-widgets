@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": ".gitattributes",
+      "bytes": 528,
+      "sha256": "4b14d1a3a4501ff8c9779511362b79aaa4418cc2e101d53bc9748511a04a820a"
+    },
+    {
+      "path": ".github/workflows/build-windows.yml",
+      "bytes": 2096,
+      "sha256": "446f25057b0aa0e31655a27c9bc3d3571fbd71e04d5743ce80698655759d4269"
+    },
+    {
+      "path": "docs/SERVER-CONTROL-VALIDATION.md",
+      "bytes": 1729,
+      "sha256": "c496694668856f14e3875ec6558afe24efa90da7ac19e52f1e584771ecc75cd3"
+    },
+    {
+      "path": "native/ServerControlHost/Program.cs",
+      "bytes": 10575,
+      "sha256": "b17299fd21a338a09849a02325a456f4ea89fa06cdfb4c1c050a2311f73ea89a"
+    },
+    {
+      "path": "native/ServerControlHost/ServerControlHost.csproj",
+      "bytes": 664,
+      "sha256": "01de06d2bff4c4ab3fb2e25ea845e82788940f83363925f5de99bd741ed59f15"
+    },
+    {
+      "path": "native/ServerControlPrep/VerifiedProcessHandle.cs",
+      "bytes": 9091,
+      "sha256": "acc1783f6d54cdb4385918fdb9faa93252e6298460525b925a12bcd33e0588f0"
+    },
+    {
+      "path": "src/lib/auxiliary-chain-plan-prep.js",
+      "bytes": 2386,
+      "sha256": "acbf1a768c79298bbe7d1372484873bafbdda48cf6a4ba132a54f735e275d4bb"
+    },
+    {
+      "path": "src/lib/chat-transport.js",
+      "bytes": 6515,
+      "sha256": "a15030b1b00565e4a18c09cb1892b9576909de9e951e232d6d2eba5fb5a1bce1"
+    },
+    {
+      "path": "src/lib/handle-stop-executor-prep.js",
+      "bytes": 7213,
+      "sha256": "334b6a7540c339d43dcda2bc3e430c6383741e88024305f1fc510726e576cfb6"
+    },
+    {
+      "path": "src/lib/integrated-server-control-prep.js",
+      "bytes": 5511,
+      "sha256": "1e57dd5d5fd4051ea1f27f3c57de0efbd74a2c80cf499ea6a44f70a4e893ad01"
+    },
+    {
+      "path": "src/lib/live-chain-plan-prep.js",
+      "bytes": 3647,
+      "sha256": "c18b4ef0351a7a067c072328da72116d162aea6647fc90b9a9105c936117f3b5"
+    },
+    {
+      "path": "src/lib/live-coordinator-prep.js",
+      "bytes": 2497,
+      "sha256": "d38926b4739ba79369ab2c27f14fcc04a5e250ecd1bb6ed5a75209a42612b83f"
+    },
+    {
+      "path": "src/lib/native-handle-client-prep.js",
+      "bytes": 10632,
+      "sha256": "bb2f7266b40d664fcee4463401414c0a241ab99df4466f9dfde9de4097d8058f"
+    },
+    {
+      "path": "src/lib/server-control-ipc-prep.js",
+      "bytes": 2609,
+      "sha256": "5e277325db66bf4e3fff525ffe64efa64d56a3e786411f3c41c2234d03922bf8"
+    },
+    {
+      "path": "src/lib/server-operation-journal-prep.js",
+      "bytes": 2985,
+      "sha256": "344cbed69d75b4931e43f21330c697e6156118cfea054a1e8ab6ff3730fd0d38"
+    },
+    {
+      "path": "src/lib/server-policy-prep.js",
+      "bytes": 2374,
+      "sha256": "4dd5ac6eb0777127fa6def837c7ce5fcba3246a1b3520a0b8536a7f0900c0222"
+    },
+    {
+      "path": "src/lib/server-policy-store-prep.js",
+      "bytes": 2439,
+      "sha256": "77c27533d5b41a27adbb4b826a366b00f7d7e370e70ac78a78a8e26192ab4a82"
+    },
+    {
+      "path": "src/lib/start-policy-adapter-prep.js",
+      "bytes": 2779,
+      "sha256": "0f7a515fe90fd61cbfb3b6bfb13d2b420998b73a31dff051b6fe37fb2f6bc601"
+    },
+    {
+      "path": "src/lib/stop-only-policy-adapter-prep.js",
+      "bytes": 2117,
+      "sha256": "4dcb3226523b1e351f329eea4a481ceb6b28e13af12bad66e4c67cee8adce204"
+    },
+    {
+      "path": "src/lib/windows-session-reader-prep.js",
+      "bytes": 1457,
+      "sha256": "9d654a38f022672f6a7317e8d6e5683b69df267fc89922e4cda24bd5978a78a3"
+    },
+    {
+      "path": "src/main.js",
+      "bytes": 73936,
+      "sha256": "99f82be9269f1a1c96c6227c88a4932fdf7661dfcc5b41fe4d896339185405c3"
+    },
+    {
+      "path": "src/widgets/chat/index.html",
+      "bytes": 35463,
+      "sha256": "ff861200703ddb28b029604bf90ba0551e298e481132cdb99df6247c6f7c2398"
+    },
+    {
+      "path": "tests/ci-native-server-control-integration.cjs",
+      "bytes": 14039,
+      "sha256": "c81daeac3d6733d6fbaa095c41ea6aec92f118fa20c89c58ed2e97bd28b0f358"
+    },
+    {
+      "path": "tests/fixtures/ci-owned-server-graph.cjs",
+      "bytes": 1692,
+      "sha256": "6094060145ea0323d734d33839cec3deecd0b83c06c8cafe6ea39f246769b657"
+    },
+    {
+      "path": "tests/fixtures/native-host-protocol-fixture.cjs",
+      "bytes": 3153,
+      "sha256": "41741946a153328c6b333ebcd9edca8d50e79ca6d0917538f10e85a8c408c3fa"
+    },
+    {
+      "path": "tests/integrated-server-control-unit.js",
+      "bytes": 10410,
+      "sha256": "565fd4c7c6ee9705be6480fa24f653c23804d973fc6e8c84426080d589aa004f"
+    },
+    {
+      "path": "tests/native-handle-client-unit.js",
+      "bytes": 7586,
+      "sha256": "c0c8f074c6f5ea5c9e38da1541e0621cab8d50bdbee0e65cba3357193d8f14bc"
+    },
+    {
+      "path": "tests/native-plan-precision-unit.js",
+      "bytes": 2232,
+      "sha256": "453ab335b9a92d3319716c80f6c8928aa9cbf9b59e6058f6565632a72935ba0c"
+    },
+    {
+      "path": "tests/server-control-ipc-unit.js",
+      "bytes": 3208,
+      "sha256": "13b83947b44fcabe4cab0d0d7616d0aba385f3b5ceff2fae19d9e7dab889c820"
+    },
+    {
+      "path": "validation/check-integration-hashes.cjs",
+      "bytes": 1036,
+      "sha256": "7b543f0f966fc1db5955fe282c11adf13b19c205fd524a54cb528233fe76794f"
+    },
+    {
+      "path": "validation/source-hashes.json",
+      "bytes": 411,
+      "sha256": "f17e35680b2ecb363e154e673ed625af4a1d69e87d2c04a8c8b74f7205f4513e"
+    },
+    {
+      "path": "validation/test-candidate.cjs",
+      "bytes": 4278,
+      "sha256": "889e93f8316ae66e11c8b2db1a18a46a700e172964ef853a7aa15348939f5081"
+    }
+  ]
+}

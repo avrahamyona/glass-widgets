@@ -1,16 +1,25 @@
-name: Build Windows
+name: Server control integration validation
 on:
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed validation commit
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: receive-native-validation-20261122
+  group: server-control-integration-20261122
   cancel-in-progress: false
 jobs:
-  native-runtime-and-receive-tests:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122' && github.event.repository.private == false
+  owned-native-integration:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122' && github.event.repository.private == false && github.sha == inputs.expected_sha
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      MSBUILDDISABLENODEREUSE: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,48 +28,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Verify reviewed source hashes and candidate behavior
+      - name: Verify all reviewed integration bytes
+        run: node validation/check-integration-hashes.cjs
+      - name: Preserve original receive-candidate checks
         run: node validation/test-candidate.cjs
-      - name: Transport loopback test
-        run: node tests/chat-transport-unit.js
-      - name: Transport recovery tests
-        run: node tests/chat-transport-recovery-unit.js
-      - name: Compile and test native source in Windows PowerShell
-        shell: powershell
-        run: ./native/ServerControlPrep/Test-CI-OwnedDummy.ps1
-      - name: Compile and test native source in PowerShell 7
-        shell: pwsh
-        run: ./native/ServerControlPrep/Test-CI-OwnedDummy.ps1
-  receive-package-only:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/receive-native-20261122' && github.event.repository.private == false
-    runs-on: windows-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Verify reviewed source hashes before independent packaging
-        run: node validation/test-candidate.cjs
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
-      - name: Build existing media helper for package
-        run: dotnet publish native/MediaBridge/MediaBridge.csproj -c Release -r win-x64 -o native/MediaBridge/publish
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Build existing cloud helper for package
+      - name: Run private transport fixture checks
+        run: node tests/native-handle-client-unit.js
+      - name: Run native precision checks
+        run: node tests/native-plan-precision-unit.js
+      - name: Run integrated policy and persistence fixture checks
+        run: node tests/integrated-server-control-unit.js
+      - name: Run IPC origin and response-boundary checks
+        run: node tests/server-control-ipc-unit.js
+      - name: Build test-owned native host using the existing runner SDK
         run: |
-          pip install -r native/CloudBridge/requirements.txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m PyInstaller --noconfirm --clean --onedir --name CloudBridge --collect-all pyicloud --collect-all keyrings --collect-all fido2 --collect-all tzdata --workpath native/CloudBridge/build --specpath native/CloudBridge --distpath native/CloudBridge/publish native/CloudBridge/bridge.py
-      - name: Install locked application dependencies
-        run: npm ci --no-audit --no-fund
-      - name: Build test-only installer without publishing
-        run: npm run dist
-      - name: Inspect transient installer and packaged candidate
-        run: node validation/check-package.cjs
+          dotnet --list-sdks
+          dotnet publish native/ServerControlHost/ServerControlHost.csproj -c Release -r win-x64 --self-contained true -o native/ServerControlHost/ci-publish --disable-build-servers -p:UseSharedCompilation=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+      - name: Verify the native bridge against only our own dummy graph
+        run: node tests/ci-native-server-control-integration.cjs

@@ -1,5 +1,15 @@
-# Keep the four reviewed source hashes byte-identical on Windows checkouts.
-src/main.js text eol=lf
-src/widgets/chat/index.html text eol=lf
-src/lib/chat-transport.js text eol=lf
-native/ServerControlPrep/VerifiedProcessHandle.cs text eol=lf
+/.gitattributes -text
+/.github/workflows/build-windows.yml -text
+/src/main.js -text
+/src/widgets/chat/index.html -text
+/src/lib/chat-transport.js -text
+/src/lib/*-prep.js -text
+/native/ServerControlPrep/VerifiedProcessHandle.cs -text
+/native/ServerControlHost/*.cs -text
+/native/ServerControlHost/*.csproj -text
+/tests/*server-control* -text
+/tests/native-handle-client-unit.js -text
+/tests/native-plan-precision-unit.js -text
+/tests/fixtures/*.cjs -text
+/validation/*integration* -text
+/docs/SERVER-CONTROL-VALIDATION.md -text
